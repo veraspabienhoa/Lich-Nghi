@@ -9,37 +9,39 @@ st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_
 @st.cache_data(ttl=300) # Làm mới dữ liệu mỗi 5 phút
 def load_data(url):
     try:
-        # Chuyển đổi link GDrive sang dạng tải trực tiếp
         file_id = url.split('/d/')[1].split('/')[0]
         direct_url = f"https://drive.google.com/uc?id={file_id}&export=download"
         
-        # Đọc cùng lúc 2 sheet để lấy cả lịch nghỉ và danh sách nhân viên
         xls = pd.read_excel(direct_url, sheet_name=['LichNghi', 'DanhSachNV'])
         df_lich = xls['LichNghi']
         df_nv = xls['DanhSachNV']
         
-        # ==========================================
-        # XỬ LÝ LỖI KHÔNG HIỂN THỊ DỮ LIỆU
-        # ==========================================
-        # 1. Cắt đúng 10 cột đầu tiên, bất kể có bị ẩn hay không
+        # 1. Chỉ lấy 10 cột đầu tiên
         df_lich = df_lich.iloc[:, :10]
         
-        # 2. Đặt lại tên cột cho chuẩn xác, tránh lỗi khoảng trắng thừa trong Excel
+        # 2. Đặt lại tên cột chuẩn xác
         df_lich.columns = [
             'Ngày', 'Tên nhân viên', 'Loại nghỉ', 'Chi tiết', 
             'Số ngày tính', 'Số ngày đã nghỉ trong tháng', 
             'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
         ]
         
-        # 3. Lọc bỏ các dòng rác trống không có dữ liệu Ngày
+        # ==========================================
+        # XỬ LÝ CHUẨN HÓA DỮ LIỆU ĐỂ TRÁNH LỖI TÀNG HÌNH
+        # ==========================================
+        # Ép máy tính hiểu định dạng ngày của Việt Nam (dayfirst=True)
+        df_lich['Ngày'] = pd.to_datetime(df_lich['Ngày'], dayfirst=True, errors='coerce').dt.date
+        
+        # Loại bỏ các dòng không chứa ngày tháng hợp lệ
         df_lich = df_lich.dropna(subset=['Ngày'])
         
-        # 4. Chuẩn hóa định dạng
-        df_lich['Ngày'] = pd.to_datetime(df_lich['Ngày'], errors='coerce').dt.date
-        df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'], errors='coerce').fillna(0)
+        # Xử lý cột Phạt: Bỏ dấu phẩy (,), bỏ dấu gạch (-) và khoảng trắng thừa trước khi chuyển thành số
+        df_lich['Phạt vi phạm'] = df_lich['Phạt vi phạm'].astype(str).str.replace(',', '').str.replace('-', '').str.strip()
         df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'], errors='coerce').fillna(0)
         
-        # Chuẩn hóa tên nhân viên (Loại bỏ các dòng trống)
+        # Đảm bảo Số ngày tính là số
+        df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'], errors='coerce').fillna(0)
+        
         df_nv = df_nv.dropna(subset=['Tên nhân viên'])
         
         return df_lich, df_nv
@@ -50,7 +52,7 @@ def load_data(url):
 # Link Google Drive
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
-with st.spinner("Đang kết nối tới máy chủ dữ liệu..."):
+with st.spinner("Đang kết nối tới kho dữ liệu..."):
     df_lich, df_nv = load_data(GDRIVE_LINK)
 
 if df_lich.empty or df_nv.empty:
@@ -72,7 +74,6 @@ if not st.session_state.logged_in:
         
         if submit:
             danh_sach_nhan_vien = df_nv['Tên nhân viên'].astype(str).str.strip().tolist()
-            
             is_valid_user = False
             user_chuan = ""
             

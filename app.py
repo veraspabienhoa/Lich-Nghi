@@ -3,96 +3,104 @@ import pandas as pd
 from datetime import date
 
 # Cấu hình trang hiển thị
-st.set_page_config(page_title="Bảng Tra Cứu Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Bảng Tra Cứu Lịch Nghỉ", page_icon="📅", layout="wide")
 
-# --- HÀM TẢI DỮ LIỆU ---
-@st.cache_data(ttl=300) # Cập nhật lại dữ liệu mỗi 5 phút nếu file Excel có thay đổi
-def load_data(file_path):
+# --- 1. HỆ THỐNG ĐĂNG NHẬP ---
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+# Nếu chưa đăng nhập, hiển thị form đăng nhập và chặn các nội dung bên dưới
+if not st.session_state.logged_in:
+    st.title("🔐 Đăng Nhập Hệ Thống")
+    with st.form("login_form"):
+        username = st.text_input("Tên đăng nhập")
+        password = st.text_input("Mật khẩu", type="password")
+        submit = st.form_submit_button("Đăng Nhập")
+        
+        if submit:
+            # Kiểm tra tài khoản và mật khẩu anh đã cung cấp
+            if username == "admin" and password == "32531235":
+                st.session_state.logged_in = True
+                st.rerun()
+            else:
+                st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
+    st.stop() # Dừng chạy các code bên dưới
+
+# --- 2. HÀM TẢI DỮ LIỆU TỪ GOOGLE DRIVE ---
+@st.cache_data(ttl=300) # Làm mới dữ liệu mỗi 5 phút
+def load_data(url):
     try:
-        # Chỉ đọc Sheet "LichNghi"
-        df = pd.read_excel(file_path, sheet_name="LichNghi")
+        # Chuyển đổi link GDrive sang dạng tải trực tiếp
+        file_id = url.split('/d/')[1].split('/')[0]
+        direct_url = f"https://drive.google.com/uc?id={file_id}&export=download"
         
-        # Chuyển đổi cột 'Ngày' sang định dạng date để dễ dàng so sánh
+        df = pd.read_excel(direct_url, sheet_name="LichNghi")
         df['Ngày'] = pd.to_datetime(df['Ngày']).dt.date
-        
-        # Đảm bảo Cột E (Số ngày tính) và Cột G (Phạt vi phạm) là dạng số để xét điều kiện
         df['Số ngày tính'] = pd.to_numeric(df['Số ngày tính'], errors='coerce').fillna(0)
         df['Phạt vi phạm'] = pd.to_numeric(df['Phạt vi phạm'], errors='coerce').fillna(0)
-        
         return df
     except Exception as e:
-        st.error(f"Lỗi khi đọc file: {e}\nHãy chắc chắn file 'LichNghi.xlsx' đang mở hoặc nằm cùng thư mục.")
+        st.error(f"Lỗi tải dữ liệu từ Google Drive: {e}")
         return pd.DataFrame()
 
-# Tên file Excel gốc
-FILE_NAME = "LichNghi.xlsx"
-df_lich = load_data(FILE_NAME)
+# Link Google Drive của anh
+GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
+
+with st.spinner("Đang tải dữ liệu từ Google Drive..."):
+    df_lich = load_data(GDRIVE_LINK)
 
 if df_lich.empty:
-    st.stop() # Dừng chạy nếu không có dữ liệu
+    st.stop()
 
-# --- GIAO DIỆN CHÍNH ---
-st.title("📊 Bảng Tra Cứu Tình Hình Nghỉ Phép")
+# --- 3. GIAO DIỆN CHÍNH (DASHBOARD) ---
+col_title, col_logout = st.columns([8, 2])
+with col_title:
+    st.title("📊 Bảng Tra Cứu Tình Hình Nghỉ Phép")
+with col_logout:
+    if st.button("🚪 Đăng xuất", use_container_width=True):
+        st.session_state.logged_in = False
+        st.rerun()
 
-# 1. BỘ LỌC THỜI GIAN
 st.subheader("🔍 Lọc Dữ Liệu")
 
 today = date.today()
 
-# Cho phép chọn 1 trong 3 chế độ xem
 filter_type = st.radio(
     "Chọn chế độ xem thời gian:", 
     ["Hôm nay", "Chọn ngày cụ thể", "Chọn khoảng thời gian"], 
     horizontal=True
 )
 
-# Xử lý logic chọn ngày
 if filter_type == "Hôm nay":
     start_date = today
     end_date = today
-    
 elif filter_type == "Chọn ngày cụ thể":
     start_date = st.date_input("Chọn ngày:", today)
     end_date = start_date
-    
 else:
-    # Trả về 1 tuple gồm 2 ngày (Bắt đầu, Kết thúc)
     date_range = st.date_input("Chọn từ ngày - đến ngày:", [today, today])
     if len(date_range) == 2:
         start_date, end_date = date_range
     else:
-        # Nếu người dùng mới click 1 ngày, tạm thời lấy ngày đó làm mốc
         start_date = date_range[0]
         end_date = date_range[0]
 
-# --- 2. XỬ LÝ LỌC & TÍNH TOÁN THEO YÊU CẦU ---
-
-# Lọc các dòng nằm trong khoảng thời gian đã chọn
+# Lọc & Phân loại
 mask_date = (df_lich['Ngày'] >= start_date) & (df_lich['Ngày'] <= end_date)
 filtered_df = df_lich[mask_date]
 
-# Phân loại theo định nghĩa của anh
-# Nghỉ có phép: Cột E (Số ngày tính) > 0
 co_phep_df = filtered_df[filtered_df['Số ngày tính'] > 0]
-
-# Nghỉ không phép: Cột E (Số ngày tính) == 0 VÀ Cột G (Phạt vi phạm) > 0
 khong_phep_df = filtered_df[(filtered_df['Số ngày tính'] == 0) & (filtered_df['Phạt vi phạm'] > 0)]
 
-num_co_phep = len(co_phep_df)
-num_khong_phep = len(khong_phep_df)
-
-# --- 3. HIỂN THỊ CHỈ SỐ (KPI) ---
+# Hiển thị số liệu
 st.markdown("---")
 col1, col2, col3 = st.columns(3)
-
-# Dùng thẻ metric để hiển thị số lớn cho trực quan
 col1.metric("Tổng số lượt nghỉ (trong giai đoạn)", len(filtered_df))
-col2.metric("✅ Số người nghỉ CÓ phép", num_co_phep)
-col3.metric("❌ Số người nghỉ KHÔNG phép", num_khong_phep)
-
+col2.metric("✅ Số người nghỉ CÓ phép", len(co_phep_df))
+col3.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
 st.markdown("---")
 
-# --- 4. HIỂN THỊ CHI TIẾT BẰNG TAB ---
+# Hiển thị bảng
 st.subheader(f"Chi tiết danh sách (Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')})")
 
 tab1, tab2, tab3 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ KHÔNG phép"])

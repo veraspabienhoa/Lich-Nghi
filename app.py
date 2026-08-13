@@ -18,6 +18,11 @@ def load_data(url):
         df_lich = xls['LichNghi']
         df_nv = xls['DanhSachNV']
         
+        # ==========================================
+        # CHỈ LẤY 10 CỘT ĐẦU TIÊN CỦA SHEET LỊCH NGHỈ
+        # ==========================================
+        df_lich = df_lich.iloc[:, :10]
+        
         # Chuẩn hóa dữ liệu lịch nghỉ
         df_lich['Ngày'] = pd.to_datetime(df_lich['Ngày']).dt.date
         df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'], errors='coerce').fillna(0)
@@ -73,7 +78,6 @@ if not st.session_state.logged_in:
                 st.session_state.current_user = user_chuan
                 st.rerun()
             elif username_input == "admin" and password_input == "32531235":
-                # Giữ lại một tài khoản admin bí mật dành riêng cho quản trị
                 st.session_state.logged_in = True
                 st.session_state.current_user = "Quản Trị Viên"
                 st.rerun()

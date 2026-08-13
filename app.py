@@ -3,30 +3,9 @@ import pandas as pd
 from datetime import date
 
 # Cấu hình trang hiển thị
-st.set_page_config(page_title="Bảng Tra Cứu Lịch Nghỉ", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
 
-# --- 1. HỆ THỐNG ĐĂNG NHẬP ---
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-# Nếu chưa đăng nhập, hiển thị form đăng nhập và chặn các nội dung bên dưới
-if not st.session_state.logged_in:
-    st.title("🔐 Đăng Nhập Hệ Thống")
-    with st.form("login_form"):
-        username = st.text_input("Tên đăng nhập")
-        password = st.text_input("Mật khẩu", type="password")
-        submit = st.form_submit_button("Đăng Nhập")
-        
-        if submit:
-            # Kiểm tra tài khoản và mật khẩu anh đã cung cấp
-            if username == "admin" and password == "32531235":
-                st.session_state.logged_in = True
-                st.rerun()
-            else:
-                st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
-    st.stop() # Dừng chạy các code bên dưới
-
-# --- 2. HÀM TẢI DỮ LIỆU TỪ GOOGLE DRIVE ---
+# --- 1. HÀM TẢI DỮ LIỆU TỪ GOOGLE DRIVE ---
 @st.cache_data(ttl=300) # Làm mới dữ liệu mỗi 5 phút
 def load_data(url):
     try:
@@ -34,31 +13,82 @@ def load_data(url):
         file_id = url.split('/d/')[1].split('/')[0]
         direct_url = f"https://drive.google.com/uc?id={file_id}&export=download"
         
-        df = pd.read_excel(direct_url, sheet_name="LichNghi")
-        df['Ngày'] = pd.to_datetime(df['Ngày']).dt.date
-        df['Số ngày tính'] = pd.to_numeric(df['Số ngày tính'], errors='coerce').fillna(0)
-        df['Phạt vi phạm'] = pd.to_numeric(df['Phạt vi phạm'], errors='coerce').fillna(0)
-        return df
+        # Đọc cùng lúc 2 sheet để lấy cả lịch nghỉ và danh sách nhân viên
+        xls = pd.read_excel(direct_url, sheet_name=['LichNghi', 'DanhSachNV'])
+        df_lich = xls['LichNghi']
+        df_nv = xls['DanhSachNV']
+        
+        # Chuẩn hóa dữ liệu lịch nghỉ
+        df_lich['Ngày'] = pd.to_datetime(df_lich['Ngày']).dt.date
+        df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'], errors='coerce').fillna(0)
+        df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'], errors='coerce').fillna(0)
+        
+        # Chuẩn hóa tên nhân viên (Loại bỏ các dòng trống)
+        df_nv = df_nv.dropna(subset=['Tên nhân viên'])
+        
+        return df_lich, df_nv
     except Exception as e:
         st.error(f"Lỗi tải dữ liệu từ Google Drive: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
-# Link Google Drive của anh
+# Link Google Drive
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
 with st.spinner("Đang tải dữ liệu từ Google Drive..."):
-    df_lich = load_data(GDRIVE_LINK)
+    df_lich, df_nv = load_data(GDRIVE_LINK)
 
-if df_lich.empty:
+if df_lich.empty or df_nv.empty:
+    st.stop()
+
+# --- 2. HỆ THỐNG ĐĂNG NHẬP ---
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "current_user" not in st.session_state:
+    st.session_state.current_user = ""
+
+if not st.session_state.logged_in:
+    st.title("🔐 Đăng Nhập Hệ Thống")
+    with st.form("login_form"):
+        username_input = st.text_input("Tên đăng nhập (Tên nhân viên)").strip()
+        password_input = st.text_input("Mật khẩu", type="password")
+        submit = st.form_submit_button("Đăng Nhập")
+        
+        if submit:
+            # Lấy danh sách nhân viên từ Excel và đưa về chữ thường để dễ so sánh
+            danh_sach_nhan_vien = df_nv['Tên nhân viên'].astype(str).str.strip().tolist()
+            
+            is_valid_user = False
+            user_chuan = ""
+            
+            # Đối chiếu tên đăng nhập (Không phân biệt hoa thường)
+            for name in danh_sach_nhan_vien:
+                if username_input.lower() == name.lower():
+                    is_valid_user = True
+                    user_chuan = name # Lấy lại tên chuẩn có viết hoa trong file
+                    break
+            
+            # Kiểm tra tài khoản và mật khẩu
+            if is_valid_user and password_input == "123456":
+                st.session_state.logged_in = True
+                st.session_state.current_user = user_chuan
+                st.rerun()
+            elif username_input == "admin" and password_input == "32531235":
+                # Giữ lại một tài khoản admin bí mật dành riêng cho quản trị
+                st.session_state.logged_in = True
+                st.session_state.current_user = "Quản Trị Viên"
+                st.rerun()
+            else:
+                st.error("❌ Sai tên đăng nhập hoặc mật khẩu! (Mật khẩu mặc định là 123456)")
     st.stop()
 
 # --- 3. GIAO DIỆN CHÍNH (DASHBOARD) ---
 col_title, col_logout = st.columns([8, 2])
 with col_title:
-    st.title("📊 Bảng Tra Cứu Tình Hình Nghỉ Phép")
+    st.title(f"📊 Bảng Tra Cứu Tình Hình Nghỉ Phép - {st.session_state.current_user}")
 with col_logout:
     if st.button("🚪 Đăng xuất", use_container_width=True):
         st.session_state.logged_in = False
+        st.session_state.current_user = ""
         st.rerun()
 
 st.subheader("🔍 Lọc Dữ Liệu")

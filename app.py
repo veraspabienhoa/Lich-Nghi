@@ -19,12 +19,23 @@ def load_data(url):
         df_nv = xls['DanhSachNV']
         
         # ==========================================
-        # CHỈ LẤY 10 CỘT ĐẦU TIÊN CỦA SHEET LỊCH NGHỈ
+        # XỬ LÝ LỖI KHÔNG HIỂN THỊ DỮ LIỆU
         # ==========================================
+        # 1. Cắt đúng 10 cột đầu tiên, bất kể có bị ẩn hay không
         df_lich = df_lich.iloc[:, :10]
         
-        # Chuẩn hóa dữ liệu lịch nghỉ
-        df_lich['Ngày'] = pd.to_datetime(df_lich['Ngày']).dt.date
+        # 2. Đặt lại tên cột cho chuẩn xác, tránh lỗi khoảng trắng thừa trong Excel
+        df_lich.columns = [
+            'Ngày', 'Tên nhân viên', 'Loại nghỉ', 'Chi tiết', 
+            'Số ngày tính', 'Số ngày đã nghỉ trong tháng', 
+            'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
+        ]
+        
+        # 3. Lọc bỏ các dòng rác trống không có dữ liệu Ngày
+        df_lich = df_lich.dropna(subset=['Ngày'])
+        
+        # 4. Chuẩn hóa định dạng
+        df_lich['Ngày'] = pd.to_datetime(df_lich['Ngày'], errors='coerce').dt.date
         df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'], errors='coerce').fillna(0)
         df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'], errors='coerce').fillna(0)
         
@@ -39,10 +50,11 @@ def load_data(url):
 # Link Google Drive
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
-with st.spinner("Đang tải dữ liệu từ Google Drive..."):
+with st.spinner("Đang kết nối tới máy chủ dữ liệu..."):
     df_lich, df_nv = load_data(GDRIVE_LINK)
 
 if df_lich.empty or df_nv.empty:
+    st.warning("Hệ thống chưa tìm thấy dữ liệu. Vui lòng kiểm tra lại cấu trúc file Excel.")
     st.stop()
 
 # --- 2. HỆ THỐNG ĐĂNG NHẬP ---
@@ -59,20 +71,17 @@ if not st.session_state.logged_in:
         submit = st.form_submit_button("Đăng Nhập")
         
         if submit:
-            # Lấy danh sách nhân viên từ Excel và đưa về chữ thường để dễ so sánh
             danh_sach_nhan_vien = df_nv['Tên nhân viên'].astype(str).str.strip().tolist()
             
             is_valid_user = False
             user_chuan = ""
             
-            # Đối chiếu tên đăng nhập (Không phân biệt hoa thường)
             for name in danh_sach_nhan_vien:
                 if username_input.lower() == name.lower():
                     is_valid_user = True
-                    user_chuan = name # Lấy lại tên chuẩn có viết hoa trong file
+                    user_chuan = name 
                     break
             
-            # Kiểm tra tài khoản và mật khẩu
             if is_valid_user and password_input == "123456":
                 st.session_state.logged_in = True
                 st.session_state.current_user = user_chuan

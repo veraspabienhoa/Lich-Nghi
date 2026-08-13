@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 from datetime import date
+import requests
+import io
 
 # Cấu hình trang hiển thị
 st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
@@ -13,8 +15,14 @@ def load_data(url):
         file_id = url.split('/d/')[1].split('/')[0]
         direct_url = f"https://drive.google.com/uc?id={file_id}&export=download"
         
-        # ĐỌC FILE .XLSB bằng engine pyxlsb
-        xls = pd.read_excel(direct_url, sheet_name=['LichNghi', 'DanhSachNV'], engine='pyxlsb')
+        # --- CẢI TIẾN: TẢI FILE VÀO BỘ NHỚ TẠM TRƯỚC KHI ĐỌC ---
+        response = requests.get(direct_url)
+        response.raise_for_status() # Kiểm tra xem link có bị lỗi không
+        
+        file_content = io.BytesIO(response.content)
+        
+        # ĐỌC FILE .XLSB bằng engine pyxlsb từ bộ nhớ tạm
+        xls = pd.read_excel(file_content, sheet_name=['LichNghi', 'DanhSachNV'], engine='pyxlsb')
         df_lich = xls['LichNghi']
         df_nv = xls['DanhSachNV']
         
@@ -98,7 +106,7 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.current_user = user_chuan
                 st.rerun()
-            elif username_input == "admin" and password_input == "admin": # CẬP NHẬT MẬT KHẨU ADMIN
+            elif username_input == "admin" and password_input == "admin": 
                 st.session_state.logged_in = True
                 st.session_state.current_user = "Quản Trị Viên"
                 st.rerun()

@@ -6,9 +6,10 @@ from datetime import date
 st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
 
 # --- 1. HÀM TẢI DỮ LIỆU TỪ GOOGLE DRIVE ---
-@st.cache_data(ttl=300) # Làm mới dữ liệu mỗi 5 phút
+@st.cache_data(ttl=300) # Làm mới dữ liệu mỗi 5 phút (Sẽ bị ghi đè nếu bấm nút Tải Lại)
 def load_data(url):
     try:
+        # Chuyển đổi link GDrive
         file_id = url.split('/d/')[1].split('/')[0]
         direct_url = f"https://drive.google.com/uc?id={file_id}&export=download"
         
@@ -16,31 +17,33 @@ def load_data(url):
         df_lich = xls['LichNghi']
         df_nv = xls['DanhSachNV']
         
-        # 1. Chỉ lấy 10 cột đầu tiên
+        # Chỉ lấy 10 cột đầu tiên
         df_lich = df_lich.iloc[:, :10]
         
-        # 2. Đặt lại tên cột chuẩn xác
+        # Đặt lại tên cột chuẩn xác
         df_lich.columns = [
             'Ngày', 'Tên nhân viên', 'Loại nghỉ', 'Chi tiết', 
             'Số ngày tính', 'Số ngày đã nghỉ trong tháng', 
             'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
         ]
         
-        # ==========================================
-        # XỬ LÝ CHUẨN HÓA DỮ LIỆU ĐỂ TRÁNH LỖI TÀNG HÌNH
-        # ==========================================
-        # Ép máy tính hiểu định dạng ngày của Việt Nam (dayfirst=True)
-        df_lich['Ngày'] = pd.to_datetime(df_lich['Ngày'], dayfirst=True, errors='coerce').dt.date
-        
-        # Loại bỏ các dòng không chứa ngày tháng hợp lệ
+        # --- HÀM BÓC TÁCH NGÀY THÁNG CỰC MẠNH ---
+        def safe_date_parse(val):
+            try:
+                if pd.isna(val): return pd.NaT
+                if hasattr(val, 'date'): return val.date() # Nếu file rớt đúng dạng datetime
+                # Ép kiểu chuỗi, xóa toàn bộ khoảng trắng thừa, lấy cụm ngày
+                s = str(val).strip().split(' ')[0]
+                return pd.to_datetime(s, dayfirst=True).date()
+            except:
+                return pd.NaT
+                
+        df_lich['Ngày'] = df_lich['Ngày'].apply(safe_date_parse)
         df_lich = df_lich.dropna(subset=['Ngày'])
         
-        # Xử lý cột Phạt: Bỏ dấu phẩy (,), bỏ dấu gạch (-) và khoảng trắng thừa trước khi chuyển thành số
-        df_lich['Phạt vi phạm'] = df_lich['Phạt vi phạm'].astype(str).str.replace(',', '').str.replace('-', '').str.strip()
-        df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'], errors='coerce').fillna(0)
-        
-        # Đảm bảo Số ngày tính là số
-        df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'], errors='coerce').fillna(0)
+        # Làm sạch số liệu (Xóa dấu phẩy, khoảng trắng, gạch ngang)
+        df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
+        df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         
         df_nv = df_nv.dropna(subset=['Tên nhân viên'])
         
@@ -52,11 +55,14 @@ def load_data(url):
 # Link Google Drive
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
-with st.spinner("Đang kết nối tới kho dữ liệu..."):
+with st.spinner("Đang kết nối tới máy chủ dữ liệu..."):
     df_lich, df_nv = load_data(GDRIVE_LINK)
 
 if df_lich.empty or df_nv.empty:
     st.warning("Hệ thống chưa tìm thấy dữ liệu. Vui lòng kiểm tra lại cấu trúc file Excel.")
+    if st.button("🔄 Tải lại dữ liệu (Xóa Cache)"):
+        st.cache_data.clear()
+        st.rerun()
     st.stop()
 
 # --- 2. HỆ THỐNG ĐĂNG NHẬP ---
@@ -67,6 +73,12 @@ if "current_user" not in st.session_state:
 
 if not st.session_state.logged_in:
     st.title("🔐 Đăng Nhập Hệ Thống")
+    
+    # Nút bấm xóa bộ nhớ đệm nếu dữ liệu chưa cập nhật
+    if st.button("🔄 Tải Lại Dữ Liệu Mới Nhất Từ GDrive", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+        
     with st.form("login_form"):
         username_input = st.text_input("Tên đăng nhập (Tên nhân viên)").strip()
         password_input = st.text_input("Mật khẩu", type="password")
@@ -104,17 +116,28 @@ with col_logout:
         st.session_state.logged_in = False
         st.session_state.current_user = ""
         st.rerun()
+        
+st.markdown("---")
 
-st.subheader("🔍 Lọc Dữ Liệu")
+# Bộ chia 2 cột cho phần lọc và nút làm mới
+col_filter, col_refresh = st.columns([8, 2])
 
-today = date.today()
+with col_filter:
+    st.subheader("🔍 Lọc Dữ Liệu")
+    today = date.today()
+    filter_type = st.radio(
+        "Chọn chế độ xem thời gian:", 
+        ["Hôm nay", "Chọn ngày cụ thể", "Chọn khoảng thời gian"], 
+        horizontal=True
+    )
 
-filter_type = st.radio(
-    "Chọn chế độ xem thời gian:", 
-    ["Hôm nay", "Chọn ngày cụ thể", "Chọn khoảng thời gian"], 
-    horizontal=True
-)
+with col_refresh:
+    # Nút bấm thủ công để ép ứng dụng lấy file mới nhất thay vì dùng file cũ
+    if st.button("🔄 Tải Lại Dữ Liệu", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
+# Xử lý thời gian lọc
 if filter_type == "Hôm nay":
     start_date = today
     end_date = today
@@ -146,6 +169,14 @@ st.markdown("---")
 
 # Hiển thị bảng
 st.subheader(f"Chi tiết danh sách (Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')})")
+
+# Tính năng hỗ trợ chẩn đoán lỗi nếu bảng vẫn trống
+if filtered_df.empty:
+    available_dates = df_lich['Ngày'].dropna().unique()
+    if len(available_dates) > 0:
+        available_dates = sorted(available_dates, reverse=True)[:5]
+        dates_str = ", ".join([d.strftime('%d/%m/%Y') for d in available_dates])
+        st.info(f"💡 Hệ thống hiện không thấy ai nghỉ vào ngày {start_date.strftime('%d/%m/%Y')}.\n\nCác ngày đang có dữ liệu trong file Excel: **{dates_str}**")
 
 tab1, tab2, tab3 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ KHÔNG phép"])
 

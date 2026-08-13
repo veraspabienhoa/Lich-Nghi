@@ -6,14 +6,15 @@ from datetime import date
 st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
 
 # --- 1. HÀM TẢI DỮ LIỆU TỪ GOOGLE DRIVE ---
-@st.cache_data(ttl=300) # Làm mới dữ liệu mỗi 5 phút (Sẽ bị ghi đè nếu bấm nút Tải Lại)
+@st.cache_data(ttl=300) 
 def load_data(url):
     try:
         # Chuyển đổi link GDrive
         file_id = url.split('/d/')[1].split('/')[0]
         direct_url = f"https://drive.google.com/uc?id={file_id}&export=download"
         
-        xls = pd.read_excel(direct_url, sheet_name=['LichNghi', 'DanhSachNV'])
+        # ĐỌC FILE .XLSB bằng engine pyxlsb
+        xls = pd.read_excel(direct_url, sheet_name=['LichNghi', 'DanhSachNV'], engine='pyxlsb')
         df_lich = xls['LichNghi']
         df_nv = xls['DanhSachNV']
         
@@ -27,12 +28,11 @@ def load_data(url):
             'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
         ]
         
-        # --- HÀM BÓC TÁCH NGÀY THÁNG CỰC MẠNH ---
+        # --- HÀM BÓC TÁCH NGÀY THÁNG ---
         def safe_date_parse(val):
             try:
                 if pd.isna(val): return pd.NaT
-                if hasattr(val, 'date'): return val.date() # Nếu file rớt đúng dạng datetime
-                # Ép kiểu chuỗi, xóa toàn bộ khoảng trắng thừa, lấy cụm ngày
+                if hasattr(val, 'date'): return val.date() 
                 s = str(val).strip().split(' ')[0]
                 return pd.to_datetime(s, dayfirst=True).date()
             except:
@@ -41,7 +41,7 @@ def load_data(url):
         df_lich['Ngày'] = df_lich['Ngày'].apply(safe_date_parse)
         df_lich = df_lich.dropna(subset=['Ngày'])
         
-        # Làm sạch số liệu (Xóa dấu phẩy, khoảng trắng, gạch ngang)
+        # Làm sạch số liệu
         df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         
@@ -52,7 +52,7 @@ def load_data(url):
         st.error(f"Lỗi tải dữ liệu từ Google Drive: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-# Link Google Drive
+# Link Google Drive (vẫn dùng link cũ của anh)
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
 with st.spinner("Đang kết nối tới máy chủ dữ liệu..."):
@@ -74,7 +74,6 @@ if "current_user" not in st.session_state:
 if not st.session_state.logged_in:
     st.title("🔐 Đăng Nhập Hệ Thống")
     
-    # Nút bấm xóa bộ nhớ đệm nếu dữ liệu chưa cập nhật
     if st.button("🔄 Tải Lại Dữ Liệu Mới Nhất Từ GDrive", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -99,7 +98,7 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.current_user = user_chuan
                 st.rerun()
-            elif username_input == "admin" and password_input == "32531235":
+            elif username_input == "admin" and password_input == "admin": # CẬP NHẬT MẬT KHẨU ADMIN
                 st.session_state.logged_in = True
                 st.session_state.current_user = "Quản Trị Viên"
                 st.rerun()
@@ -119,7 +118,6 @@ with col_logout:
         
 st.markdown("---")
 
-# Bộ chia 2 cột cho phần lọc và nút làm mới
 col_filter, col_refresh = st.columns([8, 2])
 
 with col_filter:
@@ -132,12 +130,10 @@ with col_filter:
     )
 
 with col_refresh:
-    # Nút bấm thủ công để ép ứng dụng lấy file mới nhất thay vì dùng file cũ
     if st.button("🔄 Tải Lại Dữ Liệu", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-# Xử lý thời gian lọc
 if filter_type == "Hôm nay":
     start_date = today
     end_date = today
@@ -170,7 +166,6 @@ st.markdown("---")
 # Hiển thị bảng
 st.subheader(f"Chi tiết danh sách (Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')})")
 
-# Tính năng hỗ trợ chẩn đoán lỗi nếu bảng vẫn trống
 if filtered_df.empty:
     available_dates = df_lich['Ngày'].dropna().unique()
     if len(available_dates) > 0:

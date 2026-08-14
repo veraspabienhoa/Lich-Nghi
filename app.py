@@ -1,24 +1,54 @@
 import streamlit as st
 import pandas as pd
 from datetime import date
-import urllib.parse
+import requests
+import os
 
+# --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
 
-# --- HÀM LẤY DỮ LIỆU CHUẨN XÁC TỪ GOOGLE DRIVE ---
+# --- HÀM TẢI FILE TỪ GOOGLE DRIVE CHỐNG CHẶN ---
+def download_file_from_google_drive(id, destination):
+    URL = "https://docs.google.com/uc?export=download"
+    session = requests.Session()
+    response = session.get(URL, params={'id': id}, stream=True)
+    
+    # Xử lý cảnh báo quét virus của Google với file lớn
+    token = None
+    for key, value in response.cookies.items():
+        if key.startswith('download_warning'):
+            token = value
+            break
+            
+    if token:
+        params = {'id': id, 'confirm': token}
+        response = session.get(URL, params=params, stream=True)
+        
+    with open(destination, "wb") as f:
+        for chunk in response.iter_content(32768):
+            if chunk:
+                f.write(chunk)
+
+# --- HÀM LẤY VÀ XỬ LÝ DỮ LIỆU ---
 @st.cache_data(ttl=60)
-def load_data_from_gdrive(url):
+def load_data(url):
     try:
         file_id = url.split('/d/')[1].split('/')[0]
+        temp_file = "temp_lichnghi.xlsb"
         
-        # Link tải dạng file CSV thuần túy giúp chống mọi lỗi định dạng Excel
-        csv_url_lich = f"https://docs.google.com/spreadsheets/d/{file_id}/gviz/tq?tqx=out:csv&sheet={urllib.parse.quote('LichNghi')}"
-        csv_url_nv = f"https://docs.google.com/spreadsheets/d/{file_id}/gviz/tq?tqx=out:csv&sheet={urllib.parse.quote('DanhSachNV')}"
+        # Tải file về máy chủ
+        download_file_from_google_drive(file_id, temp_file)
         
-        # 1. Đọc sheet Lịch Nghỉ
-        df_lich = pd.read_csv(csv_url_lich)
+        # Đọc file bằng pyxlsb (bỏ qua mọi form đăng nhập VBA)
+        xls = pd.read_excel(temp_file, sheet_name=['LichNghi', 'DanhSachNV'], engine='pyxlsb')
+        df_lich = xls['LichNghi']
+        df_nv = xls['DanhSachNV']
         
-        # Chỉ lấy 10 cột đầu và đặt tên chuẩn
+        # Xóa file tạm
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+            
+        # Chuẩn hóa 10 cột đầu
         df_lich = df_lich.iloc[:, :10]
         df_lich.columns = [
             'Ngày', 'Tên nhân viên', 'Loại nghỉ', 'Chi tiết', 
@@ -26,10 +56,10 @@ def load_data_from_gdrive(url):
             'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
         ]
         
-        # Xử lý ngày tháng
         def safe_date_parse(val):
             try:
                 if pd.isna(val): return pd.NaT
+                if hasattr(val, 'date'): return val.date() 
                 s = str(val).strip().split(' ')[0]
                 return pd.to_datetime(s, dayfirst=True).date()
             except:
@@ -38,33 +68,30 @@ def load_data_from_gdrive(url):
         df_lich['Ngày'] = df_lich['Ngày'].apply(safe_date_parse)
         df_lich = df_lich.dropna(subset=['Ngày'])
         
-        # Xử lý số liệu
         df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         
-        # 2. Đọc sheet Danh sách nhân viên
-        df_nv = pd.read_csv(csv_url_nv)
         df_nv = df_nv.dropna(subset=['Tên nhân viên'])
         
         return df_lich, df_nv
     except Exception as e:
-        st.error(f"Lỗi tải dữ liệu. Vui lòng đảm bảo Link Share đã bật 'Bất kỳ ai cũng có thể xem'. Chi tiết: {e}")
+        st.error(f"Lỗi đọc dữ liệu: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-# LINK GOOGLE DRIVE GỐC CỦA ANH
+# Link gốc
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
-with st.spinner("Đang kết nối kho dữ liệu..."):
-    df_lich, df_nv = load_data_from_gdrive(GDRIVE_LINK)
+with st.spinner("Đang tải dữ liệu từ Google Drive..."):
+    df_lich, df_nv = load_data(GDRIVE_LINK)
 
 if df_lich.empty or df_nv.empty:
-    st.warning("Không tìm thấy dữ liệu. Hãy kiểm tra lại file Excel.")
+    st.warning("Hệ thống chưa tìm thấy dữ liệu.")
     if st.button("🔄 Tải lại dữ liệu"):
         st.cache_data.clear()
         st.rerun()
     st.stop()
 
-# --- HỆ THỐNG ĐĂNG NHẬP ---
+# --- HỆ THỐNG ĐĂNG NHẬP TRÊN WEB ---
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "current_user" not in st.session_state:

@@ -34,16 +34,13 @@ def load_data():
     # Tải danh sách NV từ sheet Mật khẩu
     rows_nv = client.open_by_key(SHEET_MAT_KHAU_ID).worksheet("Sheet1").get_all_values()
     df_nv = pd.DataFrame(rows_nv[1:], columns=rows_nv[0])
-    
-    # Chuẩn hóa tên cột để tránh lỗi KeyError
     df_nv.columns = [str(c).strip() for c in df_nv.columns]
     
-    # Tải quy tắc từ sheet LoaiNghi
-    rows_rule = client.open_by_key(SHEET_DU_PHONG_ID).worksheet("LoaiNghi").get_all_values()
-    df_rule = pd.DataFrame(rows_rule[1:], columns=rows_rule[0])
-    df_rule.columns = [str(c).strip() for c in df_rule.columns]
+    # Tải quy tắc từ sheet LoaiNghi (lấy dạng mảng thô để không bị lỗi KeyError với tên cột)
+    sheet_rule = client.open_by_key(SHEET_DU_PHONG_ID).worksheet("LoaiNghi")
+    rule_values = sheet_rule.get_all_values()
     
-    return df_nv, df_rule
+    return df_nv, rule_values
 
 # --- HỆ THỐNG ĐĂNG NHẬP ---
 if "logged_in" not in st.session_state: st.session_state.logged_in = False
@@ -52,12 +49,11 @@ if not st.session_state.logged_in:
     st.title("🔐 Đăng Nhập Hệ Thống")
     df_nv, _ = load_data()
     
-    # Xác định tên cột nhân viên và mật khẩu linh hoạt
     col_ten = [c for c in df_nv.columns if 'tên' in c.lower() or 'nhân viên' in c.lower()]
-    col_ten = col_ten[0] if col_ten else df_nv.columns[1] # Thường là cột B (index 1)
+    col_ten = col_ten[0] if col_ten else df_nv.columns[1]
     
     col_mk = [c for c in df_nv.columns if 'mật khẩu' in c.lower() or 'pass' in c.lower()]
-    col_mk = col_mk[0] if col_mk else df_nv.columns[2] # Thường là cột C (index 2)
+    col_mk = col_mk[0] if col_mk else df_nv.columns[2]
     
     col_role = [c for c in df_nv.columns if 'phân quyền' in c.lower() or 'role' in c.lower()]
     col_role = col_role[0] if col_role else df_nv.columns[3] if len(df_nv.columns) > 3 else col_mk
@@ -83,60 +79,70 @@ if st.button("🚪 Đăng xuất"):
     st.session_state.logged_in = False
     st.rerun()
 
-df_nv, df_rule = load_data()
+df_nv, rule_values = load_data()
 col_ten_nv = [c for c in df_nv.columns if 'tên' in c.lower() or 'nhân viên' in c.lower()]
 col_ten_nv = col_ten_nv[0] if col_ten_nv else df_nv.columns[1]
 
 # --- NHẬP LỊCH NGHỈ ---
 with st.expander("📝 Nhập lịch nghỉ mới", expanded=True):
     rules = {}
-    for _, r in df_rule.iterrows():
-        # r[1]: Lý do, r[2]: Loại nghỉ, r[3]: Giá trị, r[7:]: Quyền (từ cột H)
-        if len(r) > 1 and str(r[1]).strip():
-            rules[str(r[1]).strip()] = {
-                "loai": str(r[2]).lower() if len(r) > 2 else "", 
-                "val": r[3] if len(r) > 3 else 0, 
-                "allowed": [str(x).lower().strip() for x in r.iloc[7:] if str(x).strip()] if len(r) > 7 else []
+    # Bỏ qua dòng tiêu đề (index 0) của sheet LoaiNghi
+    for row in rule_values[1:]:
+        if len(row) > 1 and str(row[1]).strip():
+            ly_do = str(row[1]).strip()
+            loai_nghi = str(row[2]).lower() if len(row) > 2 else ""
+            val = row[3] if len(row) > 3 else 0
+            # Lấy danh sách user có quyền từ cột H trở đi (index 7)
+            allowed = [str(x).lower().strip() for x in row[7:] if str(x).strip()] if len(row) > 7 else []
+            
+            rules[ly_do] = {
+                "loai": loai_nghi,
+                "val": val,
+                "allowed": allowed
             }
     
-    c1, c2, c3 = st.columns(3)
-    list_nv = df_nv[col_ten_nv].dropna().astype(str).str.strip().tolist()
-    nv = c1.selectbox("Chọn nhân viên", list_nv)
-    ngay = c2.date_input("Chọn ngày nghỉ")
-    loai = c3.selectbox("Chọn loại nghỉ", list(rules.keys()))
-    
-    # Kiểm tra phân quyền từ cột H (User có quyền)
-    allowed_list = rules[loai]['allowed']
-    if allowed_list and st.session_state.role not in allowed_list and st.session_state.role != "admin":
-        st.error(f"🚫 Bạn ({st.session_state.role}) không có quyền nhập loại nghỉ: {loai}")
+    if not rules:
+        st.warning("⚠️ Không tìm thấy quy tắc nào trong sheet LoaiNghi.")
     else:
-        is_khong_phep = "không phép" in rules[loai]['loai']
-        can_book = True
+        c1, c2, c3 = st.columns(3)
+        list_nv = df_nv[col_ten_nv].dropna().astype(str).str.strip().tolist()
+        nv = c1.selectbox("Chọn nhân viên", list_nv)
+        ngay = c2.date_input("Chọn ngày nghỉ")
+        loai = c3.selectbox("Chọn loại nghỉ", list(rules.keys()))
         
-        if not is_khong_phep:
-            client = get_gspread_client()
-            lich_data = client.open_by_key(SHEET_DU_PHONG_ID).worksheet("Sheet1").get_all_values()
-            if len(lich_data) > 1:
-                df_lich = pd.DataFrame(lich_data[1:], columns=lich_data[0])
-                count_today = len(df_lich[df_lich['Ngày'] == str(ngay)])
-                limit = 2 if ngay.weekday() >= 5 else 5
-                
-                if count_today >= limit:
-                    st.warning(f"⚠️ Đã đạt giới hạn {limit} người nghỉ (Có phép) cho ngày này!")
-                    can_book = False
-        
-        if can_book:
-            chitiet = st.text_input("Chi tiết/Ghi chú")
-            if st.button("💾 Xác nhận và Ghi dữ liệu"):
+        # Kiểm tra phân quyền từ cột H
+        allowed_list = rules[loai]['allowed']
+        if allowed_list and st.session_state.role not in allowed_list and st.session_state.role != "admin":
+            st.error(f"🚫 Bạn ({st.session_state.role}) không có quyền nhập loại nghỉ: {loai}")
+        else:
+            is_khong_phep = "không phép" in rules[loai]['loai']
+            can_book = True
+            
+            # Nếu là có phép thì kiểm tra giới hạn số người nghỉ trong ngày
+            if not is_khong_phep:
                 client = get_gspread_client()
-                try:
-                    client.open_by_key(SHEET_DU_PHONG_ID).worksheet("Sheet1").append_row(
-                        [str(ngay), nv, loai, chitiet, rules[loai]['val'], "", "", str(date.today()), st.session_state.user]
-                    )
-                    st.success("✅ Đã ghi nhận lịch nghỉ thành công!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Lỗi ghi dữ liệu: {e}")
+                lich_data = client.open_by_key(SHEET_DU_PHONG_ID).worksheet("Sheet1").get_all_values()
+                if len(lich_data) > 1:
+                    df_lich = pd.DataFrame(lich_data[1:], columns=lich_data[0])
+                    count_today = len(df_lich[df_lich['Ngày'] == str(ngay)])
+                    limit = 2 if ngay.weekday() >= 5 else 5
+                    
+                    if count_today >= limit:
+                        st.warning(f"⚠️ Đã đạt giới hạn {limit} người nghỉ (Có phép) cho ngày này!")
+                        can_book = False
+            
+            if can_book:
+                chitiet = st.text_input("Chi tiết/Ghi chú")
+                if st.button("💾 Xác nhận và Ghi dữ liệu"):
+                    client = get_gspread_client()
+                    try:
+                        client.open_by_key(SHEET_DU_PHONG_ID).worksheet("Sheet1").append_row(
+                            [str(ngay), nv, loai, chitiet, rules[loai]['val'], "", "", str(date.today()), st.session_state.user]
+                        )
+                        st.success("✅ Đã ghi nhận lịch nghỉ thành công!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Lỗi ghi dữ liệu: {e}")
 
 # --- HIỂN THỊ BẢNG LỊCH SỬ ---
 st.subheader("📅 Lịch sử đăng ký lịch nghỉ")

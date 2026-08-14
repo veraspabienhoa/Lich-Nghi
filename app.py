@@ -91,10 +91,10 @@ def load_backup_sheet_data():
                 return df_bk
     except Exception:
         pass
-    return pd.DataFrame(columns=["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
+    return pd.DataFrame(columns=["Ngày", "Tên nhân viên", "Loại nghỉ", "Chi tiết", "Số ngày tính", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
 
 # --- GHI LỊCH NGHỈ VÀO GOOGLE SHEET DỰ PHÒNG ---
-def save_lich_nghi_to_backup_sheet(ngay, nv, ly_do, chi_tiet, so_ngay, phat_vi_pham, nguoi_tao):
+def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, phat_vi_pham, nguoi_tao):
     try:
         client = get_gspread_client()
         if not client:
@@ -103,12 +103,12 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, ly_do, chi_tiet, so_ngay, phat_vi_p
         sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
         all_vals = sheet.get_all_values()
         if len(all_vals) == 0:
-            sheet.append_row(["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
+            sheet.append_row(["Ngày", "Tên nhân viên", "Loại nghỉ", "Chi tiết", "Số ngày tính", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
         
         sheet.append_row([
             str(ngay),
             str(nv),
-            str(ly_do),
+            str(loai_nghi),
             str(chi_tiet),
             float(so_ngay),
             float(phat_vi_pham),
@@ -239,7 +239,7 @@ def load_lich_nghi(url):
             
         df_lich = df_lich.iloc[:, :10]
         df_lich.columns = [
-            'Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 
+            'Ngày', 'Tên nhân viên', 'Loại nghỉ', 'Chi tiết', 
             'Số ngày tính', 'Số ngày đã nghỉ trong tháng', 
             'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
         ]
@@ -477,21 +477,22 @@ st.markdown("---")
 # --- TAB RIÊNG BIỆT DÀNH RIÊNG CHO ADMIN: CẤU HÌNH QUY TẮC & MỨC PHẠT (ĐÃ BỎ CỘT CUỐI TUẦN) ---
 if st.session_state.current_role == "admin":
     with st.expander("⚙️ Cấu hình Quy tắc & Mức phạt chuẩn (Độc quyền Admin)", expanded=False):
-        st.markdown("### 📋 Danh Mục Lý Do Nghỉ & Mức Phạt Chuẩn")
-        st.info("Bảng dưới đây hiển thị toàn bộ quy định lý do nghỉ, số ngày tính và mức phạt hiện đang được hệ thống áp dụng tự động.")
+        st.markdown("### 📋 Danh Mục Loại Nghỉ & Mức Phạt Chuẩn")
+        st.info("Bảng dưới đây hiển thị toàn bộ quy định loại nghỉ, số ngày tính và mức phạt hiện đang được hệ thống áp dụng tự động.")
         
         if not df_loai_nghi.empty:
+            # Lấy các cột: [Loại nghỉ (col 1), Chi tiết (col 2), Số ngày tính (col 3), Phạt vi phạm (col 4)] và bỏ cột Cuối tuần
             cols_to_use = [1, 2, 3, 4] if len(df_loai_nghi.columns) > 4 else [1, 2, 3]
             df_display_rule = df_loai_nghi.iloc[:, cols_to_use].dropna(subset=[df_loai_nghi.columns[1]])
             if len(df_display_rule.columns) == 4:
-                df_display_rule.columns = ["Lý do nghỉ", "Chi tiết / Ghi chú", "Số ngày tính", "Phạt vi phạm"]
+                df_display_rule.columns = ["Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính", "Phạt vi phạm"]
             else:
-                df_display_rule.columns = ["Lý do nghỉ", "Chi tiết / Ghi chú", "Số ngày tính"]
+                df_display_rule.columns = ["Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính"]
             
             st.dataframe(df_display_rule, use_container_width=True, hide_index=True)
             st.markdown("*(Lưu ý: Để thay đổi các mức phạt cố định này, Quản trị viên có thể cập nhật trực tiếp trên sheet `LoaiNghi` của file Excel nguồn trên Google Drive).*")
         else:
-            st.warning("Chưa tải được dữ liệu bảng quy tắc lý do nghỉ.")
+            st.warning("Chưa tải được dữ liệu bảng quy tắc loại nghỉ.")
 
 st.markdown("---")
 
@@ -504,14 +505,13 @@ if st.session_state.current_role in ["admin", "letan"]:
         users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
         list_nv_input = sorted(list(set(users_s + users_e)))
         
-        # Đọc danh sách lý do nghỉ và mức phạt chuẩn tuyệt đối từ sheet LoaiNghi (Cột B: tên, Cột D: số ngày, Cột E: phạt)
-        list_ly_do = []
-        ly_do_dict = {}
+        list_loai_nghi = []
+        loai_nghi_dict = {}
         if not df_loai_nghi.empty and len(df_loai_nghi.columns) > 1:
             for idx, row in df_loai_nghi.iterrows():
                 l_name = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
-                if l_name and l_name.lower() != "nan" and l_name.lower() != "loại nghỉ" and l_name.lower() != "lý do nghỉ":
-                    list_ly_do.append(l_name)
+                if l_name and l_name.lower() != "nan" and l_name.lower() != "loại nghỉ":
+                    list_loai_nghi.append(l_name)
                     try:
                         s_ngay = float(str(row.iloc[3]).replace(',', '').strip()) if len(row) > 3 and pd.notna(row.iloc[3]) else 1.0
                     except:
@@ -525,30 +525,30 @@ if st.session_state.current_role in ["admin", "letan"]:
                             p_val = float(p_str)
                     except:
                         p_val = 0.0
-                    ly_do_dict[l_name.lower()] = [s_ngay, p_val]
+                    loai_nghi_dict[l_name.lower()] = [s_ngay, p_val]
                     
-        if not list_ly_do:
-            list_ly_do = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
+        if not list_loai_nghi:
+            list_loai_nghi = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
 
         with tab_input_lich:
             chosen_nv = st.selectbox("Chọn nhân viên:", ["-- Chọn nhân viên --"] + list_nv_input, key="sb_chosen_nv")
             chosen_date = st.date_input("Chọn ngày nghỉ:", date.today(), key="sb_chosen_date")
-            chosen_lydo = st.selectbox("Lý do nghỉ:", ["-- Chọn lý do nghỉ --"] + list_ly_do, key="sb_ly_do_live")
+            chosen_loai = st.selectbox("Loại nghỉ:", ["-- Chọn loại nghỉ --"] + list_loai_nghi, key="sb_loai_nghi_live")
             
             default_songay = 1.0
             default_phat = 0.0
-            if chosen_lydo and chosen_lydo != "-- Chọn lý do nghỉ --" and chosen_lydo.lower() in ly_do_dict:
-                default_songay = ly_do_dict[chosen_lydo.lower()][0]
-                default_phat = ly_do_dict[chosen_lydo.lower()][1]
+            if chosen_loai and chosen_loai != "-- Chọn loại nghỉ --" and chosen_loai.lower() in loai_nghi_dict:
+                default_songay = loai_nghi_dict[chosen_loai.lower()][0]
+                default_phat = loai_nghi_dict[chosen_loai.lower()][1]
 
             is_weekend = chosen_date.weekday() >= 5
             count_same_day = 0
-            if not df_lich.empty and chosen_lydo != "-- Chọn lý do nghỉ --":
-                count_same_day = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Lý do nghỉ'].astype(str).str.strip().str.lower() == chosen_lydo.lower())])
+            if not df_lich.empty and chosen_loai != "-- Chọn loại nghỉ --":
+                count_same_day = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Loại nghỉ'].astype(str).str.strip().str.lower() == chosen_loai.lower())])
             
             auto_extra_penalty = 0.0
-            norm_lydo = chosen_lydo.lower() if chosen_lydo else ""
-            if not is_weekend and "ra ngoài vào muộn" not in norm_lydo and count_same_day >= 2:
+            norm_loai = chosen_loai.lower() if chosen_loai else ""
+            if not is_weekend and "ra ngoài vào muộn" not in norm_loai and count_same_day >= 2:
                 auto_extra_penalty = (count_same_day - 1) * 100000.0
             
             final_phat = default_phat + auto_extra_penalty
@@ -560,42 +560,42 @@ if st.session_state.current_role in ["admin", "letan"]:
                 with col_p1:
                     val_songay = st.number_input("Số ngày tính:", value=float(default_songay), step=0.5, key="num_songay_input")
                 with col_p2:
-                    val_phat = st.number_input("Mức phạt vi phạm (VNĐ - Tham chiếu LoaiNghi):", value=float(final_phat), step=50000.0, key=f"num_phat_{chosen_lydo}")
+                    val_phat = st.number_input("Mức phạt vi phạm (VNĐ - Tham chiếu LoaiNghi):", value=float(final_phat), step=50000.0, key=f"num_phat_{chosen_loai}")
 
                 submit_lich = st.form_submit_button("💾 Xác Nhận Ghi Lịch Nghỉ")
                 
                 if submit_lich:
                     if chosen_nv == "-- Chọn nhân viên --" or not chosen_nv:
                         st.error("❌ Vui lòng chọn nhân viên cần nhập lịch nghỉ!")
-                    elif chosen_lydo == "-- Chọn lý do nghỉ --" or not chosen_lydo:
-                        st.error("❌ Vui lòng chọn lý do nghỉ!")
+                    elif chosen_loai == "-- Chọn loại nghỉ --" or not chosen_loai:
+                        st.error("❌ Vui lòng chọn loại nghỉ!")
                     else:
                         already_booked_today = False
                         if not df_backup.empty:
                             match_dup = df_backup[(df_backup['Ngày'].astype(str).str.strip() == chosen_date.strftime('%d/%m/%Y')) & 
                                                   (df_backup['Tên nhân viên'].astype(str).str.strip().str.lower() == chosen_nv.lower()) & 
-                                                  (df_backup['Lý do nghỉ'].astype(str).str.strip().str.lower() == chosen_lydo.lower())]
+                                                  (df_backup['Loại nghỉ'].astype(str).str.strip().str.lower() == chosen_loai.lower())]
                             if not match_dup.empty:
                                 already_booked_today = True
                         
                         if not df_lich.empty and not already_booked_today:
                             match_dup_main = df_lich[(df_lich['Ngày'] == chosen_date) & 
                                                      (df_lich['Tên nhân viên'].astype(str).str.strip().str.lower() == chosen_nv.lower()) & 
-                                                     (df_lich['Lý do nghỉ'].astype(str).str.strip().str.lower() == chosen_lydo.lower())]
+                                                     (df_lich['Loại nghỉ'].astype(str).str.strip().str.lower() == chosen_loai.lower())]
                             if not match_dup_main.empty:
                                 already_booked_today = True
 
                         if already_booked_today:
-                            st.error(f"❌ Nhân viên **{chosen_nv}** đã được ghi nhận lịch nghỉ với lý do **'{chosen_lydo}'** vào ngày {chosen_date.strftime('%d/%m/%Y')} rồi. Không thể đăng ký trùng lặp trong cùng một ngày!")
+                            st.error(f"❌ Nhân viên **{chosen_nv}** đã được ghi nhận lịch nghỉ với loại **'{chosen_loai}'** vào ngày {chosen_date.strftime('%d/%m/%Y')} rồi. Không thể đăng ký trùng lặp trong cùng một ngày!")
                         else:
                             max_people = 5 if not is_weekend else 3
                             today_total_nghi = 0
                             if not df_lich.empty:
                                 today_total_nghi = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Số ngày tính'] > 0)])
                             
-                            if not is_weekend and val_songay > 0 and "phep nam" not in chosen_lydo.lower() and today_total_nghi >= max_people:
+                            if not is_weekend and val_songay > 0 and "phep nam" not in chosen_loai.lower() and today_total_nghi >= max_people:
                                 st.error(f"❌ Ngày {chosen_date.strftime('%d/%m/%Y')} đã có đủ {today_total_nghi} người nghỉ (Đạt giới hạn tối đa {max_people} người/ngày). Hệ thống từ chối đăng ký mới!")
-                            elif is_weekend and val_songay > 0 and "phep nam" not in chosen_lydo.lower() and today_total_nghi >= max_people:
+                            elif is_weekend and val_songay > 0 and "phep nam" not in chosen_loai.lower() and today_total_nghi >= max_people:
                                 st.error(f"❌ Ngày cuối tuần {chosen_date.strftime('%d/%m/%Y')} đã có đủ {today_total_nghi} người nghỉ (Giới hạn cuối tuần tối đa {max_people} người/ngày). Hệ thống từ chối đăng ký mới!")
                             else:
                                 emp_row = df_nv_excel[df_nv_excel['Tên nhân viên'].astype(str).str.strip().str.lower() == chosen_nv.lower()]
@@ -621,14 +621,14 @@ if st.session_state.current_role in ["admin", "letan"]:
                                                        (df_lich['Ngày'] >= start_m) & (df_lich['Ngày'] <= end_m)]
                                     used_month = emp_lich['Số ngày tính'].sum()
                                 
-                                is_phep_nam = "phep nam" in chosen_lydo.lower()
+                                is_phep_nam = "phep nam" in chosen_loai.lower()
                                 if not is_phep_nam and val_songay > 0 and (used_month + val_songay > han_muc_thang):
                                     st.error(f"❌ Vi phạm hạn mức tháng! Nhân viên {chosen_nv} đã nghỉ {used_month:g} ngày trong tháng, giới hạn là {han_muc_thang:g} ngày.")
                                 else:
                                     success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
                                         chosen_date.strftime('%d/%m/%Y'),
                                         chosen_nv,
-                                        chosen_lydo,
+                                        chosen_loai,
                                         input_chitiet,
                                         val_songay,
                                         val_phat,
@@ -649,7 +649,7 @@ if st.session_state.current_role in ["admin", "letan"]:
                 st.dataframe(df_backup, use_container_width=True, hide_index=True)
                 
                 with st.form("form_delete_backup_row"):
-                    row_options = [f"Dòng {i+1}: {row.get('Ngày')} - {row.get('Tên nhân viên')} - {row.get('Lý do nghỉ')}" for i, row in df_backup.iterrows()]
+                    row_options = [f"Dòng {i+1}: {row.get('Ngày')} - {row.get('Tên nhân viên')} - {row.get('Loại nghỉ')}" for i, row in df_backup.iterrows()]
                     selected_row_str = st.selectbox("Chọn dòng lịch nghỉ cần xóa:", row_options)
                     submit_del_row = st.form_submit_button("🗑️ Xóa Lịch Nghỉ Đã Chọn")
                     

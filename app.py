@@ -1,53 +1,35 @@
 import streamlit as st
 import pandas as pd
 from datetime import date
-import gdown
-import os
+import urllib.parse
 
-# Cấu hình trang hiển thị
 st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
 
-# --- 1. HÀM TẢI DỮ LIỆU TỪ GOOGLE DRIVE ---
-@st.cache_data(ttl=300) 
-def load_data(url):
+# --- HÀM LẤY DỮ LIỆU CHUẨN XÁC TỪ GOOGLE DRIVE ---
+@st.cache_data(ttl=60)
+def load_data_from_gdrive(url):
     try:
-        # Tách lấy ID của file từ đường link
         file_id = url.split('/d/')[1].split('/')[0]
-        temp_file = "temp_data.xlsb"
         
-        # CẢI TIẾN: Dùng gdown để vượt rào bảo mật Google Drive và tải file về máy chủ
-        gdown_url = f'https://drive.google.com/uc?id={file_id}'
+        # Link tải dạng file CSV thuần túy giúp chống mọi lỗi định dạng Excel
+        csv_url_lich = f"https://docs.google.com/spreadsheets/d/{file_id}/gviz/tq?tqx=out:csv&sheet={urllib.parse.quote('LichNghi')}"
+        csv_url_nv = f"https://docs.google.com/spreadsheets/d/{file_id}/gviz/tq?tqx=out:csv&sheet={urllib.parse.quote('DanhSachNV')}"
         
-        # Xóa file cũ nếu tồn tại để tránh đọc nhầm
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
-            
-        gdown.download(gdown_url, temp_file, quiet=True)
+        # 1. Đọc sheet Lịch Nghỉ
+        df_lich = pd.read_csv(csv_url_lich)
         
-        if not os.path.exists(temp_file):
-            st.error("Không thể tải file từ Google Drive. Máy chủ bị từ chối truy cập.")
-            return pd.DataFrame(), pd.DataFrame()
-        
-        # ĐỌC FILE .XLSB từ file tạm vừa tải
-        xls = pd.read_excel(temp_file, sheet_name=['LichNghi', 'DanhSachNV'], engine='pyxlsb')
-        df_lich = xls['LichNghi']
-        df_nv = xls['DanhSachNV']
-        
-        # Chỉ lấy 10 cột đầu tiên
+        # Chỉ lấy 10 cột đầu và đặt tên chuẩn
         df_lich = df_lich.iloc[:, :10]
-        
-        # Đặt lại tên cột chuẩn xác
         df_lich.columns = [
             'Ngày', 'Tên nhân viên', 'Loại nghỉ', 'Chi tiết', 
             'Số ngày tính', 'Số ngày đã nghỉ trong tháng', 
             'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
         ]
         
-        # --- HÀM BÓC TÁCH NGÀY THÁNG ---
+        # Xử lý ngày tháng
         def safe_date_parse(val):
             try:
                 if pd.isna(val): return pd.NaT
-                if hasattr(val, 'date'): return val.date() 
                 s = str(val).strip().split(' ')[0]
                 return pd.to_datetime(s, dayfirst=True).date()
             except:
@@ -56,31 +38,33 @@ def load_data(url):
         df_lich['Ngày'] = df_lich['Ngày'].apply(safe_date_parse)
         df_lich = df_lich.dropna(subset=['Ngày'])
         
-        # Làm sạch số liệu
+        # Xử lý số liệu
         df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         
+        # 2. Đọc sheet Danh sách nhân viên
+        df_nv = pd.read_csv(csv_url_nv)
         df_nv = df_nv.dropna(subset=['Tên nhân viên'])
         
         return df_lich, df_nv
     except Exception as e:
-        st.error(f"Đã xảy ra lỗi hệ thống khi phân tích dữ liệu: {e}")
+        st.error(f"Lỗi tải dữ liệu. Vui lòng đảm bảo Link Share đã bật 'Bất kỳ ai cũng có thể xem'. Chi tiết: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-# Link Google Drive (vẫn dùng link cũ của anh)
+# LINK GOOGLE DRIVE GỐC CỦA ANH
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
-with st.spinner("Đang kết nối tải dữ liệu từ Google Drive..."):
-    df_lich, df_nv = load_data(GDRIVE_LINK)
+with st.spinner("Đang kết nối kho dữ liệu..."):
+    df_lich, df_nv = load_data_from_gdrive(GDRIVE_LINK)
 
 if df_lich.empty or df_nv.empty:
-    st.warning("Hệ thống chưa tìm thấy dữ liệu. Vui lòng kiểm tra lại cấu trúc file Excel.")
-    if st.button("🔄 Tải lại dữ liệu (Xóa Cache)"):
+    st.warning("Không tìm thấy dữ liệu. Hãy kiểm tra lại file Excel.")
+    if st.button("🔄 Tải lại dữ liệu"):
         st.cache_data.clear()
         st.rerun()
     st.stop()
 
-# --- 2. HỆ THỐNG ĐĂNG NHẬP ---
+# --- HỆ THỐNG ĐĂNG NHẬP ---
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "current_user" not in st.session_state:
@@ -89,10 +73,6 @@ if "current_user" not in st.session_state:
 if not st.session_state.logged_in:
     st.title("🔐 Đăng Nhập Hệ Thống")
     
-    if st.button("🔄 Tải Lại Dữ Liệu Mới Nhất Từ GDrive", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-        
     with st.form("login_form"):
         username_input = st.text_input("Tên đăng nhập (Tên nhân viên)").strip()
         password_input = st.text_input("Mật khẩu", type="password")
@@ -121,7 +101,7 @@ if not st.session_state.logged_in:
                 st.error("❌ Sai tên đăng nhập hoặc mật khẩu! (Mật khẩu mặc định là 123456)")
     st.stop()
 
-# --- 3. GIAO DIỆN CHÍNH (DASHBOARD) ---
+# --- GIAO DIỆN BẢNG ĐIỀU KHIỂN ---
 col_title, col_logout = st.columns([8, 2])
 with col_title:
     st.title(f"📊 Bảng Tra Cứu Tình Hình Nghỉ Phép - {st.session_state.current_user}")
@@ -145,7 +125,7 @@ with col_filter:
     )
 
 with col_refresh:
-    if st.button("🔄 Tải Lại Dữ Liệu Từ Đầu", use_container_width=True):
+    if st.button("🔄 Lấy Dữ Liệu Mới Nhất", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
@@ -186,7 +166,7 @@ if filtered_df.empty:
     if len(available_dates) > 0:
         available_dates = sorted(available_dates, reverse=True)[:5]
         dates_str = ", ".join([d.strftime('%d/%m/%Y') for d in available_dates])
-        st.info(f"💡 Hệ thống hiện không thấy ai nghỉ vào ngày {start_date.strftime('%d/%m/%Y')}.\n\nCác ngày đang có dữ liệu trong file Excel: **{dates_str}**")
+        st.info(f"💡 Hệ thống hiện không thấy ai nghỉ vào ngày {start_date.strftime('%d/%m/%Y')}.\n\nCác ngày đang có dữ liệu: **{dates_str}**")
 
 tab1, tab2, tab3 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ KHÔNG phép"])
 

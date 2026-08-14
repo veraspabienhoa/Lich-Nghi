@@ -354,7 +354,7 @@ if not st.session_state.logged_in:
             user_chuan = ""
             user_role = "nhanvien"
             
-            if username_input.strip().lower() == "admin" and password_input == "32531235":
+            if username_input == "admin" and password_input == "32531235":
                 st.session_state.logged_in = True
                 st.session_state.current_user = "Quản Trị Viên"
                 st.session_state.current_role = "admin"

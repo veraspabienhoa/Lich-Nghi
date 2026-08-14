@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
+import calendar
 import requests
 import os
 import io
@@ -186,18 +187,36 @@ col_date, col_name, col_refresh = st.columns([4, 4, 2])
 
 with col_date:
     today = date.today()
-    filter_type = st.radio(
-        "Chọn chế độ xem:", 
-        ["Hôm nay", "Chọn ngày", "Khoảng thời gian"], 
-        horizontal=True
+    filter_type = st.selectbox(
+        "Lọc thời gian:", 
+        ["Hôm nay", "Hôm qua", "Tuần này", "Tuần trước", "Tháng này", "Tháng trước", "Chọn ngày", "Khoảng thời gian"]
     )
     
+    # Tính toán logic thời gian
     if filter_type == "Hôm nay":
         start_date = today
         end_date = today
+    elif filter_type == "Hôm qua":
+        start_date = today - timedelta(days=1)
+        end_date = start_date
+    elif filter_type == "Tuần này":
+        start_date = today - timedelta(days=today.weekday())
+        end_date = start_date + timedelta(days=6)
+    elif filter_type == "Tuần trước":
+        start_date = today - timedelta(days=today.weekday() + 7)
+        end_date = start_date + timedelta(days=6)
+    elif filter_type == "Tháng này":
+        start_date = today.replace(day=1)
+        last_day = calendar.monthrange(today.year, today.month)[1]
+        end_date = today.replace(day=last_day)
+    elif filter_type == "Tháng trước":
+        first_day_this_month = today.replace(day=1)
+        end_date = first_day_this_month - timedelta(days=1)
+        start_date = end_date.replace(day=1)
     elif filter_type == "Chọn ngày":
         start_date = st.date_input("Chọn ngày:", today, label_visibility="collapsed")
-    else:
+        end_date = start_date
+    elif filter_type == "Khoảng thời gian":
         date_range = st.date_input("Chọn khoảng thời gian:", [today, today], label_visibility="collapsed")
         if len(date_range) == 2:
             start_date, end_date = date_range
@@ -210,6 +229,7 @@ with col_name:
     selected_nv = st.selectbox("👤 Tìm kiếm nhân viên:", list_nv)
 
 with col_refresh:
+    st.write("") 
     if st.button("🔄 Cập Nhật Dữ Liệu", use_container_width=True):
         st.cache_data.clear()
         st.rerun()

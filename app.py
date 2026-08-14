@@ -85,7 +85,7 @@ def update_password_in_sheet(username, new_password):
     except Exception as e:
         return False, f"Lỗi cập nhật: {e}"
 
-# --- HÀM CHO ADMIN THÊM / SỬA / XÓA / PHÂN QUYỀN ---
+# --- HÀM CHO ADMIN THÊM / SỬA / XÓA / PHÂN QUYỀN TẠI GOOGLE SHEET ---
 def admin_manage_account(action, target_name, new_name="", new_pass="", new_role="nhanvien"):
     try:
         client = get_gspread_client()
@@ -96,7 +96,6 @@ def admin_manage_account(action, target_name, new_name="", new_pass="", new_role
         
         if action == "Thêm mới":
             all_records = sheet.get_all_records()
-            # Kiểm tra xem đã tồn tại chưa
             for r in all_records:
                 if str(r.get('Tên nhân viên', '')).strip().lower() == target_name.strip().lower():
                     return False, f"Nhân viên '{target_name}' đã tồn tại trong hệ thống tài khoản!"
@@ -323,7 +322,6 @@ if st.session_state.show_modal:
             
             action_type = st.selectbox("Chọn thao tác:", ["Chỉnh sửa / Đổi vai trò", "Thêm nhân viên mới", "Xóa tài khoản"])
             
-            # Lấy danh sách tài khoản hiện có từ Google Sheet credentials hoặc từ Excel
             existing_users = sorted(df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist()) if not df_credentials.empty else []
             
             if action_type == "Thêm nhân viên mới":
@@ -340,7 +338,6 @@ if st.session_state.show_modal:
                 input_new_name = st.text_input("Tên mới (Để trống nếu giữ nguyên):").strip()
                 input_new_pass = st.text_input("Mật khẩu mới (Để trống nếu giữ nguyên):", type="password")
                 
-                # Xác định role hiện tại của user đang chọn để làm mặc định
                 curr_role_val = "nhanvien"
                 if not df_credentials.empty:
                     match_row = df_credentials[df_credentials['Tên nhân viên'].astype(str).str.strip().str.lower() == target_nv.lower()]
@@ -362,7 +359,7 @@ if st.session_state.show_modal:
                     
                     success, msg = admin_manage_account(real_action, name_to_pass, locals().get('input_new_name', ''), input_new_pass, input_new_role)
                     if success:
-                        st.success(f"✅ {msg}")
+                        st.success(f"✅ {msg}. *(Lưu ý: Bạn nhớ cập nhật thêm tên nhân viên này vào sheet DanhSachNV trong file Excel gốc trên Google Drive nếu cần).*")
                         st.session_state.show_modal = False
                     else:
                         st.error(f"❌ {msg}")

@@ -448,7 +448,6 @@ st.markdown("---")
 if st.session_state.current_role in ["admin", "letan"]:
     with st.expander("📝 Nhập lịch nghỉ mới cho nhân viên (Dành cho Lễ Tân & Admin)", expanded=False):
         with st.form("form_nhap_lich"):
-            # Gộp danh sách nhân viên từ cả Google Sheet tài khoản lẫn Excel gốc
             users_s = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
             users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
             list_nv_input = sorted(list(set(users_s + users_e)))
@@ -456,29 +455,39 @@ if st.session_state.current_role in ["admin", "letan"]:
             chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input) if list_nv_input else st.text_input("Nhập tên nhân viên:")
             chosen_date = st.date_input("Chọn ngày nghỉ:", date.today())
             
+            # --- ĐỌC DANH SÁCH VÀ MỨC PHẠT CHUẨN TỪ SHEET LoaiNghi CỦA FILE NGUỒN ---
             list_loai_nghi = []
+            loai_nghi_dict = {} # Lưu ánh xạ loại nghỉ -> [số ngày tính, mức phạt]
+            
             if not df_loai_nghi.empty and len(df_loai_nghi.columns) > 1:
-                list_loai_nghi = df_loai_nghi.iloc[:, 1].dropna().astype(str).str.strip().unique().tolist()
+                for idx, row in df_loai_nghi.iterrows():
+                    l_name = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
+                    if l_name and l_name.lower() != "nan":
+                        list_loai_nghi.append(l_name)
+                        # Cột 3 (index 3) là Số ngày tính, Cột 4 (index 4) là Phạt vi phạm từ cấu trúc LoaiNghi
+                        try:
+                            s_ngay = float(str(row.iloc[3]).replace(',', '').strip()) if len(row) > 3 and pd.notna(row.iloc[3]) else 1.0
+                        except:
+                            s_ngay = 1.0
+                        try:
+                            p_str = str(row.iloc[4]).replace(',', '').replace('-', '0').strip() if len(row) > 4 and pd.notna(row.iloc[4]) else "0.0"
+                            p_val = float(p_str) if p_str and p_str.replace('.', '', 1).isdigit() else 0.0
+                        except:
+                            p_val = 0.0
+                        loai_nghi_dict[l_name.lower()] = [s_ngay, p_val]
+                        
             if not list_loai_nghi:
                 list_loai_nghi = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
-            
+                
             chosen_loai = st.selectbox("Loại nghỉ:", list_loai_nghi)
             input_chitiet = st.text_input("Chi tiết vi phạm / Ghi chú (nếu có):").strip()
             
+            # Tự động gán số ngày tính và mức phạt chuẩn từ bảng tra cứu sheet LoaiNghi
             default_songay = 1.0
             default_phat = 0.0
-            if not df_loai_nghi.empty:
-                match_ln = df_loai_nghi[df_loai_nghi.iloc[:, 1].astype(str).str.strip().str.lower() == chosen_loai.lower()]
-                if not match_ln.empty:
-                    try:
-                        default_songay = float(str(match_ln.iloc[0, 3]).replace(',', '').strip()) if pd.notna(match_ln.iloc[0, 3]) else 1.0
-                    except:
-                        default_songay = 1.0
-                    try:
-                        p_val = str(match_ln.iloc[0, 4]).replace(',', '').replace('-', '0').strip()
-                        default_phat = float(p_val) if p_val and p_val.replace('.', '', 1).isdigit() else 0.0
-                    except:
-                        default_phat = 0.0
+            if chosen_loai.lower() in loai_nghi_dict:
+                default_songay = loai_nghi_dict[chosen_loai.lower()][0]
+                default_phat = loai_nghi_dict[chosen_loai.lower()][1]
 
             col_p1, col_p2 = st.columns(2)
             with col_p1:
@@ -491,11 +500,12 @@ if st.session_state.current_role in ["admin", "letan"]:
                 
                 auto_extra_penalty = 0.0
                 norm_loai = chosen_loai.lower()
+                # Luật người thứ N: từ người thứ 3 trở đi trong ngày cộng thêm 100k (trừ cuối tuần hoặc ra ngoài vào muộn)
                 if not is_weekend and "ra ngoài vào muộn" not in norm_loai and count_same_day >= 2:
                     auto_extra_penalty = (count_same_day - 1) * 100000.0
                 
                 final_phat = default_phat + auto_extra_penalty
-                val_phat = st.number_input("Mức phạt vi phạm (VNĐ):", value=float(final_phat), step=50000.0)
+                val_phat = st.number_input("Mức phạt vi phạm (VNĐ - Tham chiếu LoaiNghi):", value=float(final_phat), step=50000.0)
 
             submit_lich = st.form_submit_button("💾 Xác Nhận Ghi Lịch Nghỉ")
             
@@ -546,7 +556,7 @@ if st.session_state.current_role in ["admin", "letan"]:
                     )
                     
                     if success_bk:
-                        st.success(f"✅ Đã ghi nhận thành công lịch nghỉ cho **{chosen_nv}** vào hệ thống dự phòng! (Phạt áp dụng: {val_phat:,.0f} VNĐ)")
+                        st.success(f"✅ Đã ghi nhận thành công lịch nghỉ cho **{chosen_nv}** vào hệ thống dự phòng! (Phạt áp dụng chuẩn từ LoaiNghi: {val_phat:,.0f} VNĐ)")
                         st.cache_data.clear()
                     else:
                         st.error(f"❌ {msg_bk}")

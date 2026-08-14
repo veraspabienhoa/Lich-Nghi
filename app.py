@@ -44,16 +44,29 @@ def get_gspread_client():
     except Exception as e:
         return None
 
-# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN TỪ GOOGLE SHEET ---
+# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN TRỰC TIẾP TỪ CỘT A, B, C, D ---
 @st.cache_data(ttl=30)
 def load_credentials():
     try:
         client = get_gspread_client()
         if client:
             sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-            data = sheet.get_all_records()
-            df = pd.DataFrame(data)
-            return df
+            rows = sheet.get_all_values() # Lấy toàn bộ giá trị dạng mảng thô để chống lỗi header trùng/rỗng
+            if len(rows) > 1:
+                data_list = []
+                for idx, row in enumerate(rows[1:], start=2):
+                    stt = row[0] if len(row) > 0 else idx - 1
+                    ten = row[1] if len(row) > 1 else ""
+                    pwd = row[2] if len(row) > 2 else "123456"
+                    role = row[3] if len(row) > 3 else "nhanvien"
+                    if str(ten).strip() != "":
+                        data_list.append({
+                            'STT': stt,
+                            'Tên nhân viên': str(ten).strip(),
+                            'Mật khẩu': str(pwd).strip() if str(pwd).strip() else "123456",
+                            'Phân quyền': str(role).strip().lower() if str(role).strip() else "nhanvien"
+                        })
+                return pd.DataFrame(data_list)
     except Exception:
         pass
     
@@ -76,8 +89,8 @@ def update_password_in_sheet(username, new_password):
         if cells:
             sheet.update_cell(cells[0].row, 3, str(new_password))
         else:
-            all_records = sheet.get_all_records()
-            next_stt = len(all_records) + 1
+            all_values = sheet.get_all_values()
+            next_stt = len(all_values)
             sheet.append_row([next_stt, username, str(new_password), "nhanvien"])
             
         st.cache_data.clear() 
@@ -85,7 +98,7 @@ def update_password_in_sheet(username, new_password):
     except Exception as e:
         return False, f"Lỗi cập nhật: {e}"
 
-# --- HÀM CHO ADMIN THÊM / SỬA / XÓA / PHÂN QUYỀN TẠI GOOGLE SHEET ---
+# --- HÀM CHO ADMIN THÊM / SỬA / XÓA / PHÂN QUYỀN ---
 def admin_manage_account(action, target_name, new_name="", new_pass="", new_role="nhanvien"):
     try:
         client = get_gspread_client()
@@ -95,11 +108,11 @@ def admin_manage_account(action, target_name, new_name="", new_pass="", new_role
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
         
         if action == "Thêm mới":
-            all_records = sheet.get_all_records()
-            for r in all_records:
-                if str(r.get('Tên nhân viên', '')).strip().lower() == target_name.strip().lower():
+            all_values = sheet.get_all_values()
+            for r in all_values[1:]:
+                if len(r) > 1 and str(r[1]).strip().lower() == target_name.strip().lower():
                     return False, f"Nhân viên '{target_name}' đã tồn tại trong hệ thống tài khoản!"
-            next_stt = len(all_records) + 1
+            next_stt = len(all_values)
             pass_to_set = new_pass.strip() if new_pass.strip() else "123456"
             sheet.append_row([next_stt, target_name.strip(), pass_to_set, new_role])
             st.cache_data.clear()
@@ -359,7 +372,7 @@ if st.session_state.show_modal:
                     
                     success, msg = admin_manage_account(real_action, name_to_pass, locals().get('input_new_name', ''), input_new_pass, input_new_role)
                     if success:
-                        st.success(f"✅ {msg}. *(Lưu ý: Bạn nhớ cập nhật thêm tên nhân viên này vào sheet DanhSachNV trong file Excel gốc trên Google Drive nếu cần).*")
+                        st.success(f"✅ {msg}")
                         st.session_state.show_modal = False
                     else:
                         st.error(f"❌ {msg}")

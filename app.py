@@ -527,12 +527,11 @@ if st.session_state.current_role in ["admin", "letan"]:
             submit_lich = st.form_submit_button("💾 Xác Nhận Ghi Lịch Nghỉ")
             
             if submit_lich:
-                # --- KIỂM TRA QUY TẮC RÀO CHẮN NGHIỆP VỤ ---
+                # --- RÀO CHẮN NGHIỆP VỤ NGHIÊM NGẶT ---
                 
                 # 1. Chặn nhân viên đăng ký trùng lặp loại nghỉ trong cùng 1 ngày
                 already_booked_today = False
                 if not df_backup.empty:
-                    # Kiểm tra trên sheet dự phòng đã ghi trước đó
                     match_dup = df_backup[(df_backup['Ngày'].astype(str).str.strip() == chosen_date.strftime('%d/%m/%Y')) & 
                                           (df_backup['Tên nhân viên'].astype(str).str.strip().str.lower() == chosen_nv.lower()) & 
                                           (df_backup['Loại nghỉ'].astype(str).str.strip().str.lower() == chosen_loai.lower())]
@@ -549,9 +548,9 @@ if st.session_state.current_role in ["admin", "letan"]:
                 if already_booked_today:
                     st.error(f"❌ Nhân viên **{chosen_nv}** đã được ghi nhận lịch nghỉ với loại **'{chosen_loai}'** vào ngày {chosen_date.strftime('%d/%m/%Y')} rồi. Không thể đăng ký trùng lặp trong cùng một ngày!")
                 else:
-                    # 2. Kiểm tra giới hạn số người nghỉ trong ngày (Tối đa 5 người ngày thường, 3 người cuối tuần)
+                    # 2. Chặn tuyệt đối nếu số lượng người nghỉ trong ngày vượt giới hạn (Tối đa 5 người ngày thường, 3 người cuối tuần)
                     max_people = 5 if not is_weekend else 3
-                    today_total_ nghỉ = 0
+                    today_total_nghi = 0
                     if not df_lich.empty:
                         today_total_nghi = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Số ngày tính'] > 0)])
                     

@@ -86,7 +86,6 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, phat_
             return False, "Chưa cấu hình quyền kết nối Google Sheets."
         
         sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        # Đảm bảo nếu sheet trống thì ghi tiêu đề trước
         all_vals = sheet.get_all_values()
         if len(all_vals) == 0:
             sheet.append_row(["Ngày", "Tên nhân viên", "Loại nghỉ", "Chi tiết", "Số ngày tính", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
@@ -449,11 +448,14 @@ st.markdown("---")
 if st.session_state.current_role in ["admin", "letan"]:
     with st.expander("📝 Nhập lịch nghỉ mới cho nhân viên (Dành cho Lễ Tân & Admin)", expanded=False):
         with st.form("form_nhap_lich"):
-            list_nv_input = sorted(df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().unique().tolist())
-            chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input)
+            # Gộp danh sách nhân viên từ cả Google Sheet tài khoản lẫn Excel gốc
+            users_s = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
+            users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
+            list_nv_input = sorted(list(set(users_s + users_e)))
+            
+            chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input) if list_nv_input else st.text_input("Nhập tên nhân viên:")
             chosen_date = st.date_input("Chọn ngày nghỉ:", date.today())
             
-            # Lấy danh sách loại nghỉ từ cột B của sheet LoaiNghi trong file Excel
             list_loai_nghi = []
             if not df_loai_nghi.empty and len(df_loai_nghi.columns) > 1:
                 list_loai_nghi = df_loai_nghi.iloc[:, 1].dropna().astype(str).str.strip().unique().tolist()
@@ -463,7 +465,6 @@ if st.session_state.current_role in ["admin", "letan"]:
             chosen_loai = st.selectbox("Loại nghỉ:", list_loai_nghi)
             input_chitiet = st.text_input("Chi tiết vi phạm / Ghi chú (nếu có):").strip()
             
-            # Tự động tra cứu số ngày tính và phạt vi phạm chuẩn từ sheet LoaiNghi
             default_songay = 1.0
             default_phat = 0.0
             if not df_loai_nghi.empty:
@@ -483,7 +484,6 @@ if st.session_state.current_role in ["admin", "letan"]:
             with col_p1:
                 val_songay = st.number_input("Số ngày tính:", value=default_songay, step=0.5)
             with col_p2:
-                # Luật người thứ N tự động cộng phạt 100k từ người thứ 3 trở đi trong ngày (trừ cuối tuần / ra ngoài muộn)
                 is_weekend = chosen_date.weekday() >= 5
                 count_same_day = 0
                 if not df_lich.empty:
@@ -500,8 +500,6 @@ if st.session_state.current_role in ["admin", "letan"]:
             submit_lich = st.form_submit_button("💾 Xác Nhận Ghi Lịch Nghỉ")
             
             if submit_lich:
-                # --- KIỂM TRA QUY TẮC NGHIỆP VỤ ---
-                # 1. Kiểm tra hạn mức tháng của nhân viên (Cột D sheet DanhSachNV)
                 emp_row = df_nv_excel[df_nv_excel['Tên nhân viên'].astype(str).str.strip().str.lower() == chosen_nv.lower()]
                 han_muc_thang = 4.0
                 if not emp_row.empty and 'Sợ ngày được nghỉ trên tháng' in emp_row.columns:
@@ -515,7 +513,6 @@ if st.session_state.current_role in ["admin", "letan"]:
                     except:
                         pass
                 
-                # Tính tổng số ngày đã nghỉ trong tháng của nhân viên này
                 start_m = chosen_date.replace(day=1)
                 last_d_m = calendar.monthrange(chosen_date.year, chosen_date.month)[1]
                 end_m = chosen_date.replace(day=last_d_m)
@@ -526,21 +523,18 @@ if st.session_state.current_role in ["admin", "letan"]:
                                        (df_lich['Ngày'] >= start_m) & (df_lich['Ngày'] <= end_m)]
                     used_month = emp_lich['Số ngày tính'].sum()
                 
-                # Kiểm tra hạn mức tháng (nếu không phải phép năm)
                 is_phep_nam = "phep nam" in chosen_loai.lower()
                 if not is_phep_nam and val_songay > 0 and (used_month + val_songay > han_muc_thang):
                     st.error(f"❌ Vi phạm hạn mức tháng! Nhân viên {chosen_nv} đã nghỉ {used_month:g} ngày trong tháng, giới hạn là {han_muc_thang:g} ngày.")
                 else:
-                    # 2. Kiểm tra giới hạn số người nghỉ trong ngày
                     max_people = 5 if not is_weekend else 3
                     today_count = 0
                     if not df_lich.empty:
                         today_count = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Số ngày tính'] > 0)])
                     
                     if not is_weekend and val_songay > 0 and not is_phep_nam and today_count >= max_people:
-                        st.warning(f"⚠️ Cảnh báo: Ngày {chosen_date.strftime('%d/%m/%Y')} đã có {today_count} người đăng ký nghỉ (vượt mức cơ bản {max_people} người). Hệ thống sẽ ghi nhận nhưng cần lưu ý suất phát sinh.")
+                        st.warning(f"⚠️ Cảnh báo: Ngày {chosen_date.strftime('%d/%m/%Y')} đã có {today_count} người đăng ký nghỉ (vượt mức cơ bản {max_people} người).")
                     
-                    # Tiến hành ghi vào Google Sheet dự phòng
                     success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
                         chosen_date.strftime('%d/%m/%Y'),
                         chosen_nv,
@@ -601,7 +595,10 @@ with col_date:
             end_date = date_range[0]
 
 with col_name:
-    list_nv = ["- Tất cả nhân viên -"] + sorted(df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().unique().tolist())
+    users_s = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
+    users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
+    all_nv_list = sorted(list(set(users_s + users_e)))
+    list_nv = ["- Tất cả nhân viên -"] + all_nv_list
     selected_nv = st.selectbox("👤 Tìm kiếm nhân viên:", list_nv)
 
 with col_refresh:

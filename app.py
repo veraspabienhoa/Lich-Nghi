@@ -7,31 +7,27 @@ import os
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
 
-# --- ÉP CSS ĐỂ THU GỌN GIAO DIỆN (GIẢM KHOẢNG TRẮNG) ---
+# --- ÉP CSS ĐỂ THU GỌN GIAO DIỆN ---
 st.markdown("""
     <style>
-        /* Giảm khoảng trắng trên cùng và dưới cùng của trang */
         .block-container {
             padding-top: 1.5rem;
             padding-bottom: 1rem;
         }
-        /* Giảm khoảng cách giữa các khối (hàng) */
         div[data-testid="stVerticalBlock"] > div {
             gap: 0.2rem !important;
         }
-        /* Giảm khoảng trắng dưới các tiêu đề h1, h2, h3 */
         h1, h2, h3 {
             padding-bottom: 0rem !important;
             margin-bottom: 0rem !important;
         }
-        /* Chỉnh nút bấm cho gọn hơn */
         button {
             margin-top: 5px !important;
         }
     </style>
 """, unsafe_allow_html=True)
 
-# --- HÀM TẢI FILE TỪ GOOGLE DRIVE CHỐNG CHẶN ---
+# --- HÀM TẢI FILE TỪ GOOGLE DRIVE ---
 def download_file_from_google_drive(id, destination):
     URL = "https://docs.google.com/uc?export=download"
     session = requests.Session()
@@ -59,19 +55,15 @@ def load_data(url):
         file_id = url.split('/d/')[1].split('/')[0]
         temp_file = "temp_lichnghi.xlsb"
         
-        # Tải file về máy chủ
         download_file_from_google_drive(file_id, temp_file)
         
-        # Đọc file bằng pyxlsb 
         xls = pd.read_excel(temp_file, sheet_name=['LichNghi', 'DanhSachNV'], engine='pyxlsb')
         df_lich = xls['LichNghi']
         df_nv = xls['DanhSachNV']
         
-        # Xóa file tạm
         if os.path.exists(temp_file):
             os.remove(temp_file)
             
-        # Chuẩn hóa 10 cột đầu
         df_lich = df_lich.iloc[:, :10]
         df_lich.columns = [
             'Ngày', 'Tên nhân viên', 'Loại nghỉ', 'Chi tiết', 
@@ -79,7 +71,6 @@ def load_data(url):
             'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
         ]
         
-        # Hàm đọc ngày tháng
         def safe_date_parse(val):
             try:
                 if pd.isna(val): return pd.NaT
@@ -91,7 +82,6 @@ def load_data(url):
             except:
                 return pd.NaT
                 
-        # Hàm chuyển đổi giờ
         def safe_time_parse(val):
             try:
                 if pd.isna(val): return ""
@@ -105,15 +95,12 @@ def load_data(url):
             except:
                 return str(val)
                 
-        # 1. Xử lý cột 'Ngày'
         df_lich['Ngày'] = df_lich['Ngày'].apply(safe_date_parse)
         df_lich = df_lich.dropna(subset=['Ngày'])
         
-        # 2. Xử lý số liệu
         df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         
-        # 3. Ép kiểu và định dạng chuẩn cho Ngày/Giờ cập nhật
         df_lich['Ngày cập nhật'] = df_lich['Ngày cập nhật'].apply(safe_date_parse)
         df_lich['Ngày cập nhật'] = pd.to_datetime(df_lich['Ngày cập nhật'], errors='coerce').dt.strftime('%d/%m/%Y').fillna("")
         df_lich['Giờ cập nhật'] = df_lich['Giờ cập nhật'].apply(safe_time_parse)
@@ -176,7 +163,7 @@ if not st.session_state.logged_in:
     st.stop()
 
 # --- GIAO DIỆN BẢNG ĐIỀU KHIỂN ---
-col_title, col_logout = st.columns([9, 1]) # Chỉnh tỉ lệ để tiêu đề và nút đăng xuất thẳng hàng hơn
+col_title, col_logout = st.columns([9, 1]) 
 with col_title:
     st.title(f"📊 Tình Hình Nghỉ Phép - {st.session_state.current_user}")
 with col_logout:
@@ -185,7 +172,7 @@ with col_logout:
         st.session_state.current_user = ""
         st.rerun()
 
-# Bộ lọc (Đã xóa các đường kẻ ngang --- và dòng trống thừa để tiết kiệm không gian)
+# Bộ lọc 
 col_date, col_name, col_refresh = st.columns([4, 4, 2])
 
 with col_date:
@@ -214,7 +201,6 @@ with col_name:
     selected_nv = st.selectbox("👤 Tìm kiếm nhân viên:", list_nv)
 
 with col_refresh:
-    # Nút bấm gọn gàng hơn
     if st.button("🔄 Cập Nhật Dữ Liệu", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -231,12 +217,15 @@ if selected_nv != "- Tất cả nhân viên -":
 co_phep_df = filtered_df[filtered_df['Số ngày tính'] > 0]
 khong_phep_df = filtered_df[(filtered_df['Số ngày tính'] == 0) & (filtered_df['Phạt vi phạm'] > 0)]
 
-# Hiển thị số liệu KPI (Được đặt ngay dưới bộ lọc, không có kẻ ngang thừa)
-st.write("") # Một chút khoảng cách nhỏ cho dễ nhìn
+# Tính tổng số ngày nghỉ có phép
+tong_ngay_co_phep = co_phep_df['Số ngày tính'].sum()
+
+# Hiển thị số liệu KPI (Đã cập nhật để hiển thị Số Ngày thay vì Số Người)
+st.write("") 
 col1, col2, col3 = st.columns(3)
-col1.metric("Tổng số lượt nghỉ", len(filtered_df))
-col2.metric("✅ Số người nghỉ CÓ phép", len(co_phep_df))
-col3.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
+col1.metric("Tổng lượt ghi nhận", len(filtered_df))
+col2.metric("✅ Số NGÀY nghỉ CÓ phép", f"{tong_ngay_co_phep:g}")
+col3.metric("❌ Số LƯỢT nghỉ KHÔNG phép", len(khong_phep_df))
 
 # Hiển thị bảng
 st.subheader(f"Chi tiết danh sách (Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')})")
@@ -252,7 +241,12 @@ if filtered_df.empty:
         nv_history_df = df_lich[df_lich['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
         
         if not nv_history_df.empty:
+            # Thống kê toàn thời gian cho nhân viên này
+            nv_co_phep = nv_history_df[nv_history_df['Số ngày tính'] > 0]
+            nv_khong_phep = nv_history_df[(nv_history_df['Số ngày tính'] == 0) & (nv_history_df['Phạt vi phạm'] > 0)]
+            
             with st.expander(f"📅 Bấm vào đây để xem TẤT CẢ lịch sử nghỉ phép của nhân viên {selected_nv}"):
+                st.markdown(f"**Thống kê toàn thời gian:** Đã nghỉ **{nv_co_phep['Số ngày tính'].sum():g}** ngày CÓ phép | Vi phạm **{len(nv_khong_phep)}** lượt KHÔNG phép.")
                 st.dataframe(nv_history_df.drop(columns=['Phạt vi phạm'], errors='ignore'), use_container_width=True, hide_index=True)
         else:
             st.warning(f"Nhân viên **{selected_nv}** hiện chưa từng có dữ liệu nghỉ phép trên hệ thống.")

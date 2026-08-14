@@ -539,29 +539,43 @@ if st.session_state.current_role in ["admin", "letan"]:
         users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
         list_nv_input = sorted(list(set(users_s + users_e)))
         
+        # --- CẬP NHẬT: XỬ LÝ NHẬN DIỆN MỨC PHẠT ---
         list_loai_nghi = []
         loai_nghi_dict = {}
         if not df_loai_nghi.empty:
             for idx, row in df_loai_nghi.iterrows():
                 l_name = ""
-                if len(row) > 1:
+                if 'Lý do nghỉ' in df_loai_nghi.columns:
+                    l_name = str(row['Lý do nghỉ']).strip()
+                elif 'Loại nghỉ' in df_loai_nghi.columns:
+                    l_name = str(row['Loại nghỉ']).strip()
+                elif len(row) > 1:
                     l_name = str(row.iloc[1]).strip()
-                
-                if not l_name or l_name.lower() in ["nan", "none"]:
-                    l_name = str(row.get('Lý do nghỉ', row.get('Loại nghỉ', ''))).strip()
                 
                 if l_name and l_name.lower() not in ["nan", "loại nghỉ", "lý do nghỉ", "none", ""]:
                     list_loai_nghi.append(l_name)
                     
                     try:
-                        s_ngay_raw = str(row.get('Số ngày tính', row.iloc[3] if len(row)>3 else 1.0))
-                        s_ngay = float(s_ngay_raw.replace(',', '').strip()) if s_ngay_raw.strip() else 1.0
+                        if 'Số ngày tính' in df_loai_nghi.columns:
+                            s_raw = str(row['Số ngày tính'])
+                        elif len(row) > 3:
+                            s_raw = str(row.iloc[3])
+                        else:
+                            s_raw = "1.0"
+                        s_raw = s_raw.replace(',', '.').strip()
+                        s_ngay = float(s_raw) if s_raw and s_raw not in ['nan', 'None', '-'] else 1.0
                     except:
                         s_ngay = 1.0
                     
                     try:
-                        p_raw = str(row.get('Phạt vi phạm', row.iloc[4] if len(row)>4 else "0")).strip()
-                        p_str = p_raw.replace(',', '').replace(' ', '')
+                        if 'Phạt vi phạm' in df_loai_nghi.columns:
+                            p_raw = str(row['Phạt vi phạm'])
+                        elif len(row) > 4:
+                            p_raw = str(row.iloc[4])
+                        else:
+                            p_raw = "0"
+                        # Loại bỏ tất cả ký tự không phải số để bắt chuẩn (vd: 150.000, 150,000 đ)
+                        p_str = p_raw.replace('.', '').replace(',', '').replace(' ', '').replace('đ', '').replace('VNĐ', '').replace('VND', '')
                         p_val = 0.0 if p_str in ["", "-", "nan", "None"] else float(p_str)
                     except:
                         p_val = 0.0
@@ -594,14 +608,18 @@ if st.session_state.current_role in ["admin", "letan"]:
             
             final_phat = default_phat + auto_extra_penalty
 
+            # --- CẬP NHẬT: DYNAMIC KEY ĐỂ RESET FORM ---
+            # Thêm key động để ép widget tự động nhảy số khi người dùng đổi Lý do
+            dyn_key_suffix = f"{chosen_loai}_{chosen_date}_{chosen_nv}"
+
             with st.form("form_nhap_lich_inner"):
                 input_chitiet = st.text_input("Chi tiết vi phạm / Ghi chú (nếu có):").strip()
                 
                 col_p1, col_p2 = st.columns(2)
                 with col_p1:
-                    val_songay = st.number_input("Số ngày tính:", value=float(default_songay), step=0.5, key="num_songay_input")
+                    val_songay = st.number_input("Số ngày tính:", value=float(default_songay), step=0.5, key=f"num_songay_{dyn_key_suffix}")
                 with col_p2:
-                    val_phat = st.number_input("Mức phạt vi phạm (VNĐ):", value=float(final_phat), step=50000.0, key=f"num_phat_{chosen_loai}")
+                    val_phat = st.number_input("Mức phạt vi phạm (VNĐ):", value=float(final_phat), step=50000.0, key=f"num_phat_{dyn_key_suffix}")
 
                 submit_lich = st.form_submit_button("💾 Xác Nhận Ghi Lịch Nghỉ")
                 
@@ -613,7 +631,6 @@ if st.session_state.current_role in ["admin", "letan"]:
                     else:
                         norm_loai_submit = chosen_loai.strip().lower()
                         
-                        # --- KIỂM TRA PHÉP NĂM ĐỂ BỎ QUA GIỚI HẠN ---
                         is_phep_nam = any(kw in norm_loai_submit for kw in ["phép năm", "phep nam"])
                         
                         can_proceed = True
@@ -666,7 +683,6 @@ if st.session_state.current_role in ["admin", "letan"]:
                                 if not df_lich.empty:
                                     today_total_nghi = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Số ngày tính'] > 0)])
                                 
-                                # Nếu là Phép năm thì is_phep_nam là True -> bỏ qua kiểm tra max_people
                                 if val_songay > 0 and not is_phep_nam and today_total_nghi >= max_people:
                                     st.error(f"❌ Ngày {chosen_date.strftime('%d/%m/%Y')} đã đạt giới hạn tối đa {max_people} người nghỉ/ngày.")
                                 else:
@@ -853,7 +869,7 @@ with col_download:
     else:
         st.button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", disabled=True, use_container_width=True)
 
-# Hiển thị bảng chi tiết theo Tab (Cập nhật thêm tab Phát Sinh)
+# Hiển thị bảng chi tiết theo Tab
 tab1, tab2, tab3, tab4 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ PHÁT SINH", "Danh sách Nghỉ KHÔNG phép"])
 
 with tab1:

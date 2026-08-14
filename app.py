@@ -142,7 +142,7 @@ def get_system_data():
 df_taikhoan, df_loai_nghi, config, df_nhanvien, df_lich = get_system_data()
 
 if df_taikhoan is None:
-    st.warning("⚠️ Không thể kết nối dữ liệu. Vui lòng kiểm tra lại cấu hình.")
+    st.warning("⚠️ Không thể kết nối dữ liệu. Vui lòng kiểm tra lại quyền truy cập Google Sheet.")
     st.stop()
 
 # --- ĐĂNG NHẬP ---
@@ -192,7 +192,6 @@ st.markdown("---")
 if st.session_state.current_role == "nhanvien":
     st.subheader(f"👤 Lịch sử nghỉ cá nhân của: {st.session_state.current_user}")
     if not df_lich.empty and 'Tên nhân viên' in df_lich.columns:
-        # Lọc lịch sử của đúng nhân viên đó
         nv_lich = df_lich[df_lich['Tên nhân viên'].astype(str).str.strip().str.lower() == st.session_state.current_user.lower()]
         if not nv_lich.empty:
             co_phep = nv_lich[nv_lich['Số ngày tính'] > 0]
@@ -202,7 +201,6 @@ if st.session_state.current_role == "nhanvien":
             c1.metric("Tổng ngày nghỉ CÓ phép", f"{co_phep['Số ngày tính'].sum():g}")
             c2.metric("Số lượt vi phạm KHÔNG phép", len(khong_phep))
             
-            # Ẩn cột phạt với nhân viên nếu cần, hoặc hiển thị chi tiết
             st.dataframe(nv_lich, use_container_width=True, hide_index=True)
         else:
             st.info("Bạn chưa có lịch sử nghỉ phép nào trên hệ thống.")

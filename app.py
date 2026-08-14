@@ -33,6 +33,7 @@ st.markdown("""
 
 # --- KẾT NỐI GSPREAD ---
 SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"
+SHEET_DU_PHONG_ID = "1Kz0aw-JatptAN9G7YSwZ6rJO09urOPaD-rS-18eZSY0"
 
 @st.cache_resource
 def get_gspread_client():
@@ -44,7 +45,7 @@ def get_gspread_client():
     except Exception as e:
         return None
 
-# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN TRỰC TIẾP TỪ CỘT A, B, C, D ---
+# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN ---
 @st.cache_data(ttl=30)
 def load_credentials():
     try:
@@ -77,28 +78,34 @@ def load_credentials():
     except Exception as e:
         return pd.DataFrame(columns=['STT', 'Tên nhân viên', 'Mật khẩu', 'Phân quyền'])
 
-# --- HÀM CHO NHÂN VIÊN ĐỔI MẬT KHẨU ---
-def update_password_in_sheet(username, new_password):
+# --- GHI LỊCH NGHỈ VÀO GOOGLE SHEET DỰ PHÒNG ---
+def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, phat_vi_pham, nguoi_tao):
     try:
         client = get_gspread_client()
         if not client:
-            return False, "Chưa cấu hình quyền kết nối Google Sheets (Secrets)."
+            return False, "Chưa cấu hình quyền kết nối Google Sheets."
         
-        sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-        cells = sheet.findall(username, in_column=2)
-        if cells:
-            sheet.update_cell(cells[0].row, 3, str(new_password))
-        else:
-            all_values = sheet.get_all_values()
-            next_stt = len(all_values)
-            sheet.append_row([next_stt, username, str(new_password), "nhanvien"])
-            
-        st.cache_data.clear() 
-        return True, "Đổi mật khẩu thành công!"
+        sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        # Đảm bảo nếu sheet trống thì ghi tiêu đề trước
+        all_vals = sheet.get_all_values()
+        if len(all_vals) == 0:
+            sheet.append_row(["Ngày", "Tên nhân viên", "Loại nghỉ", "Chi tiết", "Số ngày tính", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
+        
+        sheet.append_row([
+            str(ngay),
+            str(nv),
+            str(loai_nghi),
+            str(chi_tiet),
+            float(so_ngay),
+            float(phat_vi_pham),
+            str(date.today()),
+            str(nguoi_tao)
+        ])
+        return True, "Đã ghi nhận lịch nghỉ thành công vào Google Sheet dự phòng!"
     except Exception as e:
-        return False, f"Lỗi cập nhật: {e}"
+        return False, f"Lỗi ghi Google Sheet dự phòng: {e}"
 
-# --- HÀM CHO ADMIN THÊM / SỬA / XÓA / PHÂN QUYỀN ---
+# --- QUẢN LÝ TÀI KHOẢN (ADMIN) ---
 def admin_manage_account(action, target_name, new_name="", new_pass="", new_role="nhanvien"):
     try:
         client = get_gspread_client()
@@ -151,22 +158,37 @@ def admin_manage_account(action, target_name, new_name="", new_pass="", new_role
     except Exception as e:
         return False, f"Lỗi thực thi: {e}"
 
-# --- HÀM TẢI FILE LỊCH NGHỈ TỪ EXCEL ---
+def update_password_in_sheet(username, new_password):
+    try:
+        client = get_gspread_client()
+        if not client:
+            return False, "Chưa cấu hình quyền kết nối."
+        sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
+        cells = sheet.findall(username, in_column=2)
+        if cells:
+            sheet.update_cell(cells[0].row, 3, str(new_password))
+        else:
+            all_values = sheet.get_all_values()
+            next_stt = len(all_values)
+            sheet.append_row([next_stt, username, str(new_password), "nhanvien"])
+        st.cache_data.clear() 
+        return True, "Đổi mật khẩu thành công!"
+    except Exception as e:
+        return False, f"Lỗi cập nhật: {e}"
+
+# --- TẢI FILE TỪ GOOGLE DRIVE ---
 def download_file_from_google_drive(id, destination):
     URL = "https://docs.google.com/uc?export=download"
     session = requests.Session()
     response = session.get(URL, params={'id': id}, stream=True)
-    
     token = None
     for key, value in response.cookies.items():
         if key.startswith('download_warning'):
             token = value
             break
-            
     if token:
         params = {'id': id, 'confirm': token}
         response = session.get(URL, params=params, stream=True)
-        
     with open(destination, "wb") as f:
         for chunk in response.iter_content(32768):
             if chunk:
@@ -179,9 +201,10 @@ def load_lich_nghi(url):
         temp_file = "temp_lichnghi.xlsb"
         download_file_from_google_drive(file_id, temp_file)
         
-        xls = pd.read_excel(temp_file, sheet_name=['LichNghi', 'DanhSachNV'], engine='pyxlsb')
+        xls = pd.read_excel(temp_file, sheet_name=['LichNghi', 'DanhSachNV', 'LoaiNghi'], engine='pyxlsb')
         df_lich = xls['LichNghi']
         df_nv_excel = xls['DanhSachNV']
+        df_loai_nghi = xls['LoaiNghi']
         
         if os.path.exists(temp_file):
             os.remove(temp_file)
@@ -229,10 +252,10 @@ def load_lich_nghi(url):
         
         df_nv_excel = df_nv_excel.dropna(subset=['Tên nhân viên'])
         
-        return df_lich, df_nv_excel
+        return df_lich, df_nv_excel, df_loai_nghi
     except Exception as e:
         st.error(f"Lỗi đọc dữ liệu: {e}")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 @st.cache_data(show_spinner=False)
 def to_excel(df):
@@ -246,7 +269,7 @@ df_credentials = load_credentials()
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
 with st.spinner("Đang tải dữ liệu hệ thống..."):
-    df_lich, df_nv_excel = load_lich_nghi(GDRIVE_LINK) 
+    df_lich, df_nv_excel, df_loai_nghi = load_lich_nghi(GDRIVE_LINK) 
 
 if df_lich.empty or df_nv_excel.empty:
     st.warning("Hệ thống chưa tìm thấy dữ liệu. Vui lòng kiểm tra lại cấu hình.")
@@ -330,10 +353,8 @@ if btn_manage_account:
     st.session_state.show_modal = not st.session_state.show_modal
 
 if st.session_state.show_modal:
-    # 1. Giao diện ADMIN: Sử dụng các Tab phân tách rõ ràng tránh đè lẫn giao diện
     if st.session_state.current_role == "admin":
         st.subheader("🛠 Quản lý tài khoản & Phân quyền")
-        
         tab_add, tab_edit, tab_del = st.tabs(["➕ Thêm nhân viên mới", "✏️ Chỉnh sửa / Đổi vai trò", "🗑️ Xóa tài khoản"])
         
         users_from_sheet = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
@@ -346,7 +367,6 @@ if st.session_state.show_modal:
                 new_pass_in = st.text_input("Mật khẩu ban đầu (Để trống sẽ là 123456):", type="password")
                 new_role_in = st.selectbox("Vai trò / Phân quyền:", ["nhanvien", "letan", "admin"], index=0, key="role_add")
                 submit_add = st.form_submit_button("Thêm Tài Khoản")
-                
                 if submit_add:
                     if not new_name_in:
                         st.error("❌ Vui lòng nhập tên nhân viên mới!")
@@ -363,7 +383,6 @@ if st.session_state.show_modal:
                 target_edit = st.selectbox("Chọn tài khoản cần chỉnh sửa:", existing_users) if existing_users else ""
                 edit_name_in = st.text_input("Tên mới (Để trống nếu giữ nguyên):").strip()
                 edit_pass_in = st.text_input("Mật khẩu mới (Để trống nếu giữ nguyên):", type="password")
-                
                 curr_role_val = "nhanvien"
                 if not df_credentials.empty and target_edit:
                     match_row = df_credentials[df_credentials['Tên nhân viên'].astype(str).str.strip().str.lower() == target_edit.lower()]
@@ -371,10 +390,8 @@ if st.session_state.show_modal:
                         curr_role_val = str(match_row.iloc[0].get('Phân quyền', 'nhanvien')).strip().lower()
                 role_indices = {"nhanvien": 0, "letan": 1, "admin": 2}
                 default_idx = role_indices.get(curr_role_val, 0)
-                
                 edit_role_in = st.selectbox("Vai trò / Phân quyền mới:", ["nhanvien", "letan", "admin"], index=default_idx, key="role_edit")
                 submit_edit = st.form_submit_button("Cập Nhật")
-                
                 if submit_edit:
                     if not target_edit:
                         st.error("❌ Vui lòng chọn tài khoản cần chỉnh sửa!")
@@ -390,7 +407,6 @@ if st.session_state.show_modal:
             with st.form("form_del_acc"):
                 target_del = st.selectbox("Chọn tài khoản cần xóa:", existing_users) if existing_users else ""
                 submit_del = st.form_submit_button("Xóa Tài Khoản")
-                
                 if submit_del:
                     if not target_del:
                         st.error("❌ Vui lòng chọn tài khoản cần xóa!")
@@ -401,8 +417,6 @@ if st.session_state.show_modal:
                             st.session_state.show_modal = False
                         else:
                             st.error(f"❌ {msg}")
-                        
-    # 2. Giao diện NHÂN VIÊN / LỄ TÂN đổi mật khẩu cá nhân
     else:
         with st.form("change_pass_form"):
             st.subheader(f"Đổi mật khẩu cho: {st.session_state.current_user}")
@@ -410,13 +424,11 @@ if st.session_state.show_modal:
             new_pass = st.text_input("Mật khẩu mới", type="password")
             confirm_pass = st.text_input("Xác nhận mật khẩu mới", type="password")
             submit_pass = st.form_submit_button("Cập Nhật Mật Khẩu")
-            
             if submit_pass:
                 db_old_pass = "123456" 
                 cred_row = df_credentials[df_credentials['Tên nhân viên'].astype(str).str.strip().str.lower() == st.session_state.current_user.lower()]
                 if not cred_row.empty:
                     db_old_pass = str(cred_row.iloc[0]['Mật khẩu']).strip()
-                
                 if old_pass != db_old_pass:
                     st.error("❌ Mật khẩu hiện tại không chính xác!")
                 elif not new_pass or len(new_pass.strip()) < 4:
@@ -430,6 +442,120 @@ if st.session_state.show_modal:
                         st.session_state.show_modal = False
                     else:
                         st.error(f"❌ {msg}")
+
+st.markdown("---")
+
+# --- KHU VỰC NHẬP LỊCH NGHỈ DÀNH CHO ADMIN & LỄ TÂN ---
+if st.session_state.current_role in ["admin", "letan"]:
+    with st.expander("📝 Nhập lịch nghỉ mới cho nhân viên (Dành cho Lễ Tân & Admin)", expanded=False):
+        with st.form("form_nhap_lich"):
+            list_nv_input = sorted(df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().unique().tolist())
+            chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input)
+            chosen_date = st.date_input("Chọn ngày nghỉ:", date.today())
+            
+            # Lấy danh sách loại nghỉ từ cột B của sheet LoaiNghi trong file Excel
+            list_loai_nghi = []
+            if not df_loai_nghi.empty and len(df_loai_nghi.columns) > 1:
+                list_loai_nghi = df_loai_nghi.iloc[:, 1].dropna().astype(str).str.strip().unique().tolist()
+            if not list_loai_nghi:
+                list_loai_nghi = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
+            
+            chosen_loai = st.selectbox("Loại nghỉ:", list_loai_nghi)
+            input_chitiet = st.text_input("Chi tiết vi phạm / Ghi chú (nếu có):").strip()
+            
+            # Tự động tra cứu số ngày tính và phạt vi phạm chuẩn từ sheet LoaiNghi
+            default_songay = 1.0
+            default_phat = 0.0
+            if not df_loai_nghi.empty:
+                match_ln = df_loai_nghi[df_loai_nghi.iloc[:, 1].astype(str).str.strip().str.lower() == chosen_loai.lower()]
+                if not match_ln.empty:
+                    try:
+                        default_songay = float(str(match_ln.iloc[0, 3]).replace(',', '').strip()) if pd.notna(match_ln.iloc[0, 3]) else 1.0
+                    except:
+                        default_songay = 1.0
+                    try:
+                        p_val = str(match_ln.iloc[0, 4]).replace(',', '').replace('-', '0').strip()
+                        default_phat = float(p_val) if p_val and p_val.replace('.', '', 1).isdigit() else 0.0
+                    except:
+                        default_phat = 0.0
+
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                val_songay = st.number_input("Số ngày tính:", value=default_songay, step=0.5)
+            with col_p2:
+                # Luật người thứ N tự động cộng phạt 100k từ người thứ 3 trở đi trong ngày (trừ cuối tuần / ra ngoài muộn)
+                is_weekend = chosen_date.weekday() >= 5
+                count_same_day = 0
+                if not df_lich.empty:
+                    count_same_day = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Loại nghỉ'].astype(str).str.strip().str.lower() == chosen_loai.lower())])
+                
+                auto_extra_penalty = 0.0
+                norm_loai = chosen_loai.lower()
+                if not is_weekend and "ra ngoài vào muộn" not in norm_loai and count_same_day >= 2:
+                    auto_extra_penalty = (count_same_day - 1) * 100000.0
+                
+                final_phat = default_phat + auto_extra_penalty
+                val_phat = st.number_input("Mức phạt vi phạm (VNĐ):", value=float(final_phat), step=50000.0)
+
+            submit_lich = st.form_submit_button("💾 Xác Nhận Ghi Lịch Nghỉ")
+            
+            if submit_lich:
+                # --- KIỂM TRA QUY TẮC NGHIỆP VỤ ---
+                # 1. Kiểm tra hạn mức tháng của nhân viên (Cột D sheet DanhSachNV)
+                emp_row = df_nv_excel[df_nv_excel['Tên nhân viên'].astype(str).str.strip().str.lower() == chosen_nv.lower()]
+                han_muc_thang = 4.0
+                if not emp_row.empty and 'Sợ ngày được nghỉ trên tháng' in emp_row.columns:
+                    try:
+                        han_muc_thang = float(emp_row.iloc[0]['Sợ ngày được nghỉ trên tháng'])
+                    except:
+                        pass
+                elif not emp_row.empty and len(emp_row.columns) >= 4:
+                    try:
+                        han_muc_thang = float(str(emp_row.iloc[0, 3]).strip())
+                    except:
+                        pass
+                
+                # Tính tổng số ngày đã nghỉ trong tháng của nhân viên này
+                start_m = chosen_date.replace(day=1)
+                last_d_m = calendar.monthrange(chosen_date.year, chosen_date.month)[1]
+                end_m = chosen_date.replace(day=last_d_m)
+                
+                used_month = 0.0
+                if not df_lich.empty:
+                    emp_lich = df_lich[(df_lich['Tên nhân viên'].astype(str).str.strip().str.lower() == chosen_nv.lower()) & 
+                                       (df_lich['Ngày'] >= start_m) & (df_lich['Ngày'] <= end_m)]
+                    used_month = emp_lich['Số ngày tính'].sum()
+                
+                # Kiểm tra hạn mức tháng (nếu không phải phép năm)
+                is_phep_nam = "phep nam" in chosen_loai.lower()
+                if not is_phep_nam and val_songay > 0 and (used_month + val_songay > han_muc_thang):
+                    st.error(f"❌ Vi phạm hạn mức tháng! Nhân viên {chosen_nv} đã nghỉ {used_month:g} ngày trong tháng, giới hạn là {han_muc_thang:g} ngày.")
+                else:
+                    # 2. Kiểm tra giới hạn số người nghỉ trong ngày
+                    max_people = 5 if not is_weekend else 3
+                    today_count = 0
+                    if not df_lich.empty:
+                        today_count = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Số ngày tính'] > 0)])
+                    
+                    if not is_weekend and val_songay > 0 and not is_phep_nam and today_count >= max_people:
+                        st.warning(f"⚠️ Cảnh báo: Ngày {chosen_date.strftime('%d/%m/%Y')} đã có {today_count} người đăng ký nghỉ (vượt mức cơ bản {max_people} người). Hệ thống sẽ ghi nhận nhưng cần lưu ý suất phát sinh.")
+                    
+                    # Tiến hành ghi vào Google Sheet dự phòng
+                    success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
+                        chosen_date.strftime('%d/%m/%Y'),
+                        chosen_nv,
+                        chosen_loai,
+                        input_chitiet,
+                        val_songay,
+                        val_phat,
+                        st.session_state.current_user
+                    )
+                    
+                    if success_bk:
+                        st.success(f"✅ Đã ghi nhận thành công lịch nghỉ cho **{chosen_nv}** vào hệ thống dự phòng! (Phạt áp dụng: {val_phat:,.0f} VNĐ)")
+                        st.cache_data.clear()
+                    else:
+                        st.error(f"❌ {msg_bk}")
 
 st.markdown("---")
 

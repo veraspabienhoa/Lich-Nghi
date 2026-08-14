@@ -67,11 +67,33 @@ def load_data(url):
             except:
                 return pd.NaT
                 
+        # Hàm chuyển đổi giờ từ số thập phân của Excel
+        def safe_time_parse(val):
+            try:
+                if pd.isna(val): return ""
+                if isinstance(val, (int, float)):
+                    # 1 ngày = 86400 giây
+                    total_seconds = int(round(val * 86400))
+                    hours = total_seconds // 3600
+                    minutes = (total_seconds % 3600) // 60
+                    seconds = total_seconds % 60
+                    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                return str(val).strip()
+            except:
+                return str(val)
+                
+        # 1. Xử lý cột 'Ngày' để lọc dữ liệu
         df_lich['Ngày'] = df_lich['Ngày'].apply(safe_date_parse)
         df_lich = df_lich.dropna(subset=['Ngày'])
         
+        # 2. Xử lý số liệu
         df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
+        
+        # 3. Ép kiểu và định dạng chuẩn cho Ngày/Giờ cập nhật
+        df_lich['Ngày cập nhật'] = df_lich['Ngày cập nhật'].apply(safe_date_parse)
+        df_lich['Ngày cập nhật'] = pd.to_datetime(df_lich['Ngày cập nhật'], errors='coerce').dt.strftime('%d/%m/%Y').fillna("")
+        df_lich['Giờ cập nhật'] = df_lich['Giờ cập nhật'].apply(safe_time_parse)
         
         df_nv = df_nv.dropna(subset=['Tên nhân viên'])
         
@@ -182,7 +204,7 @@ khong_phep_df = filtered_df[(filtered_df['Số ngày tính'] == 0) & (filtered_d
 # Hiển thị số liệu
 st.markdown("---")
 col1, col2, col3 = st.columns(3)
-col1.metric("Tổng số lượt nghỉ (trong giai đoạn)", len(filtered_df))
+col1.metric("Tổng số lượt nghỉ ", len(filtered_df))
 col2.metric("✅ Số người nghỉ CÓ phép", len(co_phep_df))
 col3.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
 st.markdown("---")
@@ -199,7 +221,7 @@ if filtered_df.empty:
 
 tab1, tab2, tab3 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ KHÔNG phép"])
 
-# Danh sách các cột muốn ẩn khỏi giao diện
+# Ẩn cột 'Phạt vi phạm' khỏi giao diện hiển thị
 cols_to_hide = ['Phạt vi phạm']
 
 with tab1:

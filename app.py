@@ -490,9 +490,10 @@ if st.session_state.current_role in ["admin", "letan"]:
         if not list_loai_nghi:
             list_loai_nghi = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
 
-        chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input) if list_nv_input else st.text_input("Nhập tên nhân viên:")
-        chosen_date = st.date_input("Chọn ngày nghỉ:", date.today())
+        chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input, key="sb_chosen_nv") if list_nv_input else st.text_input("Nhập tên nhân viên:")
+        chosen_date = st.date_input("Chọn ngày nghỉ:", date.today(), key="sb_chosen_date")
         
+        # Đặt selectbox loại nghỉ ngay bên ngoài để kích hoạt sự kiện re-run giao diện cập nhật tiền phạt lập tức
         chosen_loai = st.selectbox("Loại nghỉ:", list_loai_nghi, key="sb_loai_nghi_live")
         
         # Tra cứu số ngày tính và mức phạt chuẩn chính xác từ sheet LoaiNghi
@@ -520,9 +521,10 @@ if st.session_state.current_role in ["admin", "letan"]:
             
             col_p1, col_p2 = st.columns(2)
             with col_p1:
-                val_songay = st.number_input("Số ngày tính:", value=default_songay, step=0.5)
+                val_songay = st.number_input("Số ngày tính:", value=float(default_songay), step=0.5, key="num_songay_input")
             with col_p2:
-                val_phat = st.number_input("Mức phạt vi phạm (VNĐ - Tham chiếu LoaiNghi):", value=float(final_phat), step=50000.0)
+                # Sử dụng key động theo loại nghỉ để xóa bỏ bộ nhớ đệm widget cũ của Streamlit
+                val_phat = st.number_input("Mức phạt vi phạm (VNĐ - Tham chiếu LoaiNghi):", value=float(final_phat), step=50000.0, key=f"num_phat_{chosen_loai}")
 
             submit_lich = st.form_submit_button("💾 Xác Nhận Ghi Lịch Nghỉ")
             

@@ -72,7 +72,6 @@ def load_data(url):
             try:
                 if pd.isna(val): return ""
                 if isinstance(val, (int, float)):
-                    # 1 ngày = 86400 giây
                     total_seconds = int(round(val * 86400))
                     hours = total_seconds // 3600
                     minutes = (total_seconds % 3600) // 60
@@ -82,7 +81,7 @@ def load_data(url):
             except:
                 return str(val)
                 
-        # 1. Xử lý cột 'Ngày' để lọc dữ liệu
+        # 1. Xử lý cột 'Ngày'
         df_lich['Ngày'] = df_lich['Ngày'].apply(safe_date_parse)
         df_lich = df_lich.dropna(subset=['Ngày'])
         
@@ -164,47 +163,61 @@ with col_logout:
         
 st.markdown("---")
 
-col_filter, col_refresh = st.columns([8, 2])
+# CHỈNH SỬA: Thêm cột tìm kiếm theo tên nhân viên
+st.subheader("🔍 Lọc Dữ Liệu")
+col_date, col_name, col_refresh = st.columns([4, 4, 2])
 
-with col_filter:
-    st.subheader("🔍 Lọc Dữ Liệu")
+with col_date:
     today = date.today()
     filter_type = st.radio(
         "Chọn chế độ xem thời gian:", 
         ["Hôm nay", "Chọn ngày cụ thể", "Chọn khoảng thời gian"], 
         horizontal=True
     )
+    
+    if filter_type == "Hôm nay":
+        start_date = today
+        end_date = today
+    elif filter_type == "Chọn ngày cụ thể":
+        start_date = st.date_input("Chọn ngày:", today)
+        end_date = start_date
+    else:
+        date_range = st.date_input("Chọn từ ngày - đến ngày:", [today, today])
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+        else:
+            start_date = date_range[0]
+            end_date = date_range[0]
+
+with col_name:
+    st.write("") # Dóng hàng cho cân đối với nút radio bên cạnh
+    # Lấy danh sách tên nhân viên từ sheet DanhSachNV
+    list_nv = ["- Tất cả nhân viên -"] + sorted(df_nv['Tên nhân viên'].dropna().astype(str).str.strip().unique().tolist())
+    selected_nv = st.selectbox("👤 Tìm kiếm / Chọn tên nhân viên:", list_nv)
 
 with col_refresh:
+    st.write("") 
+    st.write("") 
     if st.button("🔄 Lấy Dữ Liệu Mới Nhất", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-if filter_type == "Hôm nay":
-    start_date = today
-    end_date = today
-elif filter_type == "Chọn ngày cụ thể":
-    start_date = st.date_input("Chọn ngày:", today)
-    end_date = start_date
-else:
-    date_range = st.date_input("Chọn từ ngày - đến ngày:", [today, today])
-    if len(date_range) == 2:
-        start_date, end_date = date_range
-    else:
-        start_date = date_range[0]
-        end_date = date_range[0]
-
-# Lọc & Phân loại
+# 1. Lọc theo ngày
 mask_date = (df_lich['Ngày'] >= start_date) & (df_lich['Ngày'] <= end_date)
 filtered_df = df_lich[mask_date]
 
+# 2. Lọc theo tên nhân viên (nếu người dùng không chọn "Tất cả")
+if selected_nv != "- Tất cả nhân viên -":
+    filtered_df = filtered_df[filtered_df['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
+
+# Phân loại có phép / không phép
 co_phep_df = filtered_df[filtered_df['Số ngày tính'] > 0]
 khong_phep_df = filtered_df[(filtered_df['Số ngày tính'] == 0) & (filtered_df['Phạt vi phạm'] > 0)]
 
 # Hiển thị số liệu
 st.markdown("---")
 col1, col2, col3 = st.columns(3)
-col1.metric("Tổng số lượt nghỉ ", len(filtered_df))
+col1.metric("Tổng số lượt nghỉ", len(filtered_df))
 col2.metric("✅ Số người nghỉ CÓ phép", len(co_phep_df))
 col3.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
 st.markdown("---")
@@ -217,7 +230,7 @@ if filtered_df.empty:
     if len(available_dates) > 0:
         available_dates = sorted(available_dates, reverse=True)[:5]
         dates_str = ", ".join([d.strftime('%d/%m/%Y') for d in available_dates])
-        st.info(f"💡 Hệ thống hiện không thấy ai nghỉ vào ngày {start_date.strftime('%d/%m/%Y')}.\n\nCác ngày đang có dữ liệu: **{dates_str}**")
+        st.info(f"💡 Hệ thống hiện không thấy dữ liệu phù hợp với điều kiện lọc.\n\nCác ngày đang có dữ liệu: **{dates_str}**")
 
 tab1, tab2, tab3 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ KHÔNG phép"])
 

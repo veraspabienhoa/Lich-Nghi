@@ -459,15 +459,23 @@ if st.session_state.current_role == "admin":
         st.info("Bảng dưới đây hiển thị toàn bộ quy định loại nghỉ, số ngày tính và mức phạt hiện đang được hệ thống áp dụng tự động.")
         
         if not df_loai_nghi.empty:
-            cols_to_use = [1, 2, 3, 4] if len(df_loai_nghi.columns) > 4 else [1, 2, 3]
-            df_display_rule = df_loai_nghi.iloc[:, cols_to_use].dropna(subset=[df_loai_nghi.columns[1]])
-            if len(df_display_rule.columns) == 4:
-                df_display_rule.columns = ["Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính", "Phạt vi phạm"]
+            # --- ĐOẠN SỬA ĐỔI ---
+            if 'Loại nghỉ' in df_loai_nghi.columns:
+                # Ưu tiên lấy theo tên cột nếu dữ liệu từ GSheet
+                cols_available = [col for col in ["Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính", "Phạt vi phạm"] if col in df_loai_nghi.columns]
+                df_display_rule = df_loai_nghi[cols_available].dropna(subset=["Loại nghỉ"])
             else:
-                df_display_rule.columns = ["Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính"]
+                # Logic cũ dự phòng cho Excel
+                cols_to_use = [1, 2, 3, 4] if len(df_loai_nghi.columns) > 4 else [1, 2, 3]
+                df_display_rule = df_loai_nghi.iloc[:, cols_to_use].dropna(subset=[df_loai_nghi.columns[1]])
+                if len(df_display_rule.columns) == 4:
+                    df_display_rule.columns = ["Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính", "Phạt vi phạm"]
+                else:
+                    df_display_rule.columns = ["Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính"]
+            # --- KẾT THÚC SỬA ĐỔI ---
             
             st.dataframe(df_display_rule, use_container_width=True, hide_index=True)
-            st.markdown("*(Lưu ý: Để thay đổi các mức phạt cố định này, Quản trị viên có thể cập nhật trực tiếp trên sheet `LoaiNghi` của file Excel nguồn trên Google Drive).*")
+            st.markdown("*(Lưu ý: Hệ thống hiện đang ưu tiên lấy bảng quy tắc từ Google Sheets. Bạn có thể thay đổi số liệu trực tiếp trên file Sheets).*")
         else:
             st.warning("Chưa tải được dữ liệu bảng quy tắc loại nghỉ.")
 

@@ -361,7 +361,7 @@ with col_date:
     today = date.today()
     filter_type = st.selectbox(
         "Lọc thời gian:", 
-        ["Hôm nay", "Hôm qua", "Tuần này", "Tuần trước", "Tháng này", "Tháng trước", "Chọn ngày", "Khoảng thời gian"]
+        ["Hôm nay", "Hôm qua",  "Chọn ngày", "Tuần này", "Tuần trước", "Tháng này", "Tháng trước", "Khoảng thời gian"]
     )
     
     if filter_type == "Hôm nay":

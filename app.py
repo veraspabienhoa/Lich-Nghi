@@ -1,11 +1,15 @@
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime, time
+import requests
+import os
+import io
 import gspread
 from google.oauth2.service_account import Credentials
 
-# --- CẤU HÌNH DUY NHẤT ---
+# --- CẤU HÌNH HỆ THỐNG ---
 SHEET_ID = "1Kz0aw-JatptAN9G7YSwZ6rJO09urOPaD-rS-18eZSY0"
+GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
 st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout="wide")
 
@@ -20,8 +24,61 @@ def get_gspread_client():
         creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
         return gspread.authorize(creds)
     except Exception as e:
-        st.error(f"Lỗi xác thực thông tin tài khoản Google (Secrets): {e}")
         return None
+
+# --- HÀM TẢI FILE `.xlsb` TỪ GOOGLE DRIVE ---
+def download_file_from_google_drive(id, destination):
+    URL = "https://docs.google.com/uc?export=download"
+    session = requests.Session()
+    response = session.get(URL, params={'id': id}, stream=True)
+    token = None
+    for key, value in response.cookies.items():
+        if key.startswith('download_warning'):
+            token = value
+            break
+    if token:
+        params = {'id': id, 'confirm': token}
+        response = session.get(URL, params=params, stream=True)
+    with open(destination, "wb") as f:
+        for chunk in response.iter_content(32768):
+            if chunk:
+                f.write(chunk)
+
+@st.cache_data(ttl=30)
+def load_main_lich_nghi(url):
+    try:
+        file_id = url.split('/d/')[1].split('/')[0]
+        temp_file = "temp_lichnghi.xlsb"
+        download_file_from_google_drive(file_id, temp_file)
+        
+        xls = pd.read_excel(temp_file, sheet_name='LichNghi', engine='pyxlsb')
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+            
+        df_main = xls.iloc[:, :10]
+        df_main.columns = [
+            'Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 
+            'Số ngày tính', 'Số ngày đã nghỉ trong tháng', 
+            'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
+        ]
+        
+        # Chuẩn hóa ngày tháng
+        def safe_date_parse(val):
+            try:
+                if pd.isna(val): return pd.NaT
+                if hasattr(val, 'date'): return val.date() 
+                if isinstance(val, (int, float)): 
+                    return pd.to_datetime(val, unit='D', origin='1899-12-30').date()
+                s = str(val).strip().split(' ')[0]
+                return pd.to_datetime(s, dayfirst=True).date()
+            except:
+                return pd.NaT
+
+        df_main['Ngày'] = df_main['Ngày'].apply(safe_date_parse)
+        df_main = df_main.dropna(subset=['Ngày'])
+        return df_main
+    except Exception as e:
+        return pd.DataFrame()
 
 @st.cache_data(ttl=10)
 def get_system_data():
@@ -32,7 +89,6 @@ def get_system_data():
     try:
         sh = client.open_by_key(SHEET_ID)
         
-        # Đọc trực tiếp từ các sheet đã tồn tại trên Google Sheet
         def read_ws(name):
             try:
                 data = sh.worksheet(name).get_all_records()
@@ -44,8 +100,31 @@ def get_system_data():
         df_loai_nghi = read_ws("LoaiNghi")
         df_config = read_ws("Config")
         df_nhanvien = read_ws("Nhanvien")
-        df_lich = read_ws("LichNghi")
+        df_backup = read_ws("LichNghi") # Sheet dự phòng trên Google Sheet
         
+        # Tải dữ liệu chính từ file .xlsb trên Google Drive
+        df_main_lich = load_main_lich_nghi(GDRIVE_LINK)
+        
+        # Hợp nhất dữ liệu chính (.xlsb) và dữ liệu dự phòng (Google Sheet LichNghi)
+        if not df_backup.empty:
+            # Chuẩn hóa cột dự phòng để gộp chung
+            df_backup['Ngày'] = pd.to_datetime(df_backup['Ngày'], dayfirst=True, errors='coerce').dt.date
+            df_backup_formatted = pd.DataFrame({
+                'Ngày': df_backup['Ngày'],
+                'Tên nhân viên': df_backup.get('Tên nhân viên', ''),
+                'Lý do nghỉ': df_backup.get('Lý do nghỉ', ''),
+                'Chi tiết': df_backup.get('Chi tiết', ''),
+                'Số ngày tính': pd.to_numeric(df_backup.get('Số ngày tính', 1), errors='coerce').fillna(1),
+                'Số ngày đã nghỉ trong tháng': 0,
+                'Phạt vi phạm': pd.to_numeric(df_backup.get('Phạt vi phạm', 0), errors='coerce').fillna(0),
+                'Ngày cập nhật': df_backup.get('Ngày tạo', ''),
+                'Giờ cập nhật': '',
+                'Người cập nhật': df_backup.get('Người tạo', '')
+            })
+            df_lich = pd.concat([df_main_lich, df_backup_formatted], ignore_index=True)
+        else:
+            df_lich = df_main_lich
+
         config_dict = {}
         if not df_config.empty and 'Key' in df_config.columns and 'Value' in df_config.columns:
             for _, row in df_config.iterrows():
@@ -60,7 +139,7 @@ def get_system_data():
 
         return df_taikhoan, df_loai_nghi, config_dict, df_nhanvien, df_lich
     except Exception as e:
-        st.error(f"Lỗi kết nối tới Google Sheet: {e}")
+        st.error(f"Lỗi kết nối hệ thống: {e}")
         return None, None, None, None, None
 
 # --- TẢI DỮ LIỆU ---
@@ -157,7 +236,7 @@ if st.session_state.current_role in ["admin", "letan"]:
                         client.open_by_key(SHEET_ID).worksheet("LichNghi").append_row([
                             str(ngay), nv, ly_do, chitiet, s_ngay, p_val, str(date.today()), st.session_state.current_user
                         ])
-                        st.success("✅ Đã ghi nhận lịch nghỉ thành công!")
+                        st.success("✅ Đã ghi nhận lịch nghỉ thành công vào kho dự phòng!")
                         st.cache_data.clear()
                         st.rerun()
 
@@ -170,7 +249,7 @@ if st.session_state.current_role == "admin":
         st.dataframe(df_loai_nghi, use_container_width=True, hide_index=True)
 
 # --- HIỂN THỊ DANH SÁCH LỊCH NGHỈ ---
-st.subheader("📋 Lịch Sử Nghỉ Đã Đăng Ký")
+st.subheader("📋 Lịch Sử Nghỉ Đã Đăng Ký (Từ File Chính .xlsb & Dự Phòng)")
 if not df_lich.empty:
     st.dataframe(df_lich, use_container_width=True, hide_index=True)
 else:

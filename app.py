@@ -12,8 +12,13 @@ st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout
 @st.cache_resource
 def get_gspread_client():
     try:
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ]
         creds_dict = dict(st.secrets["gcp_service_account"])
-        return gspread.authorize(Credentials.from_service_account_info(creds_dict))
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+        return gspread.authorize(creds)
     except Exception as e:
         st.error(f"Lỗi xác thực thông tin tài khoản Google (Secrets): {e}")
         return None
@@ -27,14 +32,12 @@ def get_system_data():
     try:
         sh = client.open_by_key(SHEET_ID)
         
-        # Hàm hỗ trợ lấy dữ liệu an toàn, nếu thiếu sheet tự động tạo mới rỗng
         def get_safe_worksheet_data(sheet_name, default_cols):
             try:
                 ws = sh.worksheet(sheet_name)
                 data = ws.get_all_records()
                 return pd.DataFrame(data) if data else pd.DataFrame(columns=default_cols)
             except:
-                # Nếu chưa có sheet, tạo mới để app không bị lỗi
                 ws = sh.add_worksheet(title=sheet_name, rows="100", cols="20")
                 ws.append_row(default_cols)
                 return pd.DataFrame(columns=default_cols)
@@ -53,7 +56,6 @@ def get_system_data():
                 except:
                     pass
                     
-        # Mặc định nếu thiếu config
         if 'weekday_limit' not in config_dict: config_dict['weekday_limit'] = 5
         if 'weekend_limit' not in config_dict: config_dict['weekend_limit'] = 2
         if 'phat_sinh_limit' not in config_dict: config_dict['phat_sinh_limit'] = 1
@@ -67,7 +69,7 @@ def get_system_data():
 df_taikhoan, df_loai_nghi, config, df_nhanvien, df_lich = get_system_data()
 
 if df_taikhoan is None:
-    st.warning("⚠️ Không thể kết nối dữ liệu. Vui lòng kiểm tra lại quyền chia sẻ file Google Sheet với Service Account.")
+    st.warning("⚠️ Không thể kết nối dữ liệu. Vui lòng kiểm tra lại cấu hình.")
     st.stop()
 
 # --- ĐĂNG NHẬP ---
@@ -81,7 +83,6 @@ if not st.session_state.logged_in:
         user_in = st.text_input("Tên đăng nhập").strip()
         pwd_in = st.text_input("Mật khẩu", type="password")
         if st.form_submit_button("Đăng Nhập"):
-            # Tài khoản mặc định Admin cứng phòng hờ
             if user_in == "admin" and pwd_in == "32531235":
                 st.session_state.logged_in = True
                 st.session_state.current_user = "Quản Trị Viên"
@@ -126,7 +127,6 @@ if st.session_state.current_role in ["admin", "letan"]:
             ly_do = st.selectbox("Lý do nghỉ:", ["-- Chọn lý do --"] + ly_do_list)
             chitiet = st.text_input("Chi tiết vi phạm / Ghi chú (nếu có):").strip()
             
-            # Hiển thị mức phạt tạm tính
             phat_preview = 0.0
             if ly_do != "-- Chọn lý do --" and not df_loai_nghi.empty:
                 r_match = df_loai_nghi[df_loai_nghi['Lý do nghỉ'] == ly_do]
@@ -145,16 +145,13 @@ if st.session_state.current_role in ["admin", "letan"]:
                     s_ngay = float(row_rule['Số ngày tính phép']) if pd.notna(row_rule['Số ngày tính phép']) else 0.0
                     p_val = float(row_rule['Phạt vi phạm']) if pd.notna(row_rule['Phạt vi phạm']) else 0.0
                     
-                    # 1. Rào chắn giờ Nghỉ phát sinh
                     is_weekend = ngay.weekday() >= 5
                     if "phát sinh" in ly_do.lower() and datetime.now().time() < time(9, 0):
                         st.error("❌ Chỉ được phép đăng ký 'Nghỉ phát sinh' từ 09:00 sáng trở đi!")
-                    # 2. Rào chắn giới hạn ngày thường / cuối tuần
                     elif (not is_weekend and len(df_lich[df_lich['Ngày'] == str(ngay)]) >= config.get('weekday_limit', 5)) or \
                          (is_weekend and len(df_lich[df_lich['Ngày'] == str(ngay)]) >= config.get('weekend_limit', 2)):
                         limit_val = config.get('weekday_limit', 5) if not is_weekend else config.get('weekend_limit', 2)
                         st.error(f"❌ Ngày {ngay.strftime('%d/%m/%Y')} đã đạt giới hạn tối đa {limit_val} người đăng ký nghỉ!")
-                    # 3. Rào chắn giới hạn phát sinh
                     elif "phát sinh" in ly_do.lower() and len(df_lich[(df_lich['Ngày'] == str(ngay)) & (df_lich['Lý do nghỉ'].str.contains("phát sinh", case=False))]) >= config.get('phat_sinh_limit', 1):
                         st.error(f"❌ Đã hết suất 'Nghỉ phát sinh' cho ngày này!")
                     else:

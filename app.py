@@ -62,7 +62,6 @@ def load_main_lich_nghi(url):
             'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
         ]
         
-        # Chuẩn hóa ngày tháng
         def safe_date_parse(val):
             try:
                 if pd.isna(val): return pd.NaT
@@ -100,14 +99,11 @@ def get_system_data():
         df_loai_nghi = read_ws("LoaiNghi")
         df_config = read_ws("Config")
         df_nhanvien = read_ws("Nhanvien")
-        df_backup = read_ws("LichNghi") # Sheet dự phòng trên Google Sheet
+        df_backup = read_ws("LichNghi")
         
-        # Tải dữ liệu chính từ file .xlsb trên Google Drive
         df_main_lich = load_main_lich_nghi(GDRIVE_LINK)
         
-        # Hợp nhất dữ liệu chính (.xlsb) và dữ liệu dự phòng (Google Sheet LichNghi)
         if not df_backup.empty:
-            # Chuẩn hóa cột dự phòng để gộp chung
             df_backup['Ngày'] = pd.to_datetime(df_backup['Ngày'], dayfirst=True, errors='coerce').dt.date
             df_backup_formatted = pd.DataFrame({
                 'Ngày': df_backup['Ngày'],
@@ -192,7 +188,28 @@ with col_l:
 
 st.markdown("---")
 
-# --- NHẬP LỊCH NGHỈ (DÀNH CHO ADMIN & LỄ TÂN) ---
+# --- 1. GIAO DIỆN DÀNH CHO NHÂN VIÊN ---
+if st.session_state.current_role == "nhanvien":
+    st.subheader(f"👤 Lịch sử nghỉ cá nhân của: {st.session_state.current_user}")
+    if not df_lich.empty and 'Tên nhân viên' in df_lich.columns:
+        # Lọc lịch sử của đúng nhân viên đó
+        nv_lich = df_lich[df_lich['Tên nhân viên'].astype(str).str.strip().str.lower() == st.session_state.current_user.lower()]
+        if not nv_lich.empty:
+            co_phep = nv_lich[nv_lich['Số ngày tính'] > 0]
+            khong_phep = nv_lich[(nv_lich['Số ngày tính'] == 0) & (nv_lich['Phạt vi phạm'] > 0)]
+            
+            c1, c2 = st.columns(2)
+            c1.metric("Tổng ngày nghỉ CÓ phép", f"{co_phep['Số ngày tính'].sum():g}")
+            c2.metric("Số lượt vi phạm KHÔNG phép", len(khong_phep))
+            
+            # Ẩn cột phạt với nhân viên nếu cần, hoặc hiển thị chi tiết
+            st.dataframe(nv_lich, use_container_width=True, hide_index=True)
+        else:
+            st.info("Bạn chưa có lịch sử nghỉ phép nào trên hệ thống.")
+    else:
+        st.info("Chưa có dữ liệu lịch sử nghỉ.")
+
+# --- 2. GIAO DIỆN DÀNH CHO ADMIN & LỄ TÂN ---
 if st.session_state.current_role in ["admin", "letan"]:
     with st.expander("📝 Nhập lịch nghỉ mới cho nhân viên", expanded=True):
         with st.form("nhap_form"):
@@ -240,17 +257,17 @@ if st.session_state.current_role in ["admin", "letan"]:
                         st.cache_data.clear()
                         st.rerun()
 
-# --- QUẢN LÝ QUY TẮC (ADMIN ONLY) ---
-if st.session_state.current_role == "admin":
-    with st.expander("⚙️ Xem & Quản lý Quy tắc / Giới hạn hệ thống"):
-        st.subheader("Cấu hình giới hạn (Sheet Config)")
-        st.json(config)
-        st.subheader("Danh mục lý do nghỉ & mức phạt (Sheet LoaiNghi)")
-        st.dataframe(df_loai_nghi, use_container_width=True, hide_index=True)
+    # --- QUẢN LÝ QUY TẮC (ADMIN ONLY) ---
+    if st.session_state.current_role == "admin":
+        with st.expander("⚙️ Xem & Quản lý Quy tắc / Giới hạn hệ thống"):
+            st.subheader("Cấu hình giới hạn (Sheet Config)")
+            st.json(config)
+            st.subheader("Danh mục lý do nghỉ & mức phạt (Sheet LoaiNghi)")
+            st.dataframe(df_loai_nghi, use_container_width=True, hide_index=True)
 
-# --- HIỂN THỊ DANH SÁCH LỊCH NGHỈ ---
-st.subheader("📋 Lịch Sử Nghỉ Đã Đăng Ký (Từ File Chính .xlsb & Dự Phòng)")
-if not df_lich.empty:
-    st.dataframe(df_lich, use_container_width=True, hide_index=True)
-else:
-    st.info("Chưa có dữ liệu lịch nghỉ nào được ghi nhận.")
+    # --- HIỂN THỊ TOÀN BỘ DANH SÁCH LỊCH NGHỈ CHO ADMIN/LỄ TÂN ---
+    st.subheader("📋 Lịch Sử Nghỉ Toàn Hệ Thống (Từ File Chính .xlsb & Dự Phòng)")
+    if not df_lich.empty:
+        st.dataframe(df_lich, use_container_width=True, hide_index=True)
+    else:
+        st.info("Chưa có dữ liệu lịch nghỉ nào được ghi nhận.")

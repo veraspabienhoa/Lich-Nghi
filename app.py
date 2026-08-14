@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
+import calendar
 import requests
 import os
 import io
@@ -34,7 +35,6 @@ st.markdown("""
 SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"
 
 @st.cache_resource
-py_client = None
 def get_gspread_client():
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -162,6 +162,7 @@ def load_lich_nghi(url):
         
         return df_lich
     except Exception as e:
+        st.error(f"Lỗi đọc dữ liệu: {e}")
         return pd.DataFrame()
 
 @st.cache_data(show_spinner=False)
@@ -200,7 +201,6 @@ if not st.session_state.logged_in:
         submit = st.form_submit_button("Đăng Nhập")
         
         if submit:
-            # Chuẩn hóa danh sách tài khoản từ Google Sheet
             user_found = False
             user_chuan = ""
             
@@ -240,7 +240,7 @@ with col_logout:
             st.session_state.current_user = ""
             st.rerun()
 
-# Hộp thoại đổi mật khẩu (Modal/Expander khi bấm nút)
+# Hộp thoại đổi mật khẩu
 if 'show_change_pass' not in st.session_state:
     st.session_state.show_change_pass = False
 
@@ -256,7 +256,6 @@ if st.session_state.show_change_pass and st.session_state.current_user != "Quả
         submit_pass = st.form_submit_button("Cập Nhật Mật Khẩu")
         
         if submit_pass:
-            # Kiểm tra mật khẩu cũ
             current_row = df_nv[df_nv['Tên nhân viên'].astype(str).str.strip().str.lower() == st.session_state.current_user.lower()]
             if not current_row.empty:
                 db_old_pass = str(current_row.iloc[0]['Mật khẩu']).strip()

@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import date
 import requests
 import os
+import io
 
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
@@ -112,6 +113,14 @@ def load_data(url):
         st.error(f"Lỗi đọc dữ liệu: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
+# --- HÀM XUẤT EXCEL ---
+def to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='DuLieuLichNghi')
+    processed_data = output.getvalue()
+    return processed_data
+
 # Link gốc
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
@@ -220,15 +229,33 @@ khong_phep_df = filtered_df[(filtered_df['Số ngày tính'] == 0) & (filtered_d
 # Tính tổng số ngày nghỉ có phép
 tong_ngay_co_phep = co_phep_df['Số ngày tính'].sum()
 
-# Hiển thị số liệu KPI (Đã cập nhật để hiển thị Số Ngày thay vì Số Người)
+# Hiển thị số liệu KPI 
 st.write("") 
 col1, col2, col3 = st.columns(3)
 col1.metric("Tổng lượt ghi nhận", len(filtered_df))
 col2.metric("✅ Số NGÀY nghỉ CÓ phép", f"{tong_ngay_co_phep:g}")
 col3.metric("❌ Số LƯỢT nghỉ KHÔNG phép", len(khong_phep_df))
 
-# Hiển thị bảng
-st.subheader(f"Chi tiết danh sách (Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')})")
+# Cột cần ẩn
+cols_to_hide = ['Phạt vi phạm']
+export_df = filtered_df.drop(columns=cols_to_hide, errors='ignore')
+
+# Nút Export ra Excel
+col_header, col_download = st.columns([7, 3])
+with col_header:
+    st.subheader(f"Chi tiết danh sách (Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')})")
+with col_download:
+    st.write("") # Dóng hàng với tiêu đề
+    if not export_df.empty:
+        excel_data = to_excel(export_df)
+        file_name = f"LichNghi_{start_date.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.xlsx"
+        st.download_button(
+            label="📥 Tải Dữ Liệu Lọc Xuống (Excel)",
+            data=excel_data,
+            file_name=file_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
 if filtered_df.empty:
     available_dates = df_lich['Ngày'].dropna().unique()
@@ -241,7 +268,6 @@ if filtered_df.empty:
         nv_history_df = df_lich[df_lich['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
         
         if not nv_history_df.empty:
-            # Thống kê toàn thời gian cho nhân viên này
             nv_co_phep = nv_history_df[nv_history_df['Số ngày tính'] > 0]
             nv_khong_phep = nv_history_df[(nv_history_df['Số ngày tính'] == 0) & (nv_history_df['Phạt vi phạm'] > 0)]
             
@@ -254,10 +280,8 @@ if filtered_df.empty:
 # --- HIỂN THỊ BẢNG CHI TIẾT THEO TAB ---
 tab1, tab2, tab3 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ KHÔNG phép"])
 
-cols_to_hide = ['Phạt vi phạm']
-
 with tab1:
-    st.dataframe(filtered_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
+    st.dataframe(export_df, use_container_width=True, hide_index=True)
 with tab2:
     if co_phep_df.empty:
         st.info("Không có dữ liệu nhân viên nghỉ có phép.")

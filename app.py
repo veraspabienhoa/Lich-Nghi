@@ -163,7 +163,7 @@ with col_logout:
         
 st.markdown("---")
 
-# CHỈNH SỬA: Thêm cột tìm kiếm theo tên nhân viên
+# Bộ lọc
 st.subheader("🔍 Lọc Dữ Liệu")
 col_date, col_name, col_refresh = st.columns([4, 4, 2])
 
@@ -190,8 +190,7 @@ with col_date:
             end_date = date_range[0]
 
 with col_name:
-    st.write("") # Dóng hàng cho cân đối với nút radio bên cạnh
-    # Lấy danh sách tên nhân viên từ sheet DanhSachNV
+    st.write("") 
     list_nv = ["- Tất cả nhân viên -"] + sorted(df_nv['Tên nhân viên'].dropna().astype(str).str.strip().unique().tolist())
     selected_nv = st.selectbox("👤 Tìm kiếm / Chọn tên nhân viên:", list_nv)
 
@@ -206,15 +205,15 @@ with col_refresh:
 mask_date = (df_lich['Ngày'] >= start_date) & (df_lich['Ngày'] <= end_date)
 filtered_df = df_lich[mask_date]
 
-# 2. Lọc theo tên nhân viên (nếu người dùng không chọn "Tất cả")
+# 2. Lọc theo tên nhân viên 
 if selected_nv != "- Tất cả nhân viên -":
     filtered_df = filtered_df[filtered_df['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
 
-# Phân loại có phép / không phép
+# Phân loại
 co_phep_df = filtered_df[filtered_df['Số ngày tính'] > 0]
 khong_phep_df = filtered_df[(filtered_df['Số ngày tính'] == 0) & (filtered_df['Phạt vi phạm'] > 0)]
 
-# Hiển thị số liệu
+# Hiển thị số liệu KPI
 st.markdown("---")
 col1, col2, col3 = st.columns(3)
 col1.metric("Tổng số lượt nghỉ", len(filtered_df))
@@ -222,30 +221,44 @@ col2.metric("✅ Số người nghỉ CÓ phép", len(co_phep_df))
 col3.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
 st.markdown("---")
 
-# Hiển thị bảng
+# Cột cần ẩn khỏi giao diện
+cols_to_hide = ['Phạt vi phạm']
+
 st.subheader(f"Chi tiết danh sách (Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')})")
 
+# --- NÂNG CẤP HIỂN THỊ KHI KHÔNG CÓ DỮ LIỆU ---
 if filtered_df.empty:
+    # 1. Báo cáo chung
     available_dates = df_lich['Ngày'].dropna().unique()
     if len(available_dates) > 0:
         available_dates = sorted(available_dates, reverse=True)[:5]
         dates_str = ", ".join([d.strftime('%d/%m/%Y') for d in available_dates])
-        st.info(f"💡 Hệ thống hiện không thấy dữ liệu phù hợp với điều kiện lọc.\n\nCác ngày đang có dữ liệu: **{dates_str}**")
+        st.info(f"💡 Hệ thống không thấy dữ liệu trong khoảng thời gian này.\n\nCác ngày đang có dữ liệu chung trên hệ thống: **{dates_str}**")
+        
+    # 2. Báo cáo riêng biệt cho nhân viên + Nút hiển thị
+    if selected_nv != "- Tất cả nhân viên -":
+        # Lọc dữ liệu GỐC để tìm lịch sử của người này (không bị giới hạn bởi bộ lọc ngày tháng ở trên)
+        nv_history_df = df_lich[df_lich['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
+        
+        if not nv_history_df.empty:
+            # Dùng Expander hoạt động như một nút bấm thả xuống
+            with st.expander(f"📅 Bấm vào đây để xem TẤT CẢ lịch sử nghỉ phép của nhân viên {selected_nv}"):
+                st.dataframe(nv_history_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
+        else:
+            st.warning(f"Nhân viên **{selected_nv}** hiện chưa từng có dữ liệu nghỉ phép trên hệ thống.")
 
+# --- HIỂN THỊ BẢNG CHI TIẾT THEO TAB ---
 tab1, tab2, tab3 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ KHÔNG phép"])
 
-# Ẩn cột 'Phạt vi phạm' khỏi giao diện hiển thị
-cols_to_hide = ['Phạt vi phạm']
-
 with tab1:
-    st.dataframe(filtered_df.drop(columns=cols_to_hide), use_container_width=True, hide_index=True)
+    st.dataframe(filtered_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
 with tab2:
     if co_phep_df.empty:
         st.info("Không có dữ liệu nhân viên nghỉ có phép.")
     else:
-        st.dataframe(co_phep_df.drop(columns=cols_to_hide), use_container_width=True, hide_index=True)
+        st.dataframe(co_phep_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
 with tab3:
     if khong_phep_df.empty:
         st.success("Tuyệt vời! Không có nhân viên nào nghỉ không phép.")
     else:
-        st.dataframe(khong_phep_df.drop(columns=cols_to_hide), use_container_width=True, hide_index=True)
+        st.dataframe(khong_phep_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)

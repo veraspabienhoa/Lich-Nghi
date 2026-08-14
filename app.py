@@ -342,7 +342,7 @@ if "current_role" not in st.session_state:
     st.session_state.current_role = ""
 
 if not st.session_state.logged_in:
-    st.title("🔐 Đăng Nhập Hệ thống")
+    st.title("🔐 Đăng Nhập Hệ Thống")
     
     with st.form("login_form"):
         username_input = st.text_input("Tên đăng nhập").strip()
@@ -612,6 +612,10 @@ if st.session_state.current_role in ["admin", "letan"]:
                         st.error("❌ Vui lòng chọn lý do nghỉ!")
                     else:
                         norm_loai_submit = chosen_loai.strip().lower()
+                        
+                        # --- KIỂM TRA PHÉP NĂM ĐỂ BỎ QUA GIỚI HẠN ---
+                        is_phep_nam = any(kw in norm_loai_submit for kw in ["phép năm", "phep nam"])
+                        
                         can_proceed = True
                         
                         if norm_loai_submit == "nghỉ phát sinh":
@@ -662,7 +666,8 @@ if st.session_state.current_role in ["admin", "letan"]:
                                 if not df_lich.empty:
                                     today_total_nghi = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Số ngày tính'] > 0)])
                                 
-                                if val_songay > 0 and "phep nam" not in norm_loai_submit and today_total_nghi >= max_people:
+                                # Nếu là Phép năm thì is_phep_nam là True -> bỏ qua kiểm tra max_people
+                                if val_songay > 0 and not is_phep_nam and today_total_nghi >= max_people:
                                     st.error(f"❌ Ngày {chosen_date.strftime('%d/%m/%Y')} đã đạt giới hạn tối đa {max_people} người nghỉ/ngày.")
                                 else:
                                     success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
@@ -762,7 +767,7 @@ if selected_nv != "- Tất cả nhân viên -":
 
 # --- ĐOẠN MỚI CẬP NHẬT: Loại trừ các lý do không tính vào KPI Nghỉ ---
 # Sử dụng từ khóa (substring) để bắt mọi biến thể (có dấu, không dấu, viết hoa, viết thường)
-# "phép năm" và "phep nam" đã được xóa khỏi danh sách này để chúng được tính là CÓ PHÉP
+# CHÚ Ý: "phép năm" và "phep nam" đã được XÓA khỏi danh sách này để chúng được đếm là CÓ PHÉP
 excluded_keywords = [
     "đi trễ", "di tre",
     "không dọn vệ sinh", "khong don ve sinh",
@@ -783,6 +788,7 @@ def is_excluded(reason):
             return True
     return False
 
+# Lọc riêng để lấy "Danh sách thực nghỉ" dùng cho 4 cột KPI
 valid_nghi_mask = ~filtered_df['Lý do nghỉ'].apply(is_excluded)
 df_thuc_nghi = filtered_df[valid_nghi_mask]
 ly_do_thuc_nghi_lower = df_thuc_nghi['Lý do nghỉ'].astype(str).str.strip().str.lower()
@@ -792,7 +798,7 @@ phat_sinh_df = df_thuc_nghi[ly_do_thuc_nghi_lower == 'nghỉ phát sinh']
 khong_phep_df = df_thuc_nghi[ly_do_thuc_nghi_lower.str.contains('không phép', na=False)]
 co_phep_df = df_thuc_nghi[(ly_do_thuc_nghi_lower != 'nghỉ phát sinh') & (~ly_do_thuc_nghi_lower.str.contains('không phép', na=False))]
 
-# Thống kê KPI mới (Bao gồm 4 cột như yêu cầu)
+# Thống kê KPI mới (Bao gồm 4 cột)
 st.write("") 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Tổng số người nghỉ", len(df_thuc_nghi))
@@ -801,7 +807,7 @@ col3.metric("⚠️ Số người nghỉ PHÁT SINH", len(phat_sinh_df))
 col4.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
 
 cols_to_hide = ['Phạt vi phạm']
-# export_df chứa TẤT CẢ dữ liệu (bao gồm cả vi phạm) để xem và tải xuống
+# export_df chứa TẤT CẢ dữ liệu (bao gồm cả vi phạm/đi trễ) để hiển thị ở tab "Tất cả danh sách"
 export_df = filtered_df.drop(columns=cols_to_hide, errors='ignore')
 
 # Nút Export Excel
@@ -823,7 +829,7 @@ with col_download:
     else:
         st.button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", disabled=True, use_container_width=True)
 
-# Hiển thị bảng chi tiết theo Tab (Cập nhật thêm tab Phát Sinh)
+# Hiển thị bảng chi tiết theo Tab
 tab1, tab2, tab3, tab4 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ PHÁT SINH", "Danh sách Nghỉ KHÔNG phép"])
 
 with tab1:

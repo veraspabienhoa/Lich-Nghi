@@ -766,8 +766,6 @@ if selected_nv != "- Tất cả nhân viên -":
 
 
 # --- ĐOẠN MỚI CẬP NHẬT: Loại trừ các lý do không tính vào KPI Nghỉ ---
-# Sử dụng từ khóa (substring) để bắt mọi biến thể (có dấu, không dấu, viết hoa, viết thường)
-# CHÚ Ý: "phép năm" và "phep nam" đã được XÓA khỏi danh sách này để chúng được đếm là CÓ PHÉP
 excluded_keywords = [
     "đi trễ", "di tre",
     "không dọn vệ sinh", "khong don ve sinh",
@@ -798,17 +796,42 @@ phat_sinh_df = df_thuc_nghi[ly_do_thuc_nghi_lower == 'nghỉ phát sinh']
 khong_phep_df = df_thuc_nghi[ly_do_thuc_nghi_lower.str.contains('không phép', na=False)]
 co_phep_df = df_thuc_nghi[(ly_do_thuc_nghi_lower != 'nghỉ phát sinh') & (~ly_do_thuc_nghi_lower.str.contains('không phép', na=False))]
 
-# Thống kê KPI mới (Bao gồm 4 cột)
-st.write("") 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Tổng số người nghỉ", len(df_thuc_nghi))
-col2.metric("✅ Số người nghỉ CÓ phép", len(co_phep_df))
-col3.metric("⚠️ Số người nghỉ PHÁT SINH", len(phat_sinh_df))
-col4.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
+# Tính tổng tiền phạt cho kỳ được chọn
+tong_phat = filtered_df['Phạt vi phạm'].sum()
 
-cols_to_hide = ['Phạt vi phạm']
+# Thống kê KPI mới (Bao gồm 4 hoặc 5 cột tùy role)
+st.write("") 
+if st.session_state.current_role == "admin":
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Tổng số người nghỉ", len(df_thuc_nghi))
+    col2.metric("✅ CÓ phép", len(co_phep_df))
+    col3.metric("⚠️ PHÁT SINH", len(phat_sinh_df))
+    col4.metric("❌ KHÔNG phép", len(khong_phep_df))
+    # Hiển thị số tiền format phân cách hàng nghìn (vd: 150.000 đ)
+    col5.metric("💰 Tổng tiền phạt", f"{tong_phat:,.0f} đ".replace(",", "."))
+    
+    # Không ẩn cột Phạt vi phạm đối với Admin
+    cols_to_hide = []
+else:
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Tổng số người nghỉ", len(df_thuc_nghi))
+    col2.metric("✅ Số người nghỉ CÓ phép", len(co_phep_df))
+    col3.metric("⚠️ Số người nghỉ PHÁT SINH", len(phat_sinh_df))
+    col4.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
+    
+    # Ẩn cột Phạt vi phạm đối với nhân viên thường / Lễ tân
+    cols_to_hide = ['Phạt vi phạm']
+
 # export_df chứa TẤT CẢ dữ liệu (bao gồm cả vi phạm/đi trễ) để hiển thị ở tab "Tất cả danh sách"
 export_df = filtered_df.drop(columns=cols_to_hide, errors='ignore')
+
+# Dữ liệu riêng dành cho chức năng Export Excel (để thêm dòng TỔNG CỘNG cho Admin)
+df_for_excel = export_df.copy()
+if st.session_state.current_role == "admin" and not df_for_excel.empty:
+    tong_cong_row = pd.Series(index=df_for_excel.columns, dtype=object)
+    tong_cong_row['Tên nhân viên'] = "TỔNG TIỀN PHẠT:"
+    tong_cong_row['Phạt vi phạm'] = tong_phat
+    df_for_excel = pd.concat([df_for_excel, tong_cong_row.to_frame().T], ignore_index=True)
 
 # Nút Export Excel
 col_header, col_download = st.columns([7, 3])
@@ -817,7 +840,8 @@ with col_header:
 with col_download:
     st.write("") 
     if not export_df.empty:
-        excel_data = to_excel(export_df)
+        # Xuất file Excel với dòng tổng cộng cho Admin
+        excel_data = to_excel(df_for_excel)
         file_name = f"LichNghi_{start_date.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.xlsx"
         st.download_button(
             label="📥 Tải Dữ Liệu Lọc Xuống (Excel)",
@@ -829,7 +853,7 @@ with col_download:
     else:
         st.button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", disabled=True, use_container_width=True)
 
-# Hiển thị bảng chi tiết theo Tab
+# Hiển thị bảng chi tiết theo Tab (Cập nhật thêm tab Phát Sinh)
 tab1, tab2, tab3, tab4 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ PHÁT SINH", "Danh sách Nghỉ KHÔNG phép"])
 
 with tab1:

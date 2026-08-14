@@ -474,19 +474,23 @@ if st.session_state.show_modal:
 
 st.markdown("---")
 
-# --- TAB RIÊNG BIỆT DÀNH RIÊNG CHO ADMIN: CẤU HÌNH QUY TẮC & MỨC PHẠT ---
+# --- TAB RIÊNG BIỆT DÀNH RIÊNG CHO ADMIN: CẤU HÌNH QUY TẮC & MỨC PHẠT (ĐÃ BỎ CỘT CUỐI TUẦN) ---
 if st.session_state.current_role == "admin":
     with st.expander("⚙️ Cấu hình Quy tắc & Mức phạt chuẩn (Độc quyền Admin)", expanded=False):
-        st.markdown("### 📋 Danh Mục Loại Nghỉ & Mức Phạt Chuẩn (Tham chiếu trực tiếp từ LoaiNghi)")
+        st.markdown("### 📋 Danh Mục Loại Nghỉ & Mức Phạt Chuẩn")
         st.info("Bảng dưới đây hiển thị toàn bộ quy định loại nghỉ, số ngày tính và mức phạt hiện đang được hệ thống áp dụng tự động.")
         
-        # Hiển thị bảng cấu hình từ sheet LoaiNghi
         if not df_loai_nghi.empty:
-            df_display_rule = df_loai_nghi.iloc[:, [1, 2, 3, 4, 5]].dropna(subset=[df_loai_nghi.columns[1]])
-            df_display_rule.columns = ["Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính", "Phạt vi phạm", "Cuối tuần"]
-            st.dataframe(df_display_rule, use_container_width=True, hide_index=True)
+            # Lấy các cột: [Loại nghỉ (col 1), Chi tiết (col 2), Số ngày tính (col 3), Phạt vi phạm (col 4)] và bỏ cột Cuối tuần
+            cols_to_use = [1, 2, 3, 4] if len(df_loai_nghi.columns) > 4 else [1, 2, 3]
+            df_display_rule = df_loai_nghi.iloc[:, cols_to_use].dropna(subset=[df_loai_nghi.columns[1]])
+            if len(df_display_rule.columns) == 4:
+                df_display_rule.columns = ["Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính", "Phạt vi phạm"]
+            else:
+                df_display_rule.columns = ["Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính"]
             
-            st.markdown("*(Lưu ý: Để thêm bớt hoặc thay đổi các mức phạt cố định này lâu dài trong tương lai, Quản trị viên có thể cập nhật trực tiếp trên sheet `LoaiNghi` của file Excel nguồn trên Google Drive, hệ thống sẽ tự động cập nhật ngay lập tức).*")
+            st.dataframe(df_display_rule, use_container_width=True, hide_index=True)
+            st.markdown("*(Lưu ý: Để thay đổi các mức phạt cố định này, Quản trị viên có thể cập nhật trực tiếp trên sheet `LoaiNghi` của file Excel nguồn trên Google Drive).*")
         else:
             st.warning("Chưa tải được dữ liệu bảng quy tắc loại nghỉ.")
 

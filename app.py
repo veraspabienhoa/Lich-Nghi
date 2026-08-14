@@ -111,7 +111,6 @@ def admin_manage_account(action, target_name, new_name="", new_pass="", new_role
             all_values = sheet.get_all_values()
             for r in all_values[1:]:
                 if len(r) > 1 and str(r[1]).strip().lower() == target_name.strip().lower():
-                    # Nếu đã có tên nhưng chưa có dòng phân quyền thì cập nhật lại
                     return False, f"Nhân viên '{target_name}' đã tồn tại trong hệ thống tài khoản!"
             next_stt = len(all_values)
             pass_to_set = new_pass.strip() if new_pass.strip() else "123456"
@@ -122,7 +121,6 @@ def admin_manage_account(action, target_name, new_name="", new_pass="", new_role
         elif action == "Chỉnh sửa":
             cells = sheet.findall(target_name, in_column=2)
             if not cells:
-                # Nếu chưa có trong Google Sheet mật khẩu, tự động thêm mới vào
                 all_values = sheet.get_all_values()
                 next_stt = len(all_values)
                 sheet.append_row([next_stt, target_name.strip(), "123456", new_role])
@@ -332,62 +330,77 @@ if btn_manage_account:
     st.session_state.show_modal = not st.session_state.show_modal
 
 if st.session_state.show_modal:
-    # 1. Giao diện ADMIN: Thêm, Sửa, Xóa và Phân quyền tách biệt rõ ràng
+    # 1. Giao diện ADMIN: Sử dụng các Tab phân tách rõ ràng tránh đè lẫn giao diện
     if st.session_state.current_role == "admin":
-        with st.form("admin_manage_form"):
-            st.subheader("🛠 Quản lý tài khoản & Phân quyền")
-            
-            action_type = st.selectbox("Chọn thao tác:", ["Thêm nhân viên mới", "Chỉnh sửa / Đổi vai trò", "Xóa tài khoản"])
-            
-            # Gộp danh sách nhân viên từ Google Sheet credentials và từ file Excel gốc (DanhSachNV) để đảm bảo không bị thiếu
-            users_from_sheet = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
-            users_from_excel = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
-            existing_users = sorted(list(set(users_from_sheet + users_from_excel)))
-            
-            input_new_name = ""
-            input_new_pass = ""
-            input_new_role = "nhanvien"
-            target_nv = ""
-            
-            if action_type == "Thêm nhân viên mới":
-                input_new_name = st.text_input("Tên nhân viên mới:").strip()
-                input_new_pass = st.text_input("Mật khẩu ban đầu (Để trống sẽ tự động là 123456):", type="password")
-                input_new_role = st.selectbox("Vai trò / Phân quyền:", ["nhanvien", "letan", "admin"], index=0)
-                target_nv = input_new_name
-            elif action_type == "Xóa tài khoản":
-                target_nv = st.selectbox("Chọn tài khoản cần xóa:", existing_users) if existing_users else ""
-            else: # Chỉnh sửa / Đổi vai trò
-                target_nv = st.selectbox("Chọn tài khoản cần chỉnh sửa:", existing_users) if existing_users else ""
-                input_new_name = st.text_input("Tên mới (Để trống nếu giữ nguyên):").strip()
-                input_new_pass = st.text_input("Mật khẩu mới (Để trống nếu giữ nguyên):", type="password")
+        st.subheader("🛠 Quản lý tài khoản & Phân quyền")
+        
+        tab_add, tab_edit, tab_del = st.tabs(["➕ Thêm nhân viên mới", "✏️ Chỉnh sửa / Đổi vai trò", "🗑️ Xóa tài khoản"])
+        
+        users_from_sheet = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
+        users_from_excel = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
+        existing_users = sorted(list(set(users_from_sheet + users_from_excel)))
+        
+        with tab_add:
+            with st.form("form_add_acc"):
+                new_name_in = st.text_input("Tên nhân viên mới:").strip()
+                new_pass_in = st.text_input("Mật khẩu ban đầu (Để trống sẽ là 123456):", type="password")
+                new_role_in = st.selectbox("Vai trò / Phân quyền:", ["nhanvien", "letan", "admin"], index=0, key="role_add")
+                submit_add = st.form_submit_button("Thêm Tài Khoản")
+                
+                if submit_add:
+                    if not new_name_in:
+                        st.error("❌ Vui lòng nhập tên nhân viên mới!")
+                    else:
+                        success, msg = admin_manage_account("Thêm mới", new_name_in, new_name_in, new_pass_in, new_role_in)
+                        if success:
+                            st.success(f"✅ {msg}")
+                            st.session_state.show_modal = False
+                        else:
+                            st.error(f"❌ {msg}")
+                            
+        with tab_edit:
+            with st.form("form_edit_acc"):
+                target_edit = st.selectbox("Chọn tài khoản cần chỉnh sửa:", existing_users) if existing_users else ""
+                edit_name_in = st.text_input("Tên mới (Để trống nếu giữ nguyên):").strip()
+                edit_pass_in = st.text_input("Mật khẩu mới (Để trống nếu giữ nguyên):", type="password")
                 
                 curr_role_val = "nhanvien"
-                if not df_credentials.empty and target_nv:
-                    match_row = df_credentials[df_credentials['Tên nhân viên'].astype(str).str.strip().str.lower() == target_nv.lower()]
+                if not df_credentials.empty and target_edit:
+                    match_row = df_credentials[df_credentials['Tên nhân viên'].astype(str).str.strip().str.lower() == target_edit.lower()]
                     if not match_row.empty:
                         curr_role_val = str(match_row.iloc[0].get('Phân quyền', 'nhanvien')).strip().lower()
                 role_indices = {"nhanvien": 0, "letan": 1, "admin": 2}
                 default_idx = role_indices.get(curr_role_val, 0)
                 
-                input_new_role = st.selectbox("Vai trò / Phân quyền mới:", ["nhanvien", "letan", "admin"], index=default_idx)
+                edit_role_in = st.selectbox("Vai trò / Phân quyền mới:", ["nhanvien", "letan", "admin"], index=default_idx, key="role_edit")
+                submit_edit = st.form_submit_button("Cập Nhật")
                 
-            submit_admin = st.form_submit_button("Thực Thi")
-            if submit_admin:
-                if action_type == "Thêm nhân viên mới" and not input_new_name:
-                    st.error("❌ Vui lòng nhập tên nhân viên mới!")
-                elif action_type != "Thêm nhân viên mới" and not target_nv:
-                    st.error("❌ Không có tài khoản nào được chọn!")
-                else:
-                    act_map = {"Thêm nhân viên mới": "Thêm mới", "Chỉnh sửa / Đổi vai trò": "Chỉnh sửa", "Xóa tài khoản": "Xóa"}
-                    real_action = act_map[action_type]
-                    name_to_pass = input_new_name if action_type == "Thêm nhân viên mới" else target_nv
-                    
-                    success, msg = admin_manage_account(real_action, name_to_pass, input_new_name, input_new_pass, input_new_role)
-                    if success:
-                        st.success(f"✅ {msg}")
-                        st.session_state.show_modal = False
+                if submit_edit:
+                    if not target_edit:
+                        st.error("❌ Vui lòng chọn tài khoản cần chỉnh sửa!")
                     else:
-                        st.error(f"❌ {msg}")
+                        success, msg = admin_manage_account("Chỉnh sửa", target_edit, edit_name_in, edit_pass_in, edit_role_in)
+                        if success:
+                            st.success(f"✅ {msg}")
+                            st.session_state.show_modal = False
+                        else:
+                            st.error(f"❌ {msg}")
+                            
+        with tab_del:
+            with st.form("form_del_acc"):
+                target_del = st.selectbox("Chọn tài khoản cần xóa:", existing_users) if existing_users else ""
+                submit_del = st.form_submit_button("Xóa Tài Khoản")
+                
+                if submit_del:
+                    if not target_del:
+                        st.error("❌ Vui lòng chọn tài khoản cần xóa!")
+                    else:
+                        success, msg = admin_manage_account("Xóa", target_del)
+                        if success:
+                            st.success(f"✅ {msg}")
+                            st.session_state.show_modal = False
+                        else:
+                            st.error(f"❌ {msg}")
                         
     # 2. Giao diện NHÂN VIÊN / LỄ TÂN đổi mật khẩu cá nhân
     else:

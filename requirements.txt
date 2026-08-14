@@ -3,3 +3,5 @@ pandas
 pyxlsb
 requests
 openpyxl
+gspread
+google-auth

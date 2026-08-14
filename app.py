@@ -313,64 +313,24 @@ def to_excel(df):
 # Tải dữ liệu 
 df_credentials = load_credentials() 
 df_backup = load_backup_sheet_data()
+df_loai_nghi_gsheet = load_loai_nghi_from_gsheet() # Đọc Loại nghỉ từ GSheet
+
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
 with st.spinner("Đang tải dữ liệu hệ thống..."):
-    df_lich, df_nv_excel, df_loai_nghi = load_lich_nghi(GDRIVE_LINK) 
+    df_lich, df_nv_excel, df_loai_nghi_excel = load_lich_nghi(GDRIVE_LINK) 
+
+# Ưu tiên sử dụng dữ liệu từ Google Sheets, nếu lỗi thì dùng từ Excel
+if not df_loai_nghi_gsheet.empty:
+    df_loai_nghi = df_loai_nghi_gsheet
+else:
+    df_loai_nghi = df_loai_nghi_excel
 
 if df_lich.empty or df_nv_excel.empty:
     st.warning("Hệ thống chưa tìm thấy dữ liệu. Vui lòng kiểm tra lại cấu hình.")
     if st.button("🔄 Tải lại dữ liệu"):
         st.cache_data.clear()
         st.rerun()
-    st.stop()
-
-# --- HỆ THỐNG ĐĂNG NHẬP & PHÂN QUYỀN ---
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "current_user" not in st.session_state:
-    st.session_state.current_user = ""
-if "current_role" not in st.session_state:
-    st.session_state.current_role = ""
-
-if not st.session_state.logged_in:
-    st.title("🔐 Đăng Nhập Hệ Thống")
-    
-    with st.form("login_form"):
-        username_input = st.text_input("Tên đăng nhập").strip()
-        password_input = st.text_input("Mật khẩu", type="password")
-        submit = st.form_submit_button("Đăng Nhập")
-        
-        if submit:
-            user_found = False
-            user_chuan = ""
-            user_role = "nhanvien"
-            
-            if username_input == "admin" and password_input == "32531235":
-                st.session_state.logged_in = True
-                st.session_state.current_user = "Quản Trị Viên"
-                st.session_state.current_role = "admin"
-                st.rerun()
-            else:
-                for _, row in df_credentials.iterrows():
-                    db_name = str(row['Tên nhân viên']).strip()
-                    db_pass = str(row['Mật khẩu']).strip()
-                    db_role = str(row.get('Phân quyền', 'nhanvien')).strip().lower()
-                    
-                    if username_input.lower() == db_name.lower():
-                        if password_input == db_pass:
-                            user_found = True
-                            user_chuan = db_name
-                            user_role = db_role if db_role else "nhanvien"
-                            break
-                
-                if user_found:
-                    st.session_state.logged_in = True
-                    st.session_state.current_user = user_chuan
-                    st.session_state.current_role = user_role
-                    st.rerun()
-                else:
-                    st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
     st.stop()
 
 # --- GIAO DIỆN CHÍNH ---

@@ -614,23 +614,16 @@ if st.session_state.current_role in ["admin", "letan"]:
                         norm_loai_submit = chosen_loai.strip().lower()
                         can_proceed = True
                         
-                        # --- KIỂM TRA QUY TẮC: NGHỈ PHÁT SINH ---
                         if norm_loai_submit == "nghỉ phát sinh":
-                            # Lấy giờ hiện tại theo múi giờ Việt Nam (UTC+7)
                             vn_tz = timezone(timedelta(hours=7))
                             current_hour = datetime.now(vn_tz).hour
                             
-                            # Ràng buộc thời gian nhập: 09:00 - 17:00
                             if current_hour < 9 or current_hour >= 17:
                                 st.error("❌ Lý do 'Nghỉ phát sinh' chỉ được phép nhập vào hệ thống trong khung giờ từ 09:00 đến 17:00!")
                                 can_proceed = False
-                                
-                            # Ràng buộc ngày cuối tuần: Không được phép
                             elif is_weekend:
                                 st.error("❌ Thứ 7 và Chủ nhật không được phép 'Nghỉ phát sinh'!")
                                 can_proceed = False
-                                
-                            # Ràng buộc số lượng người (Tối đa 2 người từ T2-T6)
                             else:
                                 count_ps = 0
                                 if not df_lich.empty:
@@ -664,7 +657,6 @@ if st.session_state.current_role in ["admin", "letan"]:
                             if already_booked_today:
                                 st.error(f"❌ Nhân viên **{chosen_nv}** đã được ghi nhận lịch nghỉ với lý do **'{chosen_loai}'** vào ngày {chosen_date.strftime('%d/%m/%Y')} rồi.")
                             else:
-                                # Giới hạn chung: T2-T6 (5 người), T7-CN (2 người)
                                 max_people = 5 if not is_weekend else 2
                                 today_total_nghi = 0
                                 if not df_lich.empty:
@@ -767,16 +759,20 @@ filtered_df = df_lich[mask_date]
 if selected_nv != "- Tất cả nhân viên -":
     filtered_df = filtered_df[filtered_df['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
 
-co_phep_df = filtered_df[filtered_df['Số ngày tính'] > 0]
-khong_phep_df = filtered_df[(filtered_df['Số ngày tính'] == 0) & (filtered_df['Phạt vi phạm'] > 0)]
-tong_ngay_co_phep = co_phep_df['Số ngày tính'].sum()
+# Phân loại dữ liệu chính xác theo Lý do nghỉ
+ly_do_lower = filtered_df['Lý do nghỉ'].astype(str).str.strip().str.lower()
 
-# Thống kê KPI
+phat_sinh_df = filtered_df[ly_do_lower == 'nghỉ phát sinh']
+khong_phep_df = filtered_df[ly_do_lower.str.contains('không phép', na=False)]
+co_phep_df = filtered_df[(ly_do_lower != 'nghỉ phát sinh') & (~ly_do_lower.str.contains('không phép', na=False))]
+
+# Thống kê KPI mới (Bao gồm 4 cột như yêu cầu)
 st.write("") 
-col1, col2, col3 = st.columns(3)
-col1.metric("Tổng lượt ghi nhận", len(filtered_df))
-col2.metric("✅ Số NGÀY nghỉ CÓ phép", f"{tong_ngay_co_phep:g}")
-col3.metric("❌ Số LƯỢT nghỉ KHÔNG phép", len(khong_phep_df))
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Tổng số người nghỉ", len(filtered_df))
+col2.metric("✅ Số người nghỉ CÓ phép", len(co_phep_df))
+col3.metric("⚠️ Số người nghỉ PHÁT SINH", len(phat_sinh_df))
+col4.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
 
 cols_to_hide = ['Phạt vi phạm']
 export_df = filtered_df.drop(columns=cols_to_hide, errors='ignore')
@@ -800,8 +796,8 @@ with col_download:
     else:
         st.button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", disabled=True, use_container_width=True)
 
-# Hiển thị bảng chi tiết theo Tab
-tab1, tab2, tab3 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ KHÔNG phép"])
+# Hiển thị bảng chi tiết theo Tab (Cập nhật thêm tab Phát Sinh)
+tab1, tab2, tab3, tab4 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ PHÁT SINH", "Danh sách Nghỉ KHÔNG phép"])
 
 with tab1:
     st.dataframe(export_df, use_container_width=True, hide_index=True)
@@ -811,6 +807,11 @@ with tab2:
     else:
         st.dataframe(co_phep_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
 with tab3:
+    if phat_sinh_df.empty:
+        st.info("Không có dữ liệu nhân viên nghỉ phát sinh.")
+    else:
+        st.dataframe(phat_sinh_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
+with tab4:
     if khong_phep_df.empty:
         st.success("Tuyệt vời! Không có nhân viên nào nghỉ không phép.")
     else:

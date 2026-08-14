@@ -31,7 +31,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- KẾT NỐI GSPREAD ĐỂ ĐỌC/GHI GOOGLE SHEET MẬT KHẨU ---
+# --- KẾT NỐI GSPREAD ---
 SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"
 
 @st.cache_resource
@@ -44,7 +44,7 @@ def get_gspread_client():
     except Exception as e:
         return None
 
-# --- HÀM TẢI DANH SÁCH NHÂN VIÊN VÀ MẬT KHẨU TỪ GOOGLE SHEET ---
+# --- HÀM TẢI MẬT KHẨU TỪ GOOGLE SHEET ---
 @st.cache_data(ttl=30)
 def load_credentials():
     try:
@@ -57,16 +57,14 @@ def load_credentials():
     except Exception:
         pass
     
-    # Dự phòng
     try:
         url = f"https://docs.google.com/spreadsheets/d/{SHEET_MAT_KHAU_ID}/gviz/tq?tqx=out:csv"
         df = pd.read_csv(url)
         return df
     except Exception as e:
-        st.error(f"Không thể tải danh sách tài khoản: {e}")
         return pd.DataFrame(columns=['STT', 'Tên nhân viên', 'Mật khẩu'])
 
-# --- HÀM CHO NHÂN VIÊN TỰ CẬP NHẬT MẬT KHẨU ---
+# --- HÀM CHO NHÂN VIÊN ĐỔI MẬT KHẨU ---
 def update_password_in_sheet(username, new_password):
     try:
         client = get_gspread_client()
@@ -74,17 +72,22 @@ def update_password_in_sheet(username, new_password):
             return False, "Chưa cấu hình quyền kết nối Google Sheets (Secrets)."
         
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-        cell = sheet.find(username)
-        if cell:
-            sheet.update_cell(cell.row, 3, str(new_password))
-            st.cache_data.clear() 
-            return True, "Đổi mật khẩu thành công!"
+        # Sử dụng findall để tránh lỗi khi nhân viên mới chưa có tên trong sheet
+        cells = sheet.findall(username, in_column=2)
+        if cells:
+            sheet.update_cell(cells[0].row, 3, str(new_password))
         else:
-            return False, "Không tìm thấy tên nhân viên trong hệ thống."
+            # Nếu nhân viên mới tinh, tự động thêm vào cuối danh sách Google Sheet
+            all_records = sheet.get_all_records()
+            next_stt = len(all_records) + 1
+            sheet.append_row([next_stt, username, str(new_password)])
+            
+        st.cache_data.clear() 
+        return True, "Đổi mật khẩu thành công!"
     except Exception as e:
         return False, f"Lỗi cập nhật: {e}"
 
-# --- HÀM CHO ADMIN QUẢN LÝ TÀI KHOẢN (TÊN & MẬT KHẨU) ---
+# --- HÀM CHO ADMIN QUẢN LÝ ---
 def update_account_by_admin(old_username, new_username, new_password):
     try:
         client = get_gspread_client()
@@ -92,20 +95,30 @@ def update_account_by_admin(old_username, new_username, new_password):
             return False, "Chưa cấu hình quyền kết nối Google Sheets (Secrets)."
         
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-        cell = sheet.find(old_username)
-        if cell:
-            if new_username and new_username.strip():
-                sheet.update_cell(cell.row, 2, str(new_username).strip())
-            if new_password and new_password.strip():
-                sheet.update_cell(cell.row, 3, str(new_password).strip())
-            st.cache_data.clear() 
-            return True, f"Cập nhật thành công tài khoản: {old_username}!"
+        cells = sheet.findall(old_username, in_column=2)
+        
+        final_name = new_username.strip() if new_username and new_username.strip() else old_username
+        final_pass = new_password.strip() if new_password and new_password.strip() else None
+        
+        if cells:
+            if final_name != old_username:
+                sheet.update_cell(cells[0].row, 2, final_name)
+            if final_pass:
+                sheet.update_cell(cells[0].row, 3, final_pass)
         else:
-            return False, "Không tìm thấy tên nhân viên trong hệ thống."
+            # Nếu nhân viên chưa có trên Google Sheet, tạo mới cho họ
+            if not final_pass:
+                final_pass = "123456" 
+            all_records = sheet.get_all_records()
+            next_stt = len(all_records) + 1
+            sheet.append_row([next_stt, final_name, final_pass])
+            
+        st.cache_data.clear() 
+        return True, f"Cập nhật thành công tài khoản: {final_name}!"
     except Exception as e:
         return False, f"Lỗi cập nhật: {e}"
 
-# --- HÀM TẢI FILE LỊCH NGHỈ TỪ GOOGLE DRIVE ---
+# --- HÀM TẢI FILE LỊCH NGHỈ VÀ DANH SÁCH TỪ EXCEL ---
 def download_file_from_google_drive(id, destination):
     URL = "https://docs.google.com/uc?export=download"
     session = requests.Session()
@@ -133,8 +146,10 @@ def load_lich_nghi(url):
         temp_file = "temp_lichnghi.xlsb"
         download_file_from_google_drive(file_id, temp_file)
         
-        xls = pd.read_excel(temp_file, sheet_name='LichNghi', engine='pyxlsb')
-        df_lich = xls
+        # Đọc CẢ HAI sheet từ Excel
+        xls = pd.read_excel(temp_file, sheet_name=['LichNghi', 'DanhSachNV'], engine='pyxlsb')
+        df_lich = xls['LichNghi']
+        df_nv_excel = xls['DanhSachNV']
         
         if os.path.exists(temp_file):
             os.remove(temp_file)
@@ -180,10 +195,12 @@ def load_lich_nghi(url):
         df_lich['Ngày cập nhật'] = pd.to_datetime(df_lich['Ngày cập nhật'], errors='coerce').dt.strftime('%d/%m/%Y').fillna("")
         df_lich['Giờ cập nhật'] = df_lich['Giờ cập nhật'].apply(safe_time_parse)
         
-        return df_lich
+        df_nv_excel = df_nv_excel.dropna(subset=['Tên nhân viên'])
+        
+        return df_lich, df_nv_excel
     except Exception as e:
         st.error(f"Lỗi đọc dữ liệu: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
 @st.cache_data(show_spinner=False)
 def to_excel(df):
@@ -193,13 +210,13 @@ def to_excel(df):
     return output.getvalue()
 
 # Tải dữ liệu 
-df_nv = load_credentials()
+df_credentials = load_credentials() # Lấy pass từ GG Sheet
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
 with st.spinner("Đang tải dữ liệu hệ thống..."):
-    df_lich = load_lich_nghi(GDRIVE_LINK)
+    df_lich, df_nv_excel = load_lich_nghi(GDRIVE_LINK) # Lấy danh sách nhân viên TỪ EXCEL
 
-if df_lich.empty or df_nv.empty:
+if df_lich.empty or df_nv_excel.empty:
     st.warning("Hệ thống chưa tìm thấy dữ liệu. Vui lòng kiểm tra lại cấu hình.")
     if st.button("🔄 Tải lại dữ liệu"):
         st.cache_data.clear()
@@ -230,23 +247,31 @@ if not st.session_state.logged_in:
                 st.session_state.current_user = "Quản Trị Viên"
                 st.rerun()
             else:
-                # Kiểm tra nhân viên thông thường
-                for _, row in df_nv.iterrows():
-                    db_name = str(row['Tên nhân viên']).strip()
-                    db_pass = str(row['Mật khẩu']).strip()
-                    
-                    if username_input.lower() == db_name.lower():
-                        if password_input == db_pass:
-                            user_found = True
-                            user_chuan = db_name
-                            break
+                # Dùng danh sách từ file Excel làm gốc
+                danh_sach_excel = df_nv_excel['Tên nhân viên'].astype(str).str.strip().tolist()
+                
+                for name in danh_sach_excel:
+                    if username_input.lower() == name.lower():
+                        user_found = True
+                        user_chuan = name 
+                        break
                 
                 if user_found:
-                    st.session_state.logged_in = True
-                    st.session_state.current_user = user_chuan
-                    st.rerun()
+                    # Kiểm tra xem đã có pass trong GG Sheet chưa, nếu chưa thì 123456
+                    mat_khau_thuc_te = "123456" 
+                    cred_row = df_credentials[df_credentials['Tên nhân viên'].astype(str).str.strip().str.lower() == user_chuan.lower()]
+                    
+                    if not cred_row.empty:
+                        mat_khau_thuc_te = str(cred_row.iloc[0]['Mật khẩu']).strip()
+                    
+                    if password_input == mat_khau_thuc_te:
+                        st.session_state.logged_in = True
+                        st.session_state.current_user = user_chuan
+                        st.rerun()
+                    else:
+                        st.error("❌ Sai mật khẩu!")
                 else:
-                    st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
+                    st.error("❌ Tên đăng nhập không tồn tại trong danh sách hệ thống!")
     st.stop()
 
 # --- GIAO DIỆN CHÍNH & TÍNH NĂNG ĐỔI MẬT KHẨU/QUẢN LÝ TÀI KHOẢN ---
@@ -266,7 +291,7 @@ with col_logout:
             st.session_state.current_user = ""
             st.rerun()
 
-# Hộp thoại mở rộng Quản lý / Đổi mật khẩu
+# Hộp thoại mở rộng
 if 'show_modal' not in st.session_state:
     st.session_state.show_modal = False
 
@@ -274,11 +299,12 @@ if btn_manage_account:
     st.session_state.show_modal = not st.session_state.show_modal
 
 if st.session_state.show_modal:
-    # 1. Giao diện dành cho ADMIN
+    # 1. Giao diện ADMIN
     if st.session_state.current_user == "Quản Trị Viên":
         with st.form("admin_manage_form"):
             st.subheader("🛠 Quản lý tài khoản nhân viên")
-            list_nv_to_edit = sorted(df_nv['Tên nhân viên'].dropna().astype(str).str.strip().tolist())
+            # Danh sách để sửa dựa trên Excel 
+            list_nv_to_edit = sorted(df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist())
             target_nv = st.selectbox("Chọn nhân viên cần chỉnh sửa:", list_nv_to_edit)
             
             new_name = st.text_input("Tên mới (Để trống nếu chỉ muốn đổi mật khẩu)")
@@ -296,7 +322,7 @@ if st.session_state.show_modal:
                     else:
                         st.error(f"❌ {msg}")
                         
-    # 2. Giao diện dành cho NHÂN VIÊN
+    # 2. Giao diện NHÂN VIÊN
     else:
         with st.form("change_pass_form"):
             st.subheader(f"Đổi mật khẩu cho: {st.session_state.current_user}")
@@ -306,22 +332,25 @@ if st.session_state.show_modal:
             submit_pass = st.form_submit_button("Cập Nhật Mật Khẩu")
             
             if submit_pass:
-                current_row = df_nv[df_nv['Tên nhân viên'].astype(str).str.strip().str.lower() == st.session_state.current_user.lower()]
-                if not current_row.empty:
-                    db_old_pass = str(current_row.iloc[0]['Mật khẩu']).strip()
-                    if old_pass != db_old_pass:
-                        st.error("❌ Mật khẩu hiện tại không chính xác!")
-                    elif not new_pass or len(new_pass.strip()) < 4:
-                        st.error("❌ Mật khẩu mới quá ngắn (tối thiểu 4 ký tự).")
-                    elif new_pass != confirm_pass:
-                        st.error("❌ Xác nhận mật khẩu mới không khớp!")
+                # Lấy mật khẩu hiện tại (có thể là 123456 nếu nhân viên mới tinh)
+                db_old_pass = "123456" 
+                cred_row = df_credentials[df_credentials['Tên nhân viên'].astype(str).str.strip().str.lower() == st.session_state.current_user.lower()]
+                if not cred_row.empty:
+                    db_old_pass = str(cred_row.iloc[0]['Mật khẩu']).strip()
+                
+                if old_pass != db_old_pass:
+                    st.error("❌ Mật khẩu hiện tại không chính xác!")
+                elif not new_pass or len(new_pass.strip()) < 4:
+                    st.error("❌ Mật khẩu mới quá ngắn (tối thiểu 4 ký tự).")
+                elif new_pass != confirm_pass:
+                    st.error("❌ Xác nhận mật khẩu mới không khớp!")
+                else:
+                    success, msg = update_password_in_sheet(st.session_state.current_user, new_pass.strip())
+                    if success:
+                        st.success(f"✅ {msg}")
+                        st.session_state.show_modal = False
                     else:
-                        success, msg = update_password_in_sheet(st.session_state.current_user, new_pass.strip())
-                        if success:
-                            st.success(f"✅ {msg}")
-                            st.session_state.show_modal = False
-                        else:
-                            st.error(f"❌ {msg}")
+                        st.error(f"❌ {msg}")
 
 st.markdown("---")
 
@@ -367,7 +396,7 @@ with col_date:
             end_date = date_range[0]
 
 with col_name:
-    list_nv = ["- Tất cả nhân viên -"] + sorted(df_nv['Tên nhân viên'].dropna().astype(str).str.strip().unique().tolist())
+    list_nv = ["- Tất cả nhân viên -"] + sorted(df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().unique().tolist())
     selected_nv = st.selectbox("👤 Tìm kiếm nhân viên:", list_nv)
 
 with col_refresh:

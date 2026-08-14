@@ -99,14 +99,12 @@ def load_loai_nghi_from_gsheet():
     try:
         client = get_gspread_client()
         if client:
-            # Truy cập đúng tên sheet là "LoaiNghi"
             sheet = client.open_by_key(SHEET_DU_PHONG_ID).worksheet("LoaiNghi")
             rows = sheet.get_all_values()
             if len(rows) > 1:
                 df_loai = pd.DataFrame(rows[1:], columns=rows[0])
                 return df_loai
     except Exception as e:
-        # Nếu có lỗi (chưa tạo sheet hoặc sai tên), trả về DataFrame rỗng
         pass
     return pd.DataFrame()
 
@@ -332,6 +330,56 @@ if df_lich.empty or df_nv_excel.empty:
         st.cache_data.clear()
         st.rerun()
     st.stop()
+
+
+# --- HỆ THỐNG ĐĂNG NHẬP & PHÂN QUYỀN ---
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "current_user" not in st.session_state:
+    st.session_state.current_user = ""
+if "current_role" not in st.session_state:
+    st.session_state.current_role = ""
+
+if not st.session_state.logged_in:
+    st.title("🔐 Đăng Nhập Hệ Thống")
+    
+    with st.form("login_form"):
+        username_input = st.text_input("Tên đăng nhập").strip()
+        password_input = st.text_input("Mật khẩu", type="password")
+        submit = st.form_submit_button("Đăng Nhập")
+        
+        if submit:
+            user_found = False
+            user_chuan = ""
+            user_role = "nhanvien"
+            
+            if username_input == "admin" and password_input == "32531235":
+                st.session_state.logged_in = True
+                st.session_state.current_user = "Quản Trị Viên"
+                st.session_state.current_role = "admin"
+                st.rerun()
+            else:
+                for _, row in df_credentials.iterrows():
+                    db_name = str(row['Tên nhân viên']).strip()
+                    db_pass = str(row['Mật khẩu']).strip()
+                    db_role = str(row.get('Phân quyền', 'nhanvien')).strip().lower()
+                    
+                    if username_input.lower() == db_name.lower():
+                        if password_input == db_pass:
+                            user_found = True
+                            user_chuan = db_name
+                            user_role = db_role if db_role else "nhanvien"
+                            break
+                
+                if user_found:
+                    st.session_state.logged_in = True
+                    st.session_state.current_user = user_chuan
+                    st.session_state.current_role = user_role
+                    st.rerun()
+                else:
+                    st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
+    st.stop()
+
 
 # --- GIAO DIỆN CHÍNH ---
 col_title, col_logout = st.columns([7, 3]) 

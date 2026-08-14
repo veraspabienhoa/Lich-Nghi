@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
 from datetime import date
-import requests
-import io
+import gdown
+import os
 
 # Cấu hình trang hiển thị
 st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
@@ -11,18 +11,25 @@ st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_
 @st.cache_data(ttl=300) 
 def load_data(url):
     try:
-        # Chuyển đổi link GDrive
+        # Tách lấy ID của file từ đường link
         file_id = url.split('/d/')[1].split('/')[0]
-        direct_url = f"https://drive.google.com/uc?id={file_id}&export=download"
+        temp_file = "temp_data.xlsb"
         
-        # --- CẢI TIẾN: TẢI FILE VÀO BỘ NHỚ TẠM TRƯỚC KHI ĐỌC ---
-        response = requests.get(direct_url)
-        response.raise_for_status() # Kiểm tra xem link có bị lỗi không
+        # CẢI TIẾN: Dùng gdown để vượt rào bảo mật Google Drive và tải file về máy chủ
+        gdown_url = f'https://drive.google.com/uc?id={file_id}'
         
-        file_content = io.BytesIO(response.content)
+        # Xóa file cũ nếu tồn tại để tránh đọc nhầm
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+            
+        gdown.download(gdown_url, temp_file, quiet=True)
         
-        # ĐỌC FILE .XLSB bằng engine pyxlsb từ bộ nhớ tạm
-        xls = pd.read_excel(file_content, sheet_name=['LichNghi', 'DanhSachNV'], engine='pyxlsb')
+        if not os.path.exists(temp_file):
+            st.error("Không thể tải file từ Google Drive. Máy chủ bị từ chối truy cập.")
+            return pd.DataFrame(), pd.DataFrame()
+        
+        # ĐỌC FILE .XLSB từ file tạm vừa tải
+        xls = pd.read_excel(temp_file, sheet_name=['LichNghi', 'DanhSachNV'], engine='pyxlsb')
         df_lich = xls['LichNghi']
         df_nv = xls['DanhSachNV']
         
@@ -57,13 +64,13 @@ def load_data(url):
         
         return df_lich, df_nv
     except Exception as e:
-        st.error(f"Lỗi tải dữ liệu từ Google Drive: {e}")
+        st.error(f"Đã xảy ra lỗi hệ thống khi phân tích dữ liệu: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 # Link Google Drive (vẫn dùng link cũ của anh)
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
-with st.spinner("Đang kết nối tới máy chủ dữ liệu..."):
+with st.spinner("Đang kết nối tải dữ liệu từ Google Drive..."):
     df_lich, df_nv = load_data(GDRIVE_LINK)
 
 if df_lich.empty or df_nv.empty:
@@ -138,7 +145,7 @@ with col_filter:
     )
 
 with col_refresh:
-    if st.button("🔄 Tải Lại Dữ Liệu", use_container_width=True):
+    if st.button("🔄 Tải Lại Dữ Liệu Từ Đầu", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 

@@ -752,29 +752,57 @@ with col_refresh:
         st.cache_data.clear()
         st.rerun()
 
-# Lọc dữ liệu
+# Lọc dữ liệu theo thời gian và nhân viên
 mask_date = (df_lich['Ngày'] >= start_date) & (df_lich['Ngày'] <= end_date)
 filtered_df = df_lich[mask_date]
 
 if selected_nv != "- Tất cả nhân viên -":
     filtered_df = filtered_df[filtered_df['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
 
-# Phân loại dữ liệu chính xác theo Lý do nghỉ
+
+# --- ĐOẠN MỚI CẬP NHẬT: Loại trừ các lý do không tính vào KPI Nghỉ ---
+excluded_reasons = [
+    "đi trễ dưới 30 phút",
+    "đi trễ từ 30' tới 60'",
+    "không dọn vệ sinh ca 1",
+    "hỗ trợ ca 1 đi trễ 2 tiếng",
+    "hỗ trợ ca 1 đi trễ 3 tiếng",
+    "hỗ trợ ca 2 đi trễ 1 tiếng",
+    "lỗi vi phạm khác",
+    "qua tour không phép",
+    "qua tour cuối tuần không phép",
+    "xuống phòng trễ",
+    "cho khách ra sớm nhiều hơn 5 phút",
+    "ra ngoài vào muộn dưới 30 phút",
+    "ra ngoài vào muộn dưới 60 phút",
+    "ra ngoài vào muộn dưới 120 phút",
+    "xin đi tua cuối",
+    "xin ngưng nhận khách",
+    "nghỉ phép năm"
+]
+
 ly_do_lower = filtered_df['Lý do nghỉ'].astype(str).str.strip().str.lower()
 
-phat_sinh_df = filtered_df[ly_do_lower == 'nghỉ phát sinh']
-khong_phep_df = filtered_df[ly_do_lower.str.contains('không phép', na=False)]
-co_phep_df = filtered_df[(ly_do_lower != 'nghỉ phát sinh') & (~ly_do_lower.str.contains('không phép', na=False))]
+# Tạo DataFrame chỉ chứa những người "Thực sự nghỉ" (không bị loại trừ)
+valid_nghi_mask = ~ly_do_lower.isin(excluded_reasons)
+df_thuc_nghi = filtered_df[valid_nghi_mask]
+ly_do_thuc_nghi_lower = df_thuc_nghi['Lý do nghỉ'].astype(str).str.strip().str.lower()
+
+# Chia các nhóm dựa trên df_thuc_nghi để các số liệu khớp với "Tổng số người nghỉ"
+phat_sinh_df = df_thuc_nghi[ly_do_thuc_nghi_lower == 'nghỉ phát sinh']
+khong_phep_df = df_thuc_nghi[ly_do_thuc_nghi_lower.str.contains('không phép', na=False)]
+co_phep_df = df_thuc_nghi[(ly_do_thuc_nghi_lower != 'nghỉ phát sinh') & (~ly_do_thuc_nghi_lower.str.contains('không phép', na=False))]
 
 # Thống kê KPI mới (Bao gồm 4 cột như yêu cầu)
 st.write("") 
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Tổng số người nghỉ", len(filtered_df))
+col1.metric("Tổng số người nghỉ", len(df_thuc_nghi))
 col2.metric("✅ Số người nghỉ CÓ phép", len(co_phep_df))
 col3.metric("⚠️ Số người nghỉ PHÁT SINH", len(phat_sinh_df))
 col4.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
 
 cols_to_hide = ['Phạt vi phạm']
+# export_df chứa TẤT CẢ dữ liệu (bao gồm cả vi phạm) để xem và tải xuống
 export_df = filtered_df.drop(columns=cols_to_hide, errors='ignore')
 
 # Nút Export Excel

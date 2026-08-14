@@ -32,21 +32,19 @@ def get_system_data():
     try:
         sh = client.open_by_key(SHEET_ID)
         
-        def get_safe_worksheet_data(sheet_name, default_cols):
+        # Đọc trực tiếp từ các sheet đã tồn tại trên Google Sheet
+        def read_ws(name):
             try:
-                ws = sh.worksheet(sheet_name)
-                data = ws.get_all_records()
-                return pd.DataFrame(data) if data else pd.DataFrame(columns=default_cols)
+                data = sh.worksheet(name).get_all_records()
+                return pd.DataFrame(data) if data else pd.DataFrame()
             except:
-                ws = sh.add_worksheet(title=sheet_name, rows="100", cols="20")
-                ws.append_row(default_cols)
-                return pd.DataFrame(columns=default_cols)
+                return pd.DataFrame()
 
-        df_taikhoan = get_safe_worksheet_data("TaiKhoan", ["STT", "Tên nhân viên", "Mật khẩu", "Phân quyền"])
-        df_loai_nghi = get_safe_worksheet_data("LoaiNghi", ["STT", "Lý do nghỉ", "Loại nghỉ", "Chi tiết", "Số ngày tính phép", "Phạt vi phạm", "Chỉ nhập được cuối tuần"])
-        df_config = get_safe_worksheet_data("Config", ["Key", "Value"])
-        df_nhanvien = get_safe_worksheet_data("Nhanvien", ["STT", "Tên nhân viên"])
-        df_lich = get_safe_worksheet_data("LichNghi", ["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính phép", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
+        df_taikhoan = read_ws("TaiKhoan")
+        df_loai_nghi = read_ws("LoaiNghi")
+        df_config = read_ws("Config")
+        df_nhanvien = read_ws("Nhanvien")
+        df_lich = read_ws("LichNghi")
         
         config_dict = {}
         if not df_config.empty and 'Key' in df_config.columns and 'Value' in df_config.columns:
@@ -119,11 +117,11 @@ st.markdown("---")
 if st.session_state.current_role in ["admin", "letan"]:
     with st.expander("📝 Nhập lịch nghỉ mới cho nhân viên", expanded=True):
         with st.form("nhap_form"):
-            nv_list = df_nhanvien['Tên nhân viên'].dropna().astype(str).tolist() if not df_nhanvien.empty else []
+            nv_list = df_nhanvien['Tên nhân viên'].dropna().astype(str).tolist() if not df_nhanvien.empty and 'Tên nhân viên' in df_nhanvien.columns else []
             nv = st.selectbox("Chọn nhân viên:", ["-- Chọn nhân viên --"] + nv_list)
             ngay = st.date_input("Chọn ngày nghỉ:", date.today())
             
-            ly_do_list = df_loai_nghi['Lý do nghỉ'].dropna().astype(str).tolist() if not df_loai_nghi.empty else []
+            ly_do_list = df_loai_nghi['Lý do nghỉ'].dropna().astype(str).tolist() if not df_loai_nghi.empty and 'Lý do nghỉ' in df_loai_nghi.columns else []
             ly_do = st.selectbox("Lý do nghỉ:", ["-- Chọn lý do --"] + ly_do_list)
             chitiet = st.text_input("Chi tiết vi phạm / Ghi chú (nếu có):").strip()
             

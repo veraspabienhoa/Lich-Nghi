@@ -57,7 +57,7 @@ def load_credentials():
     except Exception:
         pass
     
-    # Dự phòng đọc qua CSV công khai nếu chưa cấu hình secrets
+    # Dự phòng
     try:
         url = f"https://docs.google.com/spreadsheets/d/{SHEET_MAT_KHAU_ID}/gviz/tq?tqx=out:csv"
         df = pd.read_csv(url)
@@ -66,7 +66,7 @@ def load_credentials():
         st.error(f"Không thể tải danh sách tài khoản: {e}")
         return pd.DataFrame(columns=['STT', 'Tên nhân viên', 'Mật khẩu'])
 
-# --- HÀM CẬP NHẬT MẬT KHẨU LÊN GOOGLE SHEET ---
+# --- HÀM CHO NHÂN VIÊN TỰ CẬP NHẬT MẬT KHẨU ---
 def update_password_in_sheet(username, new_password):
     try:
         client = get_gspread_client()
@@ -76,10 +76,30 @@ def update_password_in_sheet(username, new_password):
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
         cell = sheet.find(username)
         if cell:
-            # Cột Tên nhân viên nằm ở cột 2, Mật khẩu nằm ở cột 3
             sheet.update_cell(cell.row, 3, str(new_password))
-            st.cache_data.clear() # Xóa cache để làm mới dữ liệu
+            st.cache_data.clear() 
             return True, "Đổi mật khẩu thành công!"
+        else:
+            return False, "Không tìm thấy tên nhân viên trong hệ thống."
+    except Exception as e:
+        return False, f"Lỗi cập nhật: {e}"
+
+# --- HÀM CHO ADMIN QUẢN LÝ TÀI KHOẢN (TÊN & MẬT KHẨU) ---
+def update_account_by_admin(old_username, new_username, new_password):
+    try:
+        client = get_gspread_client()
+        if not client:
+            return False, "Chưa cấu hình quyền kết nối Google Sheets (Secrets)."
+        
+        sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
+        cell = sheet.find(old_username)
+        if cell:
+            if new_username and new_username.strip():
+                sheet.update_cell(cell.row, 2, str(new_username).strip())
+            if new_password and new_password.strip():
+                sheet.update_cell(cell.row, 3, str(new_password).strip())
+            st.cache_data.clear() 
+            return True, f"Cập nhật thành công tài khoản: {old_username}!"
         else:
             return False, "Không tìm thấy tên nhân viên trong hệ thống."
     except Exception as e:
@@ -172,7 +192,7 @@ def to_excel(df):
         df.to_excel(writer, index=False, sheet_name='DuLieuLichNghi')
     return output.getvalue()
 
-# Tải dữ liệu tài khoản và lịch nghỉ
+# Tải dữ liệu 
 df_nv = load_credentials()
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
@@ -204,74 +224,104 @@ if not st.session_state.logged_in:
             user_found = False
             user_chuan = ""
             
-            for _, row in df_nv.iterrows():
-                db_name = str(row['Tên nhân viên']).strip()
-                db_pass = str(row['Mật khẩu']).strip()
-                
-                if username_input.lower() == db_name.lower():
-                    if password_input == db_pass:
-                        user_found = True
-                        user_chuan = db_name
-                        break
-            
-            if user_found:
-                st.session_state.logged_in = True
-                st.session_state.current_user = user_chuan
-                st.rerun()
-            elif username_input == "admin" and password_input == "admin": 
+            # Kiểm tra tài khoản admin (Cứng)
+            if username_input == "admin" and password_input == "32531235":
                 st.session_state.logged_in = True
                 st.session_state.current_user = "Quản Trị Viên"
                 st.rerun()
             else:
-                st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
+                # Kiểm tra nhân viên thông thường
+                for _, row in df_nv.iterrows():
+                    db_name = str(row['Tên nhân viên']).strip()
+                    db_pass = str(row['Mật khẩu']).strip()
+                    
+                    if username_input.lower() == db_name.lower():
+                        if password_input == db_pass:
+                            user_found = True
+                            user_chuan = db_name
+                            break
+                
+                if user_found:
+                    st.session_state.logged_in = True
+                    st.session_state.current_user = user_chuan
+                    st.rerun()
+                else:
+                    st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
     st.stop()
 
-# --- GIAO DIỆN CHÍNH & TÍNH NĂNG ĐỔI MẬT KHẨU ---
+# --- GIAO DIỆN CHÍNH & TÍNH NĂNG ĐỔI MẬT KHẨU/QUẢN LÝ TÀI KHOẢN ---
 col_title, col_logout = st.columns([7, 3]) 
 with col_title:
     st.title(f"📊 Tình Hình Nghỉ Phép - {st.session_state.current_user}")
 with col_logout:
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
-        change_pass_click = st.button("🔑 Đổi mật khẩu", use_container_width=True)
+        if st.session_state.current_user == "Quản Trị Viên":
+            btn_manage_account = st.button("🛠 Quản lý TK", use_container_width=True)
+        else:
+            btn_manage_account = st.button("🔑 Đổi mật khẩu", use_container_width=True)
     with col_btn2:
         if st.button("🚪 Đăng xuất", use_container_width=True):
             st.session_state.logged_in = False
             st.session_state.current_user = ""
             st.rerun()
 
-# Hộp thoại đổi mật khẩu
-if 'show_change_pass' not in st.session_state:
-    st.session_state.show_change_pass = False
+# Hộp thoại mở rộng Quản lý / Đổi mật khẩu
+if 'show_modal' not in st.session_state:
+    st.session_state.show_modal = False
 
-if change_pass_click:
-    st.session_state.show_change_pass = not st.session_state.show_change_pass
+if btn_manage_account:
+    st.session_state.show_modal = not st.session_state.show_modal
 
-if st.session_state.show_change_pass and st.session_state.current_user != "Quản Trị Viên":
-    with st.form("change_pass_form"):
-        st.subheader(f"Đổi mật khẩu cho: {st.session_state.current_user}")
-        old_pass = st.text_input("Mật khẩu hiện tại", type="password")
-        new_pass = st.text_input("Mật khẩu mới", type="password")
-        confirm_pass = st.text_input("Xác nhận mật khẩu mới", type="password")
-        submit_pass = st.form_submit_button("Cập Nhật Mật Khẩu")
-        
-        if submit_pass:
-            current_row = df_nv[df_nv['Tên nhân viên'].astype(str).str.strip().str.lower() == st.session_state.current_user.lower()]
-            if not current_row.empty:
-                db_old_pass = str(current_row.iloc[0]['Mật khẩu']).strip()
-                if old_pass != db_old_pass:
-                    st.error("❌ Mật khẩu hiện tại không chính xác!")
-                elif not new_pass or len(new_pass.strip()) < 4:
-                    st.error("❌ Mật khẩu mới quá ngắn (tối thiểu 4 ký tự).")
-                elif new_pass != confirm_pass:
-                    st.error("❌ Xác nhận mật khẩu mới không khớp!")
+if st.session_state.show_modal:
+    # 1. Giao diện dành cho ADMIN
+    if st.session_state.current_user == "Quản Trị Viên":
+        with st.form("admin_manage_form"):
+            st.subheader("🛠 Quản lý tài khoản nhân viên")
+            list_nv_to_edit = sorted(df_nv['Tên nhân viên'].dropna().astype(str).str.strip().tolist())
+            target_nv = st.selectbox("Chọn nhân viên cần chỉnh sửa:", list_nv_to_edit)
+            
+            new_name = st.text_input("Tên mới (Để trống nếu chỉ muốn đổi mật khẩu)")
+            new_pass = st.text_input("Mật khẩu mới (Để trống nếu chỉ muốn đổi tên)")
+            
+            submit_admin = st.form_submit_button("Cập Nhật Tài Khoản")
+            if submit_admin:
+                if not new_name.strip() and not new_pass.strip():
+                    st.warning("Vui lòng nhập Tên mới hoặc Mật khẩu mới để cập nhật.")
                 else:
-                    success, msg = update_password_in_sheet(st.session_state.current_user, new_pass.strip())
+                    success, msg = update_account_by_admin(target_nv, new_name, new_pass)
                     if success:
                         st.success(f"✅ {msg}")
-                        st.session_state.show_change_pass = False
+                        st.session_state.show_modal = False
                     else:
                         st.error(f"❌ {msg}")
+                        
+    # 2. Giao diện dành cho NHÂN VIÊN
+    else:
+        with st.form("change_pass_form"):
+            st.subheader(f"Đổi mật khẩu cho: {st.session_state.current_user}")
+            old_pass = st.text_input("Mật khẩu hiện tại", type="password")
+            new_pass = st.text_input("Mật khẩu mới", type="password")
+            confirm_pass = st.text_input("Xác nhận mật khẩu mới", type="password")
+            submit_pass = st.form_submit_button("Cập Nhật Mật Khẩu")
+            
+            if submit_pass:
+                current_row = df_nv[df_nv['Tên nhân viên'].astype(str).str.strip().str.lower() == st.session_state.current_user.lower()]
+                if not current_row.empty:
+                    db_old_pass = str(current_row.iloc[0]['Mật khẩu']).strip()
+                    if old_pass != db_old_pass:
+                        st.error("❌ Mật khẩu hiện tại không chính xác!")
+                    elif not new_pass or len(new_pass.strip()) < 4:
+                        st.error("❌ Mật khẩu mới quá ngắn (tối thiểu 4 ký tự).")
+                    elif new_pass != confirm_pass:
+                        st.error("❌ Xác nhận mật khẩu mới không khớp!")
+                    else:
+                        success, msg = update_password_in_sheet(st.session_state.current_user, new_pass.strip())
+                        if success:
+                            st.success(f"✅ {msg}")
+                            st.session_state.show_modal = False
+                        else:
+                            st.error(f"❌ {msg}")
 
 st.markdown("---")
 

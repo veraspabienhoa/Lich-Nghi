@@ -7,6 +7,30 @@ import os
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
 
+# --- ÉP CSS ĐỂ THU GỌN GIAO DIỆN (GIẢM KHOẢNG TRẮNG) ---
+st.markdown("""
+    <style>
+        /* Giảm khoảng trắng trên cùng và dưới cùng của trang */
+        .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 1rem;
+        }
+        /* Giảm khoảng cách giữa các khối (hàng) */
+        div[data-testid="stVerticalBlock"] > div {
+            gap: 0.2rem !important;
+        }
+        /* Giảm khoảng trắng dưới các tiêu đề h1, h2, h3 */
+        h1, h2, h3 {
+            padding-bottom: 0rem !important;
+            margin-bottom: 0rem !important;
+        }
+        /* Chỉnh nút bấm cho gọn hơn */
+        button {
+            margin-top: 5px !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 # --- HÀM TẢI FILE TỪ GOOGLE DRIVE CHỐNG CHẶN ---
 def download_file_from_google_drive(id, destination):
     URL = "https://docs.google.com/uc?export=download"
@@ -55,7 +79,7 @@ def load_data(url):
             'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
         ]
         
-        # Hàm đọc ngày tháng chuyên trị số sê-ri của xlsb
+        # Hàm đọc ngày tháng
         def safe_date_parse(val):
             try:
                 if pd.isna(val): return pd.NaT
@@ -67,7 +91,7 @@ def load_data(url):
             except:
                 return pd.NaT
                 
-        # Hàm chuyển đổi giờ từ số thập phân của Excel
+        # Hàm chuyển đổi giờ
         def safe_time_parse(val):
             try:
                 if pd.isna(val): return ""
@@ -152,37 +176,33 @@ if not st.session_state.logged_in:
     st.stop()
 
 # --- GIAO DIỆN BẢNG ĐIỀU KHIỂN ---
-col_title, col_logout = st.columns([8, 2])
+col_title, col_logout = st.columns([9, 1]) # Chỉnh tỉ lệ để tiêu đề và nút đăng xuất thẳng hàng hơn
 with col_title:
-    st.title(f"📊 Bảng Tra Cứu Tình Hình Nghỉ Phép - {st.session_state.current_user}")
+    st.title(f"📊 Tình Hình Nghỉ Phép - {st.session_state.current_user}")
 with col_logout:
     if st.button("🚪 Đăng xuất", use_container_width=True):
         st.session_state.logged_in = False
         st.session_state.current_user = ""
         st.rerun()
-        
-st.markdown("---")
 
-# Bộ lọc
-st.subheader("🔍 Lọc Dữ Liệu")
+# Bộ lọc (Đã xóa các đường kẻ ngang --- và dòng trống thừa để tiết kiệm không gian)
 col_date, col_name, col_refresh = st.columns([4, 4, 2])
 
 with col_date:
     today = date.today()
     filter_type = st.radio(
-        "Chọn chế độ xem thời gian:", 
-        ["Hôm nay", "Chọn ngày cụ thể", "Chọn khoảng thời gian"], 
+        "Chọn chế độ xem:", 
+        ["Hôm nay", "Chọn ngày", "Khoảng thời gian"], 
         horizontal=True
     )
     
     if filter_type == "Hôm nay":
         start_date = today
         end_date = today
-    elif filter_type == "Chọn ngày cụ thể":
-        start_date = st.date_input("Chọn ngày:", today)
-        end_date = start_date
+    elif filter_type == "Chọn ngày":
+        start_date = st.date_input("Chọn ngày:", today, label_visibility="collapsed")
     else:
-        date_range = st.date_input("Chọn từ ngày - đến ngày:", [today, today])
+        date_range = st.date_input("Chọn khoảng thời gian:", [today, today], label_visibility="collapsed")
         if len(date_range) == 2:
             start_date, end_date = date_range
         else:
@@ -190,14 +210,12 @@ with col_date:
             end_date = date_range[0]
 
 with col_name:
-    st.write("") 
     list_nv = ["- Tất cả nhân viên -"] + sorted(df_nv['Tên nhân viên'].dropna().astype(str).str.strip().unique().tolist())
-    selected_nv = st.selectbox("👤 Tìm kiếm / Chọn tên nhân viên:", list_nv)
+    selected_nv = st.selectbox("👤 Tìm kiếm nhân viên:", list_nv)
 
 with col_refresh:
-    st.write("") 
-    st.write("") 
-    if st.button("🔄 Lấy Dữ Liệu Mới Nhất", use_container_width=True):
+    # Nút bấm gọn gàng hơn
+    if st.button("🔄 Cập Nhật Dữ Liệu", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
@@ -213,42 +231,36 @@ if selected_nv != "- Tất cả nhân viên -":
 co_phep_df = filtered_df[filtered_df['Số ngày tính'] > 0]
 khong_phep_df = filtered_df[(filtered_df['Số ngày tính'] == 0) & (filtered_df['Phạt vi phạm'] > 0)]
 
-# Hiển thị số liệu KPI
-st.markdown("---")
+# Hiển thị số liệu KPI (Được đặt ngay dưới bộ lọc, không có kẻ ngang thừa)
+st.write("") # Một chút khoảng cách nhỏ cho dễ nhìn
 col1, col2, col3 = st.columns(3)
 col1.metric("Tổng số lượt nghỉ", len(filtered_df))
 col2.metric("✅ Số người nghỉ CÓ phép", len(co_phep_df))
 col3.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
-st.markdown("---")
 
-# Cột cần ẩn khỏi giao diện
-cols_to_hide = ['Phạt vi phạm']
-
+# Hiển thị bảng
 st.subheader(f"Chi tiết danh sách (Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')})")
 
-# --- NÂNG CẤP HIỂN THỊ KHI KHÔNG CÓ DỮ LIỆU ---
 if filtered_df.empty:
-    # 1. Báo cáo chung
     available_dates = df_lich['Ngày'].dropna().unique()
     if len(available_dates) > 0:
         available_dates = sorted(available_dates, reverse=True)[:5]
         dates_str = ", ".join([d.strftime('%d/%m/%Y') for d in available_dates])
         st.info(f"💡 Hệ thống không thấy dữ liệu trong khoảng thời gian này.\n\nCác ngày đang có dữ liệu chung trên hệ thống: **{dates_str}**")
         
-    # 2. Báo cáo riêng biệt cho nhân viên + Nút hiển thị
     if selected_nv != "- Tất cả nhân viên -":
-        # Lọc dữ liệu GỐC để tìm lịch sử của người này (không bị giới hạn bởi bộ lọc ngày tháng ở trên)
         nv_history_df = df_lich[df_lich['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
         
         if not nv_history_df.empty:
-            # Dùng Expander hoạt động như một nút bấm thả xuống
             with st.expander(f"📅 Bấm vào đây để xem TẤT CẢ lịch sử nghỉ phép của nhân viên {selected_nv}"):
-                st.dataframe(nv_history_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
+                st.dataframe(nv_history_df.drop(columns=['Phạt vi phạm'], errors='ignore'), use_container_width=True, hide_index=True)
         else:
             st.warning(f"Nhân viên **{selected_nv}** hiện chưa từng có dữ liệu nghỉ phép trên hệ thống.")
 
 # --- HIỂN THỊ BẢNG CHI TIẾT THEO TAB ---
 tab1, tab2, tab3 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ KHÔNG phép"])
+
+cols_to_hide = ['Phạt vi phạm']
 
 with tab1:
     st.dataframe(filtered_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)

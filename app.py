@@ -93,6 +93,24 @@ def load_backup_sheet_data():
         pass
     return pd.DataFrame(columns=["Ngày", "Tên nhân viên", "Loại nghỉ", "Chi tiết", "Số ngày tính", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
 
+# --- TẢI DỮ LIỆU LOẠI NGHỈ TỪ GOOGLE SHEET DỰ PHÒNG ---
+@st.cache_data(ttl=60)
+def load_loai_nghi_from_gsheet():
+    try:
+        client = get_gspread_client()
+        if client:
+            # Truy cập đúng tên sheet là "LoaiNghi"
+            sheet = client.open_by_key(SHEET_DU_PHONG_ID).worksheet("LoaiNghi")
+            rows = sheet.get_all_values()
+            if len(rows) > 1:
+                df_loai = pd.DataFrame(rows[1:], columns=rows[0])
+                return df_loai
+    except Exception as e:
+        # Nếu có lỗi (chưa tạo sheet hoặc sai tên), trả về DataFrame rỗng
+        pass
+    return pd.DataFrame()
+
+
 # --- GHI LỊCH NGHỈ VÀO GOOGLE SHEET DỰ PHÒNG ---
 def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, phat_vi_pham, nguoi_tao):
     try:

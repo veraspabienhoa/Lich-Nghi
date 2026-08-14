@@ -761,44 +761,36 @@ if selected_nv != "- Tất cả nhân viên -":
 
 
 # --- ĐOẠN MỚI CẬP NHẬT: Loại trừ các lý do không tính vào KPI Nghỉ ---
-excluded_reasons = [
-    "đi trễ dưới 30 phút",
-    "đi trễ từ 30' tới 60'",
-    "không dọn vệ sinh ca 1",
-    "hỗ trợ ca 1 đi trễ 2 tiếng",
-    "hỗ trợ ca 1 đi trễ 3 tiếng",
-    "hỗ trợ ca 2 đi trễ 1 tiếng",
-    "lỗi vi phạm khác",
-    "qua tour không phép",
-    "qua tour cuối tuần không phép",
-    "xuống phòng trễ",
-    "cho khách ra sớm nhiều hơn 5 phút",
-    "ra ngoài vào muộn dưới 30 phút",
-    "ra ngoài vào muộn dưới 60 phút",
-    "ra ngoài vào muộn dưới 120 phút",
-    "xin đi tua cuối",
-    "xin ngưng nhận khách",
-    "nghỉ phép năm"
+# Sử dụng từ khóa (substring) để bắt mọi biến thể (có dấu, không dấu, viết hoa, viết thường)
+excluded_keywords = [
+    "đi trễ", "di tre",
+    "không dọn vệ sinh", "khong don ve sinh",
+    "lỗi vi phạm", "loi vi pham",
+    "qua tour",
+    "xuống phòng", "xuong phong",
+    "ra sớm", "ra som",
+    "vào muộn", "vao muon",
+    "đi tua", "di tua",
+    "ngưng nhận", "ngung nhan",
+    "phép năm", "phep nam",
+    "hỗ trợ ca", "ho tro ca"
 ]
 
-# 1. CHUẨN HÓA DỮ LIỆU: Đưa về chữ thường, xóa khoảng trắng 2 đầu và dọn sạch các khoảng trắng dư thừa ở giữa
-ly_do_clean = filtered_df['Lý do nghỉ'].astype(str).str.lower().str.strip().str.replace(r'\s+', ' ', regex=True)
+def is_excluded(reason):
+    r = str(reason).lower()
+    for kw in excluded_keywords:
+        if kw in r:
+            return True
+    return False
 
-# 2. Tạo DataFrame chứa những người "Thực sự nghỉ" (Loại bỏ hoàn toàn các lỗi vi phạm/đi trễ trong danh sách trên)
-valid_nghi_mask = ~ly_do_clean.isin(excluded_reasons)
+valid_nghi_mask = ~filtered_df['Lý do nghỉ'].apply(is_excluded)
 df_thuc_nghi = filtered_df[valid_nghi_mask]
+ly_do_thuc_nghi_lower = df_thuc_nghi['Lý do nghỉ'].astype(str).str.strip().str.lower()
 
-# Cập nhật lại series lý do đã chuẩn hóa cho tập dữ liệu những người thực sự nghỉ
-ly_do_thuc_nghi = df_thuc_nghi['Lý do nghỉ'].astype(str).str.lower().str.strip().str.replace(r'\s+', ' ', regex=True)
-
-# 3. Phân loại các nhóm KPI (Đảm bảo số liệu bóc tách chuẩn xác)
-phat_sinh_df = df_thuc_nghi[ly_do_thuc_nghi == 'nghỉ phát sinh']
-
-# Không phép: Bắt các chữ có "không phép" nhưng loại trừ "nghỉ phát sinh"
-khong_phep_df = df_thuc_nghi[ly_do_thuc_nghi.str.contains('không phép', na=False) & (ly_do_thuc_nghi != 'nghỉ phát sinh')]
-
-# Có phép: Những lý do còn lại (Không phải phát sinh, không chứa từ không phép, và đã trừ sạch các lỗi vi phạm ở bước 2)
-co_phep_df = df_thuc_nghi[(ly_do_thuc_nghi != 'nghỉ phát sinh') & (~ly_do_thuc_nghi.str.contains('không phép', na=False))]
+# Chia các nhóm dựa trên df_thuc_nghi để các số liệu khớp với "Tổng số người nghỉ"
+phat_sinh_df = df_thuc_nghi[ly_do_thuc_nghi_lower == 'nghỉ phát sinh']
+khong_phep_df = df_thuc_nghi[ly_do_thuc_nghi_lower.str.contains('không phép', na=False)]
+co_phep_df = df_thuc_nghi[(ly_do_thuc_nghi_lower != 'nghỉ phát sinh') & (~ly_do_thuc_nghi_lower.str.contains('không phép', na=False))]
 
 # Thống kê KPI mới (Bao gồm 4 cột như yêu cầu)
 st.write("") 

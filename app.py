@@ -342,7 +342,7 @@ if "current_role" not in st.session_state:
     st.session_state.current_role = ""
 
 if not st.session_state.logged_in:
-    st.title("🔐 Đăng Nhập Hệ Thống")
+    st.title("🔐 Đăng Nhập Hệ thống")
     
     with st.form("login_form"):
         username_input = st.text_input("Tên đăng nhập").strip()
@@ -762,6 +762,7 @@ if selected_nv != "- Tất cả nhân viên -":
 
 # --- ĐOẠN MỚI CẬP NHẬT: Loại trừ các lý do không tính vào KPI Nghỉ ---
 # Sử dụng từ khóa (substring) để bắt mọi biến thể (có dấu, không dấu, viết hoa, viết thường)
+# "phép năm" và "phep nam" đã được xóa khỏi danh sách này để chúng được tính là CÓ PHÉP
 excluded_keywords = [
     "đi trễ", "di tre",
     "không dọn vệ sinh", "khong don ve sinh",
@@ -772,7 +773,6 @@ excluded_keywords = [
     "vào muộn", "vao muon",
     "đi tua", "di tua",
     "ngưng nhận", "ngung nhan",
-    "phép năm", "phep nam",
     "hỗ trợ ca", "ho tro ca"
 ]
 

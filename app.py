@@ -451,7 +451,7 @@ if st.session_state.current_role in ["admin", "letan"]:
         users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
         list_nv_input = sorted(list(set(users_s + users_e)))
         
-        # Đọc danh sách loại nghỉ từ sheet LoaiNghi
+        # Đọc danh sách loại nghỉ và mức phạt chuẩn từ sheet LoaiNghi
         list_loai_nghi = []
         loai_nghi_dict = {}
         if not df_loai_nghi.empty and len(df_loai_nghi.columns) > 1:
@@ -473,35 +473,39 @@ if st.session_state.current_role in ["admin", "letan"]:
         if not list_loai_nghi:
             list_loai_nghi = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
 
-        with st.form("form_nhap_lich"):
-            chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input) if list_nv_input else st.text_input("Nhập tên nhân viên:")
-            chosen_date = st.date_input("Chọn ngày nghỉ:", date.today())
-            
-            # Sử dụng on_change để tự động làm mới form khi người dùng đổi Loại nghỉ
-            chosen_loai = st.selectbox("Loại nghỉ:", list_loai_nghi, key="selectbox_loai_nghi")
+        # Đặt selectbox chọn loại nghỉ bên ngoài form để kích hoạt tự động cập nhật ngay lập tức
+        chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input) if list_nv_input else st.text_input("Nhập tên nhân viên:")
+        chosen_date = st.date_input("Chọn ngày nghỉ:", date.today())
+        
+        chosen_loai = st.selectbox("Loại nghỉ:", list_loai_nghi, key="sb_loai_nghi_live")
+        
+        # Tra cứu số ngày tính và mức phạt chuẩn dựa theo loại nghỉ đang chọn
+        default_songay = 1.0
+        default_phat = 0.0
+        if chosen_loai.lower() in loai_nghi_dict:
+            default_songay = loai_nghi_dict[chosen_loai.lower()][0]
+            default_phat = loai_nghi_dict[chosen_loai.lower()][1]
+
+        # Áp dụng luật phạt lũy tiến "Người thứ N" (từ người thứ 3 trở đi cộng thêm 100k trong ngày)
+        is_weekend = chosen_date.weekday() >= 5
+        count_same_day = 0
+        if not df_lich.empty:
+            count_same_day = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Loại nghỉ'].astype(str).str.strip().str.lower() == chosen_loai.lower())])
+        
+        auto_extra_penalty = 0.0
+        norm_loai = chosen_loai.lower()
+        if not is_weekend and "ra ngoài vào muộn" not in norm_loai and count_same_day >= 2:
+            auto_extra_penalty = (count_same_day - 1) * 100000.0
+        
+        final_phat = default_phat + auto_extra_penalty
+
+        with st.form("form_nhap_lich_inner"):
             input_chitiet = st.text_input("Chi tiết vi phạm / Ghi chú (nếu có):").strip()
             
-            default_songay = 1.0
-            default_phat = 0.0
-            if chosen_loai.lower() in loai_nghi_dict:
-                default_songay = loai_nghi_dict[chosen_loai.lower()][0]
-                default_phat = loai_nghi_dict[chosen_loai.lower()][1]
-
             col_p1, col_p2 = st.columns(2)
             with col_p1:
                 val_songay = st.number_input("Số ngày tính:", value=default_songay, step=0.5)
             with col_p2:
-                is_weekend = chosen_date.weekday() >= 5
-                count_same_day = 0
-                if not df_lich.empty:
-                    count_same_day = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Loại nghỉ'].astype(str).str.strip().str.lower() == chosen_loai.lower())])
-                
-                auto_extra_penalty = 0.0
-                norm_loai = chosen_loai.lower()
-                if not is_weekend and "ra ngoài vào muộn" not in norm_loai and count_same_day >= 2:
-                    auto_extra_penalty = (count_same_day - 1) * 100000.0
-                
-                final_phat = default_phat + auto_extra_penalty
                 val_phat = st.number_input("Mức phạt vi phạm (VNĐ - Tham chiếu LoaiNghi):", value=float(final_phat), step=50000.0)
 
             submit_lich = st.form_submit_button("💾 Xác Nhận Ghi Lịch Nghỉ")

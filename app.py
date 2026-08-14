@@ -474,20 +474,17 @@ if st.session_state.show_modal:
 
 st.markdown("---")
 
-# --- TAB RIÊNG BIỆT DÀNH RIÊNG CHO ADMIN: CẤU HÌNH QUY TẮC & MỨC PHẠT (ĐÃ BỎ CỘT CUỐI TUẦN) ---
+# --- TAB RIÊNG BIỆT DÀNH RIÊNG CHO ADMIN: CẤU HÌNH QUY TẮC & MỨC PHẠT ---
 if st.session_state.current_role == "admin":
     with st.expander("⚙️ Cấu hình Quy tắc & Mức phạt chuẩn (Độc quyền Admin)", expanded=False):
-        st.markdown("### 📋 Danh Mục Lý Do Nghỉ & Mức Phạt Chuẩn")
-        st.info("Bảng dưới đây hiển thị toàn bộ quy định lý do nghỉ, số ngày tính và mức phạt hiện đang được hệ thống áp dụng tự động.")
+        st.markdown("### 📋 Danh Mục Lý Do Nghỉ & Mức Phạt Chuẩn (Theo file LoaiNghi_4)")
+        st.info("Bảng dưới đây hiển thị toàn bộ quy định lý do nghỉ, số ngày tính phép và mức phạt hiện đang được hệ thống áp dụng tự động.")
         
         if not df_loai_nghi.empty:
-            cols_to_use = [1, 2, 3, 4] if len(df_loai_nghi.columns) > 4 else [1, 2, 3]
-            df_display_rule = df_loai_nghi.iloc[:, cols_to_use].dropna(subset=[df_loai_nghi.columns[1]])
-            if len(df_display_rule.columns) == 4:
-                df_display_rule.columns = ["Lý do nghỉ", "Chi tiết / Ghi chú", "Số ngày tính", "Phạt vi phạm"]
-            else:
-                df_display_rule.columns = ["Lý do nghỉ", "Chi tiết / Ghi chú", "Số ngày tính"]
-            
+            # Map columns according to LoaiNghi structure: [STT, Lý do nghỉ, Loại nghỉ, Chi tiết, Số ngày tính phép, Phạt vi phạm, Chỉ nhập được cuối tuần]
+            # We want to display Lý do nghỉ, Loại nghỉ, Chi tiết, Số ngày tính phép, Phạt vi phạm, Chỉ nhập được cuối tuần
+            df_display_rule = df_loai_nghi.iloc[:, [1, 2, 3, 4, 5, 6]].dropna(subset=[df_loai_nghi.columns[1]])
+            df_display_rule.columns = ["Lý do nghỉ", "Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính phép", "Phạt vi phạm", "Chỉ nhập được cuối tuần"]
             st.dataframe(df_display_rule, use_container_width=True, hide_index=True)
             st.markdown("*(Lưu ý: Để thay đổi các mức phạt cố định này, Quản trị viên có thể cập nhật trực tiếp trên sheet `LoaiNghi` của file Excel nguồn trên Google Drive).*")
         else:
@@ -504,20 +501,26 @@ if st.session_state.current_role in ["admin", "letan"]:
         users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
         list_nv_input = sorted(list(set(users_s + users_e)))
         
-        # Đọc danh sách lý do nghỉ và mức phạt chuẩn tuyệt đối từ sheet LoaiNghi (Cột B: tên, Cột D: số ngày, Cột E: phạt)
+        # --- ĐỌC DANH SÁCH LÝ DO NGHỈ VÀ MỨC PHẠT CHÍNH XÁC TỪ CẤU TRÚC LoaiNghi_4 ---
         list_ly_do = []
         ly_do_dict = {}
-        if not df_loai_nghi.empty and len(df_loai_nghi.columns) > 1:
+        ly_do_info_dict = {} # Lưu thêm thông tin chi tiết, cuối tuần...
+        
+        if not df_loai_nghi.empty:
             for idx, row in df_loai_nghi.iterrows():
-                l_name = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
-                if l_name and l_name.lower() != "nan" and l_name.lower() != "loại nghỉ" and l_name.lower() != "lý do nghỉ":
+                l_name = str(row.iloc[1]).strip() if len(row) > 1 and pd.notna(row.iloc[1]) else ""
+                if l_name and l_name.lower() != "nan" and l_name.lower() != "lý do nghỉ":
                     list_ly_do.append(l_name)
+                    
+                    # Số ngày tính phép (Cột 4 - index 4)
                     try:
-                        s_ngay = float(str(row.iloc[3]).replace(',', '').strip()) if len(row) > 3 and pd.notna(row.iloc[3]) else 1.0
+                        s_ngay = float(str(row.iloc[4]).replace(',', '').strip()) if len(row) > 4 and pd.notna(row.iloc[4]) else 1.0
                     except:
                         s_ngay = 1.0
+                        
+                    # Phạt vi phạm (Cột 5 - index 5)
                     try:
-                        p_raw = str(row.iloc[4]).strip() if len(row) > 4 and pd.notna(row.iloc[4]) else "0"
+                        p_raw = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else "0"
                         p_str = p_raw.replace(',', '').replace(' ', '')
                         if p_str == "" or p_str == "-" or p_str.lower() == "nan":
                             p_val = 0.0
@@ -525,7 +528,12 @@ if st.session_state.current_role in ["admin", "letan"]:
                             p_val = float(p_str)
                     except:
                         p_val = 0.0
+
+                    # Điều kiện cuối tuần (Cột 6 - index 6)
+                    c_weekend = str(row.iloc[6]).strip() if len(row) > 6 and pd.notna(row.iloc[6]) else ""
+
                     ly_do_dict[l_name.lower()] = [s_ngay, p_val]
+                    ly_do_info_dict[l_name.lower()] = c_weekend
                     
         if not list_ly_do:
             list_ly_do = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
@@ -542,6 +550,14 @@ if st.session_state.current_role in ["admin", "letan"]:
                 default_phat = ly_do_dict[chosen_lydo.lower()][1]
 
             is_weekend = chosen_date.weekday() >= 5
+            
+            # Kiểm tra ràng buộc "Chỉ nhập được cuối tuần" từ file cấu hình
+            rule_weekend_only = False
+            if chosen_lydo and chosen_lydo.lower() in ly_do_info_dict:
+                val_c_week = str(ly_do_info_dict[chosen_lydo.lower()]).lower()
+                if "cuối tuần" in val_c_week or "thứ 7" in val_c_week or "chủ nhật" in val_c_week:
+                    rule_weekend_only = True
+
             count_same_day = 0
             if not df_lich.empty and chosen_lydo != "-- Chọn lý do nghỉ --":
                 count_same_day = len(df_lich[(df_lich['Ngày'] == chosen_date) & (df_lich['Lý do nghỉ'].astype(str).str.strip().str.lower() == chosen_lydo.lower())])
@@ -569,6 +585,8 @@ if st.session_state.current_role in ["admin", "letan"]:
                         st.error("❌ Vui lòng chọn nhân viên cần nhập lịch nghỉ!")
                     elif chosen_lydo == "-- Chọn lý do nghỉ --" or not chosen_lydo:
                         st.error("❌ Vui lòng chọn lý do nghỉ!")
+                    elif rule_weekend_only and not is_weekend:
+                        st.error(f"❌ Lý do nghỉ **'{chosen_lydo}'** theo quy định **chỉ được phép nhập vào cuối tuần (Thứ 7, Chủ Nhật)**!")
                     else:
                         already_booked_today = False
                         if not df_backup.empty:

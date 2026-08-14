@@ -113,13 +113,13 @@ def load_data(url):
         st.error(f"Lỗi đọc dữ liệu: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-# --- HÀM XUẤT EXCEL ---
+# --- HÀM TẠO FILE EXCEL TỐI ƯU ---
+@st.cache_data(show_spinner=False)
 def to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='DuLieuLichNghi')
-    processed_data = output.getvalue()
-    return processed_data
+    return output.getvalue()
 
 # Link gốc
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
@@ -240,12 +240,12 @@ col3.metric("❌ Số LƯỢT nghỉ KHÔNG phép", len(khong_phep_df))
 cols_to_hide = ['Phạt vi phạm']
 export_df = filtered_df.drop(columns=cols_to_hide, errors='ignore')
 
-# Nút Export ra Excel
+# Giao diện tải Excel hiển thị liên tục
 col_header, col_download = st.columns([7, 3])
 with col_header:
     st.subheader(f"Chi tiết danh sách (Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')})")
 with col_download:
-    st.write("") # Dóng hàng với tiêu đề
+    st.write("") 
     if not export_df.empty:
         excel_data = to_excel(export_df)
         file_name = f"LichNghi_{start_date.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.xlsx"
@@ -256,6 +256,8 @@ with col_download:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
+    else:
+        st.button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", disabled=True, use_container_width=True, help="Không có dữ liệu trong ngày này để tải về.")
 
 if filtered_df.empty:
     available_dates = df_lich['Ngày'].dropna().unique()
@@ -272,8 +274,21 @@ if filtered_df.empty:
             nv_khong_phep = nv_history_df[(nv_history_df['Số ngày tính'] == 0) & (nv_history_df['Phạt vi phạm'] > 0)]
             
             with st.expander(f"📅 Bấm vào đây để xem TẤT CẢ lịch sử nghỉ phép của nhân viên {selected_nv}"):
-                st.markdown(f"**Thống kê toàn thời gian:** Đã nghỉ **{nv_co_phep['Số ngày tính'].sum():g}** ngày CÓ phép | Vi phạm **{len(nv_khong_phep)}** lượt KHÔNG phép.")
-                st.dataframe(nv_history_df.drop(columns=['Phạt vi phạm'], errors='ignore'), use_container_width=True, hide_index=True)
+                col_hist_text, col_hist_btn = st.columns([7, 3])
+                with col_hist_text:
+                    st.markdown(f"**Thống kê toàn thời gian:** Đã nghỉ **{nv_co_phep['Số ngày tính'].sum():g}** ngày CÓ phép | Vi phạm **{len(nv_khong_phep)}** lượt KHÔNG phép.")
+                with col_hist_btn:
+                    # Nút tải riêng cho lịch sử nhân viên
+                    nv_export_df = nv_history_df.drop(columns=cols_to_hide, errors='ignore')
+                    nv_excel_data = to_excel(nv_export_df)
+                    st.download_button(
+                        label=f"📥 Tải Toàn Bộ Lịch Sử",
+                        data=nv_excel_data,
+                        file_name=f"LichSu_{selected_nv}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                st.dataframe(nv_history_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
         else:
             st.warning(f"Nhân viên **{selected_nv}** hiện chưa từng có dữ liệu nghỉ phép trên hệ thống.")
 

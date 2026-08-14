@@ -51,7 +51,7 @@ def load_credentials():
         client = get_gspread_client()
         if client:
             sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-            rows = sheet.get_all_values() # Lấy toàn bộ giá trị dạng mảng thô để chống lỗi header trùng/rỗng
+            rows = sheet.get_all_values()
             if len(rows) > 1:
                 data_list = []
                 for idx, row in enumerate(rows[1:], start=2):
@@ -272,14 +272,12 @@ if not st.session_state.logged_in:
             user_chuan = ""
             user_role = "nhanvien"
             
-            # 1. Kiểm tra tài khoản admin cứng
             if username_input == "admin" and password_input == "32531235":
                 st.session_state.logged_in = True
                 st.session_state.current_user = "Quản Trị Viên"
                 st.session_state.current_role = "admin"
                 st.rerun()
             else:
-                # 2. Kiểm tra trên Google Sheet tài khoản & phân quyền
                 for _, row in df_credentials.iterrows():
                     db_name = str(row['Tên nhân viên']).strip()
                     db_pass = str(row['Mật khẩu']).strip()
@@ -328,14 +326,19 @@ if btn_manage_account:
     st.session_state.show_modal = not st.session_state.show_modal
 
 if st.session_state.show_modal:
-    # 1. Giao diện ADMIN: Thêm, Sửa, Xóa và Phân quyền tất cả tài khoản
+    # 1. Giao diện ADMIN: Thêm, Sửa, Xóa và Phân quyền động theo thao tác
     if st.session_state.current_role == "admin":
         with st.form("admin_manage_form"):
             st.subheader("🛠 Quản lý tài khoản & Phân quyền")
             
-            action_type = st.selectbox("Chọn thao tác:", ["Chỉnh sửa / Đổi vai trò", "Thêm nhân viên mới", "Xóa tài khoản"])
+            action_type = st.selectbox("Chọn thao tác:", ["Thêm nhân viên mới", "Chỉnh sửa / Đổi vai trò", "Xóa tài khoản"])
             
             existing_users = sorted(df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist()) if not df_credentials.empty else []
+            
+            input_new_name = ""
+            input_new_pass = ""
+            input_new_role = "nhanvien"
+            target_nv = ""
             
             if action_type == "Thêm nhân viên mới":
                 input_new_name = st.text_input("Tên nhân viên mới:").strip()
@@ -344,15 +347,13 @@ if st.session_state.show_modal:
                 target_nv = input_new_name
             elif action_type == "Xóa tài khoản":
                 target_nv = st.selectbox("Chọn tài khoản cần xóa:", existing_users)
-                input_new_pass = ""
-                input_new_role = "nhanvien"
             else: # Chỉnh sửa
                 target_nv = st.selectbox("Chọn tài khoản cần chỉnh sửa:", existing_users)
                 input_new_name = st.text_input("Tên mới (Để trống nếu giữ nguyên):").strip()
                 input_new_pass = st.text_input("Mật khẩu mới (Để trống nếu giữ nguyên):", type="password")
                 
                 curr_role_val = "nhanvien"
-                if not df_credentials.empty:
+                if not df_credentials.empty and target_nv:
                     match_row = df_credentials[df_credentials['Tên nhân viên'].astype(str).str.strip().str.lower() == target_nv.lower()]
                     if not match_row.empty:
                         curr_role_val = str(match_row.iloc[0].get('Phân quyền', 'nhanvien')).strip().lower()
@@ -370,7 +371,7 @@ if st.session_state.show_modal:
                     real_action = act_map[action_type]
                     name_to_pass = input_new_name if action_type == "Thêm nhân viên mới" else target_nv
                     
-                    success, msg = admin_manage_account(real_action, name_to_pass, locals().get('input_new_name', ''), input_new_pass, input_new_role)
+                    success, msg = admin_manage_account(real_action, name_to_pass, input_new_name, input_new_pass, input_new_role)
                     if success:
                         st.success(f"✅ {msg}")
                         st.session_state.show_modal = False

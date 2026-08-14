@@ -9,7 +9,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Hệ Thống Lịch Nghỉ - Massage Vera", page_icon="📅", layout="wide")
+st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout="wide")
 
 # --- ÉP CSS THU GỌN GIAO DIỆN ---
 st.markdown("""
@@ -85,38 +85,55 @@ def update_password_in_sheet(username, new_password):
     except Exception as e:
         return False, f"Lỗi cập nhật: {e}"
 
-# --- HÀM CHO ADMIN QUẢN LÝ TÀI KHOẢN & PHÂN QUYỀN ---
-def update_account_by_admin(old_username, new_username, new_password, new_role):
+# --- HÀM CHO ADMIN THÊM / SỬA / XÓA / PHÂN QUYỀN ---
+def admin_manage_account(action, target_name, new_name="", new_pass="", new_role="nhanvien"):
     try:
         client = get_gspread_client()
         if not client:
             return False, "Chưa cấu hình quyền kết nối Google Sheets (Secrets)."
         
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-        cells = sheet.findall(old_username, in_column=2)
         
-        final_name = new_username.strip() if new_username and new_username.strip() else old_username
-        final_pass = new_password.strip() if new_password and new_password.strip() else None
-        
-        if cells:
+        if action == "Thêm mới":
+            all_records = sheet.get_all_records()
+            # Kiểm tra xem đã tồn tại chưa
+            for r in all_records:
+                if str(r.get('Tên nhân viên', '')).strip().lower() == target_name.strip().lower():
+                    return False, f"Nhân viên '{target_name}' đã tồn tại trong hệ thống tài khoản!"
+            next_stt = len(all_records) + 1
+            pass_to_set = new_pass.strip() if new_pass.strip() else "123456"
+            sheet.append_row([next_stt, target_name.strip(), pass_to_set, new_role])
+            st.cache_data.clear()
+            return True, f"Đã thêm thành công tài khoản: {target_name.strip()}"
+            
+        elif action == "Chỉnh sửa":
+            cells = sheet.findall(target_name, in_column=2)
+            if not cells:
+                return False, "Không tìm thấy tài khoản cần sửa."
             row_idx = cells[0].row
-            if final_name != old_username:
+            
+            final_name = new_name.strip() if new_name and new_name.strip() else target_name
+            if final_name != target_name:
                 sheet.update_cell(row_idx, 2, final_name)
-            if final_pass:
-                sheet.update_cell(row_idx, 3, final_pass)
+            if new_pass and new_pass.strip():
+                sheet.update_cell(row_idx, 3, new_pass.strip())
             if new_role:
                 sheet.update_cell(row_idx, 4, new_role)
-        else:
-            if not final_pass:
-                final_pass = "123456" 
-            all_records = sheet.get_all_records()
-            next_stt = len(all_records) + 1
-            sheet.append_row([next_stt, final_name, final_pass, new_role])
+                
+            st.cache_data.clear()
+            return True, f"Đã cập nhật thành công tài khoản: {final_name}"
             
-        st.cache_data.clear() 
-        return True, f"Cập nhật thành công tài khoản: {final_name}!"
+        elif action == "Xóa":
+            cells = sheet.findall(target_name, in_column=2)
+            if not cells:
+                return False, "Không tìm thấy tài khoản cần xóa."
+            sheet.delete_rows(cells[0].row)
+            st.cache_data.clear()
+            return True, f"Đã xóa thành công tài khoản: {target_name}"
+            
+        return False, "Hành động không hợp lệ."
     except Exception as e:
-        return False, f"Lỗi cập nhật: {e}"
+        return False, f"Lỗi thực thi: {e}"
 
 # --- HÀM TẢI FILE LỊCH NGHỈ TỪ EXCEL ---
 def download_file_from_google_drive(id, destination):
@@ -299,25 +316,56 @@ if btn_manage_account:
     st.session_state.show_modal = not st.session_state.show_modal
 
 if st.session_state.show_modal:
-    # 1. Giao diện ADMIN quản lý tất cả tài khoản và phân quyền
+    # 1. Giao diện ADMIN: Thêm, Sửa, Xóa và Phân quyền tất cả tài khoản
     if st.session_state.current_role == "admin":
         with st.form("admin_manage_form"):
             st.subheader("🛠 Quản lý tài khoản & Phân quyền")
-            list_nv_to_edit = sorted(df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist())
-            target_nv = st.selectbox("Chọn tài khoản nhân viên / lễ tân:", list_nv_to_edit)
             
-            new_name = st.text_input("Tên mới (Để trống nếu giữ nguyên)")
-            new_pass = st.text_input("Mật khẩu mới (Để trống nếu giữ nguyên)")
-            new_role = st.selectbox("Phân quyền hệ thống:", ["nhanvien", "letan", "admin"], help="nhanvien: xem cá nhân | letan: lễ tân | admin: quản trị")
+            action_type = st.selectbox("Chọn thao tác:", ["Chỉnh sửa / Đổi vai trò", "Thêm nhân viên mới", "Xóa tài khoản"])
             
-            submit_admin = st.form_submit_button("Cập Nhật Tài Khoản")
+            # Lấy danh sách tài khoản hiện có từ Google Sheet credentials hoặc từ Excel
+            existing_users = sorted(df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist()) if not df_credentials.empty else []
+            
+            if action_type == "Thêm nhân viên mới":
+                input_new_name = st.text_input("Tên nhân viên mới:").strip()
+                input_new_pass = st.text_input("Mật khẩu ban đầu (Để trống sẽ tự động là 123456):", type="password")
+                input_new_role = st.selectbox("Vai trò / Phân quyền:", ["nhanvien", "letan", "admin"], index=0)
+                target_nv = input_new_name
+            elif action_type == "Xóa tài khoản":
+                target_nv = st.selectbox("Chọn tài khoản cần xóa:", existing_users)
+                input_new_pass = ""
+                input_new_role = "nhanvien"
+            else: # Chỉnh sửa
+                target_nv = st.selectbox("Chọn tài khoản cần chỉnh sửa:", existing_users)
+                input_new_name = st.text_input("Tên mới (Để trống nếu giữ nguyên):").strip()
+                input_new_pass = st.text_input("Mật khẩu mới (Để trống nếu giữ nguyên):", type="password")
+                
+                # Xác định role hiện tại của user đang chọn để làm mặc định
+                curr_role_val = "nhanvien"
+                if not df_credentials.empty:
+                    match_row = df_credentials[df_credentials['Tên nhân viên'].astype(str).str.strip().str.lower() == target_nv.lower()]
+                    if not match_row.empty:
+                        curr_role_val = str(match_row.iloc[0].get('Phân quyền', 'nhanvien')).strip().lower()
+                role_indices = {"nhanvien": 0, "letan": 1, "admin": 2}
+                default_idx = role_indices.get(curr_role_val, 0)
+                
+                input_new_role = st.selectbox("Vai trò / Phân quyền mới:", ["nhanvien", "letan", "admin"], index=default_idx)
+                
+            submit_admin = st.form_submit_button("Thực Thi")
             if submit_admin:
-                success, msg = update_account_by_admin(target_nv, new_name, new_pass, new_role)
-                if success:
-                    st.success(f"✅ {msg}")
-                    st.session_state.show_modal = False
+                if action_type == "Thêm nhân viên mới" and not input_new_name:
+                    st.error("❌ Vui lòng nhập tên nhân viên mới!")
                 else:
-                    st.error(f"❌ {msg}")
+                    act_map = {"Thêm nhân viên mới": "Thêm mới", "Chỉnh sửa / Đổi vai trò": "Chỉnh sửa", "Xóa tài khoản": "Xóa"}
+                    real_action = act_map[action_type]
+                    name_to_pass = input_new_name if action_type == "Thêm nhân viên mới" else target_nv
+                    
+                    success, msg = admin_manage_account(real_action, name_to_pass, locals().get('input_new_name', ''), input_new_pass, input_new_role)
+                    if success:
+                        st.success(f"✅ {msg}")
+                        st.session_state.show_modal = False
+                    else:
+                        st.error(f"❌ {msg}")
                         
     # 2. Giao diện NHÂN VIÊN / LỄ TÂN đổi mật khẩu cá nhân
     else:

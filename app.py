@@ -447,42 +447,40 @@ st.markdown("---")
 # --- KHU VỰC NHẬP LỊCH NGHỈ DÀNH CHO ADMIN & LỄ TÂN ---
 if st.session_state.current_role in ["admin", "letan"]:
     with st.expander("📝 Nhập lịch nghỉ mới cho nhân viên (Dành cho Lễ Tân & Admin)", expanded=False):
+        users_s = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
+        users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
+        list_nv_input = sorted(list(set(users_s + users_e)))
+        
+        # Đọc danh sách loại nghỉ từ sheet LoaiNghi
+        list_loai_nghi = []
+        loai_nghi_dict = {}
+        if not df_loai_nghi.empty and len(df_loai_nghi.columns) > 1:
+            for idx, row in df_loai_nghi.iterrows():
+                l_name = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
+                if l_name and l_name.lower() != "nan":
+                    list_loai_nghi.append(l_name)
+                    try:
+                        s_ngay = float(str(row.iloc[3]).replace(',', '').strip()) if len(row) > 3 and pd.notna(row.iloc[3]) else 1.0
+                    except:
+                        s_ngay = 1.0
+                    try:
+                        p_str = str(row.iloc[4]).replace(',', '').replace('-', '0').strip() if len(row) > 4 and pd.notna(row.iloc[4]) else "0.0"
+                        p_val = float(p_str) if p_str and p_str.replace('.', '', 1).isdigit() else 0.0
+                    except:
+                        p_val = 0.0
+                    loai_nghi_dict[l_name.lower()] = [s_ngay, p_val]
+                    
+        if not list_loai_nghi:
+            list_loai_nghi = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
+
         with st.form("form_nhap_lich"):
-            users_s = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
-            users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
-            list_nv_input = sorted(list(set(users_s + users_e)))
-            
             chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input) if list_nv_input else st.text_input("Nhập tên nhân viên:")
             chosen_date = st.date_input("Chọn ngày nghỉ:", date.today())
             
-            # --- ĐỌC DANH SÁCH VÀ MỨC PHẠT CHUẨN TỪ SHEET LoaiNghi CỦA FILE NGUỒN ---
-            list_loai_nghi = []
-            loai_nghi_dict = {} # Lưu ánh xạ loại nghỉ -> [số ngày tính, mức phạt]
-            
-            if not df_loai_nghi.empty and len(df_loai_nghi.columns) > 1:
-                for idx, row in df_loai_nghi.iterrows():
-                    l_name = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
-                    if l_name and l_name.lower() != "nan":
-                        list_loai_nghi.append(l_name)
-                        # Cột 3 (index 3) là Số ngày tính, Cột 4 (index 4) là Phạt vi phạm từ cấu trúc LoaiNghi
-                        try:
-                            s_ngay = float(str(row.iloc[3]).replace(',', '').strip()) if len(row) > 3 and pd.notna(row.iloc[3]) else 1.0
-                        except:
-                            s_ngay = 1.0
-                        try:
-                            p_str = str(row.iloc[4]).replace(',', '').replace('-', '0').strip() if len(row) > 4 and pd.notna(row.iloc[4]) else "0.0"
-                            p_val = float(p_str) if p_str and p_str.replace('.', '', 1).isdigit() else 0.0
-                        except:
-                            p_val = 0.0
-                        loai_nghi_dict[l_name.lower()] = [s_ngay, p_val]
-                        
-            if not list_loai_nghi:
-                list_loai_nghi = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
-                
-            chosen_loai = st.selectbox("Loại nghỉ:", list_loai_nghi)
+            # Sử dụng on_change để tự động làm mới form khi người dùng đổi Loại nghỉ
+            chosen_loai = st.selectbox("Loại nghỉ:", list_loai_nghi, key="selectbox_loai_nghi")
             input_chitiet = st.text_input("Chi tiết vi phạm / Ghi chú (nếu có):").strip()
             
-            # Tự động gán số ngày tính và mức phạt chuẩn từ bảng tra cứu sheet LoaiNghi
             default_songay = 1.0
             default_phat = 0.0
             if chosen_loai.lower() in loai_nghi_dict:
@@ -500,7 +498,6 @@ if st.session_state.current_role in ["admin", "letan"]:
                 
                 auto_extra_penalty = 0.0
                 norm_loai = chosen_loai.lower()
-                # Luật người thứ N: từ người thứ 3 trở đi trong ngày cộng thêm 100k (trừ cuối tuần hoặc ra ngoài vào muộn)
                 if not is_weekend and "ra ngoài vào muộn" not in norm_loai and count_same_day >= 2:
                     auto_extra_penalty = (count_same_day - 1) * 100000.0
                 

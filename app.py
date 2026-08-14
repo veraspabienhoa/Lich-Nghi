@@ -55,15 +55,13 @@ def load_data(url):
             'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
         ]
         
-        # CẢI TIẾN: HÀM ĐỌC NGÀY THÁNG CHUYÊN TRỊ SỐ SÊ-RI CỦA XLSB
+        # Hàm đọc ngày tháng chuyên trị số sê-ri của xlsb
         def safe_date_parse(val):
             try:
                 if pd.isna(val): return pd.NaT
                 if hasattr(val, 'date'): return val.date() 
-                # Nếu Excel trả về ngày tháng dưới dạng số (ví dụ 45151.0)
                 if isinstance(val, (int, float)): 
                     return pd.to_datetime(val, unit='D', origin='1899-12-30').date()
-                # Nếu là chữ thuần túy
                 s = str(val).strip().split(' ')[0]
                 return pd.to_datetime(s, dayfirst=True).date()
             except:
@@ -201,15 +199,18 @@ if filtered_df.empty:
 
 tab1, tab2, tab3 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ KHÔNG phép"])
 
+# Danh sách các cột muốn ẩn khỏi giao diện
+cols_to_hide = ['Phạt vi phạm']
+
 with tab1:
-    st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+    st.dataframe(filtered_df.drop(columns=cols_to_hide), use_container_width=True, hide_index=True)
 with tab2:
     if co_phep_df.empty:
         st.info("Không có dữ liệu nhân viên nghỉ có phép.")
     else:
-        st.dataframe(co_phep_df, use_container_width=True, hide_index=True)
+        st.dataframe(co_phep_df.drop(columns=cols_to_hide), use_container_width=True, hide_index=True)
 with tab3:
     if khong_phep_df.empty:
         st.success("Tuyệt vời! Không có nhân viên nào nghỉ không phép.")
     else:
-        st.dataframe(khong_phep_df, use_container_width=True, hide_index=True)
+        st.dataframe(khong_phep_df.drop(columns=cols_to_hide), use_container_width=True, hide_index=True)

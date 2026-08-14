@@ -111,6 +111,7 @@ def admin_manage_account(action, target_name, new_name="", new_pass="", new_role
             all_values = sheet.get_all_values()
             for r in all_values[1:]:
                 if len(r) > 1 and str(r[1]).strip().lower() == target_name.strip().lower():
+                    # Nếu đã có tên nhưng chưa có dòng phân quyền thì cập nhật lại
                     return False, f"Nhân viên '{target_name}' đã tồn tại trong hệ thống tài khoản!"
             next_stt = len(all_values)
             pass_to_set = new_pass.strip() if new_pass.strip() else "123456"
@@ -121,9 +122,14 @@ def admin_manage_account(action, target_name, new_name="", new_pass="", new_role
         elif action == "Chỉnh sửa":
             cells = sheet.findall(target_name, in_column=2)
             if not cells:
-                return False, "Không tìm thấy tài khoản cần sửa."
+                # Nếu chưa có trong Google Sheet mật khẩu, tự động thêm mới vào
+                all_values = sheet.get_all_values()
+                next_stt = len(all_values)
+                sheet.append_row([next_stt, target_name.strip(), "123456", new_role])
+                st.cache_data.clear()
+                return True, f"Đã khởi tạo và cập nhật tài khoản: {target_name}"
+                
             row_idx = cells[0].row
-            
             final_name = new_name.strip() if new_name and new_name.strip() else target_name
             if final_name != target_name:
                 sheet.update_cell(row_idx, 2, final_name)
@@ -333,7 +339,10 @@ if st.session_state.show_modal:
             
             action_type = st.selectbox("Chọn thao tác:", ["Thêm nhân viên mới", "Chỉnh sửa / Đổi vai trò", "Xóa tài khoản"])
             
-            existing_users = sorted(df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist()) if not df_credentials.empty else []
+            # Gộp danh sách nhân viên từ Google Sheet credentials và từ file Excel gốc (DanhSachNV) để đảm bảo không bị thiếu
+            users_from_sheet = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
+            users_from_excel = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
+            existing_users = sorted(list(set(users_from_sheet + users_from_excel)))
             
             input_new_name = ""
             input_new_pass = ""

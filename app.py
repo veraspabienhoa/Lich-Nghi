@@ -484,21 +484,29 @@ if st.session_state.current_role in ["admin", "letan"]:
         
         list_loai_nghi = []
         loai_nghi_dict = {}
-        if not df_loai_nghi.empty and len(df_loai_nghi.columns) > 1:
+        if not df_loai_nghi.empty:
             for idx, row in df_loai_nghi.iterrows():
-                l_name = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
-                if l_name and l_name.lower() != "nan" and l_name.lower() != "loại nghỉ":
+                # Lấy tên loại nghỉ, hỗ trợ bắt lỗi cả khi dùng GSheet hoặc Excel
+                l_name = str(row.get('Loại nghỉ', row.iloc[1] if len(row)>1 else "")).strip()
+                
+                if l_name and l_name.lower() not in ["nan", "loại nghỉ", "none", ""]:
                     list_loai_nghi.append(l_name)
+                    
+                    # Lấy số ngày tính
                     try:
-                        s_ngay = float(str(row.iloc[3]).replace(',', '').strip()) if len(row) > 3 and pd.notna(row.iloc[3]) else 1.0
+                        s_ngay_raw = str(row.get('Số ngày tính', row.iloc[3] if len(row)>3 else 1.0))
+                        s_ngay = float(s_ngay_raw.replace(',', '').strip()) if s_ngay_raw.strip() else 1.0
                     except:
                         s_ngay = 1.0
+                    
+                    # Lấy mức phạt
                     try:
-                        p_raw = str(row.iloc[4]).strip() if len(row) > 4 and pd.notna(row.iloc[4]) else "0"
+                        p_raw = str(row.get('Phạt vi phạm', row.iloc[4] if len(row)>4 else "0")).strip()
                         p_str = p_raw.replace(',', '').replace(' ', '')
-                        p_val = 0.0 if p_str in ["", "-", "nan"] else float(p_str)
+                        p_val = 0.0 if p_str in ["", "-", "nan", "None"] else float(p_str)
                     except:
                         p_val = 0.0
+                        
                     loai_nghi_dict[l_name.lower()] = [s_ngay, p_val]
                     
         if not list_loai_nghi:

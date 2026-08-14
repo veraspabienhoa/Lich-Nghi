@@ -13,7 +13,6 @@ def download_file_from_google_drive(id, destination):
     session = requests.Session()
     response = session.get(URL, params={'id': id}, stream=True)
     
-    # Xử lý cảnh báo quét virus của Google với file lớn
     token = None
     for key, value in response.cookies.items():
         if key.startswith('download_warning'):
@@ -39,7 +38,7 @@ def load_data(url):
         # Tải file về máy chủ
         download_file_from_google_drive(file_id, temp_file)
         
-        # Đọc file bằng pyxlsb (bỏ qua mọi form đăng nhập VBA)
+        # Đọc file bằng pyxlsb 
         xls = pd.read_excel(temp_file, sheet_name=['LichNghi', 'DanhSachNV'], engine='pyxlsb')
         df_lich = xls['LichNghi']
         df_nv = xls['DanhSachNV']
@@ -56,10 +55,15 @@ def load_data(url):
             'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
         ]
         
+        # CẢI TIẾN: HÀM ĐỌC NGÀY THÁNG CHUYÊN TRỊ SỐ SÊ-RI CỦA XLSB
         def safe_date_parse(val):
             try:
                 if pd.isna(val): return pd.NaT
                 if hasattr(val, 'date'): return val.date() 
+                # Nếu Excel trả về ngày tháng dưới dạng số (ví dụ 45151.0)
+                if isinstance(val, (int, float)): 
+                    return pd.to_datetime(val, unit='D', origin='1899-12-30').date()
+                # Nếu là chữ thuần túy
                 s = str(val).strip().split(' ')[0]
                 return pd.to_datetime(s, dayfirst=True).date()
             except:

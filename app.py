@@ -326,7 +326,7 @@ if btn_manage_account:
     st.session_state.show_modal = not st.session_state.show_modal
 
 if st.session_state.show_modal:
-    # 1. Giao diện ADMIN: Thêm, Sửa, Xóa và Phân quyền động theo thao tác
+    # 1. Giao diện ADMIN: Thêm, Sửa, Xóa và Phân quyền tách biệt rõ ràng
     if st.session_state.current_role == "admin":
         with st.form("admin_manage_form"):
             st.subheader("🛠 Quản lý tài khoản & Phân quyền")
@@ -346,9 +346,9 @@ if st.session_state.show_modal:
                 input_new_role = st.selectbox("Vai trò / Phân quyền:", ["nhanvien", "letan", "admin"], index=0)
                 target_nv = input_new_name
             elif action_type == "Xóa tài khoản":
-                target_nv = st.selectbox("Chọn tài khoản cần xóa:", existing_users)
-            else: # Chỉnh sửa
-                target_nv = st.selectbox("Chọn tài khoản cần chỉnh sửa:", existing_users)
+                target_nv = st.selectbox("Chọn tài khoản cần xóa:", existing_users) if existing_users else ""
+            else: # Chỉnh sửa / Đổi vai trò
+                target_nv = st.selectbox("Chọn tài khoản cần chỉnh sửa:", existing_users) if existing_users else ""
                 input_new_name = st.text_input("Tên mới (Để trống nếu giữ nguyên):").strip()
                 input_new_pass = st.text_input("Mật khẩu mới (Để trống nếu giữ nguyên):", type="password")
                 
@@ -366,6 +366,8 @@ if st.session_state.show_modal:
             if submit_admin:
                 if action_type == "Thêm nhân viên mới" and not input_new_name:
                     st.error("❌ Vui lòng nhập tên nhân viên mới!")
+                elif action_type != "Thêm nhân viên mới" and not target_nv:
+                    st.error("❌ Không có tài khoản nào được chọn!")
                 else:
                     act_map = {"Thêm nhân viên mới": "Thêm mới", "Chỉnh sửa / Đổi vai trò": "Chỉnh sửa", "Xóa tài khoản": "Xóa"}
                     real_action = act_map[action_type]

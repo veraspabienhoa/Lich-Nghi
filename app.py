@@ -4,7 +4,7 @@ from datetime import date, datetime, time
 import gspread
 from google.oauth2.service_account import Credentials
 
-# --- CẤU HÌNH ---
+# --- CẤU HÌNH DUY NHẤT ---
 SHEET_ID = "1Kz0aw-JatptAN9G7YSwZ6rJO09urOPaD-rS-18eZSY0"
 
 st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout="wide")
@@ -14,79 +14,169 @@ def get_gspread_client():
     try:
         creds_dict = dict(st.secrets["gcp_service_account"])
         return gspread.authorize(Credentials.from_service_account_info(creds_dict))
-    except: return None
+    except Exception as e:
+        st.error(f"Lỗi xác thực thông tin tài khoản Google (Secrets): {e}")
+        return None
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=10)
 def get_system_data():
     client = get_gspread_client()
-    sh = client.open_by_key(SHEET_ID)
+    if not client:
+        return None, None, None, None, None
     
-    df_taikhoan = pd.DataFrame(sh.worksheet("TaiKhoan").get_all_records())
-    df_loai_nghi = pd.DataFrame(sh.worksheet("LoaiNghi").get_all_records())
-    df_config = pd.DataFrame(sh.worksheet("Config").get_all_records())
-    df_nhanvien = pd.DataFrame(sh.worksheet("Nhanvien").get_all_records())
-    df_lich = pd.DataFrame(sh.worksheet("LichNghi").get_all_records())
-    
-    config_dict = {row['Key']: int(row['Value']) for row in df_config.to_dict('records')}
-    return df_taikhoan, df_loai_nghi, config_dict, df_nhanvien, df_lich
+    try:
+        sh = client.open_by_key(SHEET_ID)
+        
+        # Hàm hỗ trợ lấy dữ liệu an toàn, nếu thiếu sheet tự động tạo mới rỗng
+        def get_safe_worksheet_data(sheet_name, default_cols):
+            try:
+                ws = sh.worksheet(sheet_name)
+                data = ws.get_all_records()
+                return pd.DataFrame(data) if data else pd.DataFrame(columns=default_cols)
+            except:
+                # Nếu chưa có sheet, tạo mới để app không bị lỗi
+                ws = sh.add_worksheet(title=sheet_name, rows="100", cols="20")
+                ws.append_row(default_cols)
+                return pd.DataFrame(columns=default_cols)
 
-# --- ĐĂNG NHẬP ---
+        df_taikhoan = get_safe_worksheet_data("TaiKhoan", ["STT", "Tên nhân viên", "Mật khẩu", "Phân quyền"])
+        df_loai_nghi = get_safe_worksheet_data("LoaiNghi", ["STT", "Lý do nghỉ", "Loại nghỉ", "Chi tiết", "Số ngày tính phép", "Phạt vi phạm", "Chỉ nhập được cuối tuần"])
+        df_config = get_safe_worksheet_data("Config", ["Key", "Value"])
+        df_nhanvien = get_safe_worksheet_data("Nhanvien", ["STT", "Tên nhân viên"])
+        df_lich = get_safe_worksheet_data("LichNghi", ["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính phép", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
+        
+        config_dict = {}
+        if not df_config.empty and 'Key' in df_config.columns and 'Value' in df_config.columns:
+            for _, row in df_config.iterrows():
+                try:
+                    config_dict[str(row['Key']).strip()] = int(row['Value'])
+                except:
+                    pass
+                    
+        # Mặc định nếu thiếu config
+        if 'weekday_limit' not in config_dict: config_dict['weekday_limit'] = 5
+        if 'weekend_limit' not in config_dict: config_dict['weekend_limit'] = 2
+        if 'phat_sinh_limit' not in config_dict: config_dict['phat_sinh_limit'] = 1
+
+        return df_taikhoan, df_loai_nghi, config_dict, df_nhanvien, df_lich
+    except Exception as e:
+        st.error(f"Lỗi kết nối tới Google Sheet: {e}")
+        return None, None, None, None, None
+
+# --- TẢI DỮ LIỆU ---
 df_taikhoan, df_loai_nghi, config, df_nhanvien, df_lich = get_system_data()
 
+if df_taikhoan is None:
+    st.warning("⚠️ Không thể kết nối dữ liệu. Vui lòng kiểm tra lại quyền chia sẻ file Google Sheet với Service Account.")
+    st.stop()
+
+# --- ĐĂNG NHẬP ---
 if "logged_in" not in st.session_state: st.session_state.logged_in = False
+if "current_user" not in st.session_state: st.session_state.current_user = ""
+if "current_role" not in st.session_state: st.session_state.current_role = ""
 
 if not st.session_state.logged_in:
     st.title("🔐 Đăng Nhập Hệ Thống")
     with st.form("login_form"):
-        user = st.text_input("Tên đăng nhập").strip()
-        pwd = st.text_input("Mật khẩu", type="password")
+        user_in = st.text_input("Tên đăng nhập").strip()
+        pwd_in = st.text_input("Mật khẩu", type="password")
         if st.form_submit_button("Đăng Nhập"):
-            match = df_taikhoan[(df_taikhoan['Tên nhân viên'] == user) & (df_taikhoan['Mật khẩu'] == pwd)]
-            if not match.empty:
+            # Tài khoản mặc định Admin cứng phòng hờ
+            if user_in == "admin" and pwd_in == "32531235":
                 st.session_state.logged_in = True
-                st.session_state.current_user = user
-                st.session_state.current_role = match.iloc[0]['Phân quyền']
+                st.session_state.current_user = "Quản Trị Viên"
+                st.session_state.current_role = "admin"
                 st.rerun()
-            else: st.error("Sai thông tin!")
+            elif not df_taikhoan.empty:
+                match = df_taikhoan[(df_taikhoan['Tên nhân viên'].astype(str).str.strip().str.lower() == user_in.lower()) & 
+                                    (df_taikhoan['Mật khẩu'].astype(str).str.strip() == pwd_in)]
+                if not match.empty:
+                    st.session_state.logged_in = True
+                    st.session_state.current_user = str(match.iloc[0]['Tên nhân viên'])
+                    st.session_state.current_role = str(match.iloc[0].get('Phân quyền', 'nhanvien')).strip().lower()
+                    st.rerun()
+                else:
+                    st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
+            else:
+                st.error("❌ Hệ thống tài khoản trống!")
     st.stop()
 
 # --- GIAO DIỆN CHÍNH ---
-st.title(f"📊 Tình Hình Nghỉ Phép - {st.session_state.current_user}")
-if st.button("🚪 Đăng xuất"):
-    st.session_state.logged_in = False
-    st.rerun()
+col_t, col_l = st.columns([7, 3])
+with col_t:
+    role_label = "Quản Trị Viên" if st.session_state.current_role == "admin" else ("Lễ Tân" if st.session_state.current_role == "letan" else "Nhân Viên")
+    st.title(f"📊 Tình Hình Nghỉ Phép - {st.session_state.current_user} ({role_label})")
+with col_l:
+    st.write("")
+    if st.button("🚪 Đăng xuất", use_container_width=True):
+        st.session_state.logged_in = False
+        st.rerun()
 
-# --- NHẬP LỊCH NGHỈ ---
+st.markdown("---")
+
+# --- NHẬP LỊCH NGHỈ (DÀNH CHO ADMIN & LỄ TÂN) ---
 if st.session_state.current_role in ["admin", "letan"]:
-    with st.expander("📝 Nhập lịch nghỉ mới"):
+    with st.expander("📝 Nhập lịch nghỉ mới cho nhân viên", expanded=True):
         with st.form("nhap_form"):
-            nv = st.selectbox("Nhân viên:", df_nhanvien['Tên nhân viên'].tolist())
-            ngay = st.date_input("Ngày:", date.today())
-            ly_do = st.selectbox("Lý do nghỉ:", df_loai_nghi['Lý do nghỉ'].tolist())
-            chitiet = st.text_input("Chi tiết:")
+            nv_list = df_nhanvien['Tên nhân viên'].dropna().astype(str).tolist() if not df_nhanvien.empty else []
+            nv = st.selectbox("Chọn nhân viên:", ["-- Chọn nhân viên --"] + nv_list)
+            ngay = st.date_input("Chọn ngày nghỉ:", date.today())
             
-            row = df_loai_nghi[df_loai_nghi['Lý do nghỉ'] == ly_do].iloc[0]
-            st.write(f"Mức phạt: {row['Phạt vi phạm']:,.0f} VNĐ")
+            ly_do_list = df_loai_nghi['Lý do nghỉ'].dropna().astype(str).tolist() if not df_loai_nghi.empty else []
+            ly_do = st.selectbox("Lý do nghỉ:", ["-- Chọn lý do --"] + ly_do_list)
+            chitiet = st.text_input("Chi tiết vi phạm / Ghi chú (nếu có):").strip()
             
-            if st.form_submit_button("Lưu"):
-                if "phát sinh" in ly_do.lower() and datetime.now().time() < time(9, 0):
-                    st.error("Chỉ đăng ký 'Nghỉ phát sinh' sau 09:00 sáng!")
-                elif (ngay.weekday() < 5 and len(df_lich[df_lich['Ngày'] == str(ngay)]) >= config.get('weekday_limit', 5)) or \
-                     (ngay.weekday() >= 5 and len(df_lich[df_lich['Ngày'] == str(ngay)]) >= config.get('weekend_limit', 2)):
-                    st.error("Đã đủ số người nghỉ cho ngày này!")
+            # Hiển thị mức phạt tạm tính
+            phat_preview = 0.0
+            if ly_do != "-- Chọn lý do --" and not df_loai_nghi.empty:
+                r_match = df_loai_nghi[df_loai_nghi['Lý do nghỉ'] == ly_do]
+                if not r_match.empty:
+                    try: phat_preview = float(r_match.iloc[0]['Phạt vi phạm'])
+                    except: phat_preview = 0.0
+            st.info(f"💵 Mức phạt tham chiếu: **{phat_preview:,.0f} VNĐ**")
+            
+            if st.form_submit_button("💾 Xác Nhận Ghi Lịch Nghỉ"):
+                if nv == "-- Chọn nhân viên --":
+                    st.error("❌ Vui lòng chọn nhân viên!")
+                elif ly_do == "-- Chọn lý do --":
+                    st.error("❌ Vui lòng chọn lý do nghỉ!")
                 else:
-                    client = get_gspread_client()
-                    client.open_by_key(SHEET_ID).worksheet("LichNghi").append_row([
-                        str(ngay), nv, ly_do, chitiet, row['Số ngày tính phép'], row['Phạt vi phạm'], str(date.today()), st.session_state.current_user
-                    ])
-                    st.success("Đã ghi nhận!")
-                    st.rerun()
+                    row_rule = df_loai_nghi[df_loai_nghi['Lý do nghỉ'] == ly_do].iloc[0]
+                    s_ngay = float(row_rule['Số ngày tính phép']) if pd.notna(row_rule['Số ngày tính phép']) else 0.0
+                    p_val = float(row_rule['Phạt vi phạm']) if pd.notna(row_rule['Phạt vi phạm']) else 0.0
+                    
+                    # 1. Rào chắn giờ Nghỉ phát sinh
+                    is_weekend = ngay.weekday() >= 5
+                    if "phát sinh" in ly_do.lower() and datetime.now().time() < time(9, 0):
+                        st.error("❌ Chỉ được phép đăng ký 'Nghỉ phát sinh' từ 09:00 sáng trở đi!")
+                    # 2. Rào chắn giới hạn ngày thường / cuối tuần
+                    elif (not is_weekend and len(df_lich[df_lich['Ngày'] == str(ngay)]) >= config.get('weekday_limit', 5)) or \
+                         (is_weekend and len(df_lich[df_lich['Ngày'] == str(ngay)]) >= config.get('weekend_limit', 2)):
+                        limit_val = config.get('weekday_limit', 5) if not is_weekend else config.get('weekend_limit', 2)
+                        st.error(f"❌ Ngày {ngay.strftime('%d/%m/%Y')} đã đạt giới hạn tối đa {limit_val} người đăng ký nghỉ!")
+                    # 3. Rào chắn giới hạn phát sinh
+                    elif "phát sinh" in ly_do.lower() and len(df_lich[(df_lich['Ngày'] == str(ngay)) & (df_lich['Lý do nghỉ'].str.contains("phát sinh", case=False))]) >= config.get('phat_sinh_limit', 1):
+                        st.error(f"❌ Đã hết suất 'Nghỉ phát sinh' cho ngày này!")
+                    else:
+                        client = get_gspread_client()
+                        client.open_by_key(SHEET_ID).worksheet("LichNghi").append_row([
+                            str(ngay), nv, ly_do, chitiet, s_ngay, p_val, str(date.today()), st.session_state.current_user
+                        ])
+                        st.success("✅ Đã ghi nhận lịch nghỉ thành công!")
+                        st.cache_data.clear()
+                        st.rerun()
 
 # --- QUẢN LÝ QUY TẮC (ADMIN ONLY) ---
 if st.session_state.current_role == "admin":
-    with st.expander("⚙️ Quy tắc & Mức phạt (Admin)"):
-        st.dataframe(df_loai_nghi, use_container_width=True)
-        st.write("Cập nhật quy tắc trực tiếp trên sheet 'LoaiNghi' của file Google Sheet.")
+    with st.expander("⚙️ Xem & Quản lý Quy tắc / Giới hạn hệ thống"):
+        st.subheader("Cấu hình giới hạn (Sheet Config)")
+        st.json(config)
+        st.subheader("Danh mục lý do nghỉ & mức phạt (Sheet LoaiNghi)")
+        st.dataframe(df_loai_nghi, use_container_width=True, hide_index=True)
 
-# --- HIỂN THỊ DANH SÁCH ---
-st.dataframe(df_lich, use_container_width=True)
+# --- HIỂN THỊ DANH SÁCH LỊCH NGHỈ ---
+st.subheader("📋 Lịch Sử Nghỉ Đã Đăng Ký")
+if not df_lich.empty:
+    st.dataframe(df_lich, use_container_width=True, hide_index=True)
+else:
+    st.info("Chưa có dữ liệu lịch nghỉ nào được ghi nhận.")

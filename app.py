@@ -410,9 +410,13 @@ with st.expander("📝 Nhập & Đăng ký lịch", expanded=False):
 
                     if day_allowed and role_allowed:
                         list_loai_nghi.append(l_name)
-                        # Lấy cột E (Số ngày tính - Index 4)
-                        try: s_ngay = float(str(row_vals[4] if len(row_vals)>4 else 1.0).replace(',', '').strip())
-                        except: s_ngay = 1.0
+                        
+                        # Lấy cột E (Số ngày tính - Index 4) -> Trống thì trả về None
+                        try:
+                            s_ngay_str = str(row_vals[4]).replace(',', '').strip() if len(row_vals) > 4 else ""
+                            s_ngay = float(s_ngay_str) if s_ngay_str != "" else None
+                        except: 
+                            s_ngay = None
                         
                         # Lấy Cột F (Phạt vi phạm - Index 5)
                         try:
@@ -424,11 +428,11 @@ with st.expander("📝 Nhập & Đăng ký lịch", expanded=False):
                         
         if not list_loai_nghi:
             list_loai_nghi = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
-            loai_nghi_dict = {l.lower(): [1.0, 0.0] for l in list_loai_nghi}
+            loai_nghi_dict = {l.lower(): [None, 0.0] for l in list_loai_nghi}
 
         chosen_loai = st.selectbox("Lý do nghỉ:", ["-- Chọn lý do nghỉ --"] + list_loai_nghi, key="sb_loai_nghi_live")
         
-        default_songay = 1.0
+        default_songay = None
         default_phat = 0.0
         if chosen_loai and chosen_loai != "-- Chọn lý do nghỉ --" and chosen_loai.lower() in loai_nghi_dict:
             default_songay = loai_nghi_dict[chosen_loai.lower()][0]
@@ -454,7 +458,7 @@ with st.expander("📝 Nhập & Đăng ký lịch", expanded=False):
             
             col_p1, col_p2 = st.columns(2)
             with col_p1:
-                val_songay = st.number_input("Số ngày tính:", value=0.0 if is_loi_vi_pham else float(default_songay), step=0.5, key=f"num_songay_{dyn_key_suffix}", disabled=is_loi_vi_pham)
+                val_songay = st.number_input("Số ngày tính:", value=default_songay, step=0.5, key=f"num_songay_{dyn_key_suffix}", disabled=is_loi_vi_pham)
             with col_p2:
                 val_phat = st.number_input("Mức phạt vi phạm (VNĐ):", value=float(default_phat), step=50000.0, key=f"num_phat_{dyn_key_suffix}")
             
@@ -480,6 +484,10 @@ with st.expander("📝 Nhập & Đăng ký lịch", expanded=False):
                 else:
                     can_proceed = True
                     norm_loai = chosen_loai.strip().lower()
+                    
+                    if val_songay is None:
+                        st.error("❌ Vui lòng nhập Số ngày tính (Không được để trống)!")
+                        can_proceed = False
                     
                     # Ràng buộc "Lỗi vi phạm khác"
                     if is_loi_vi_pham:

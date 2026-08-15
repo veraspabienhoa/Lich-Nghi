@@ -8,6 +8,13 @@ import io
 import gspread
 from google.oauth2.service_account import Credentials
 
+# --- CẤU HÌNH MÚI GIỜ VIỆT NAM ---
+VN_TZ = timezone(timedelta(hours=7))
+
+def get_vn_today():
+    """Hàm trả về ngày hiện tại theo đúng múi giờ Việt Nam"""
+    return datetime.now(VN_TZ).date()
+
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout="wide")
 
@@ -130,7 +137,7 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, phat_
             str(chi_tiet),
             float(so_ngay),
             float(phat_vi_pham),
-            str(date.today()),
+            str(get_vn_today()),  # <-- Đã áp dụng giờ Việt Nam
             str(nguoi_tao)
         ])
         st.cache_data.clear()
@@ -573,7 +580,7 @@ if st.session_state.current_role in ["admin", "letan"]:
 
         with tab_input_lich:
             chosen_nv = st.selectbox("Chọn nhân viên:", ["-- Chọn nhân viên --"] + list_nv_input, key="sb_chosen_nv")
-            chosen_date = st.date_input("Chọn ngày nghỉ:", date.today(), key="sb_chosen_date")
+            chosen_date = st.date_input("Chọn ngày nghỉ:", get_vn_today(), key="sb_chosen_date")  # <-- Đã áp dụng giờ Việt Nam
             chosen_loai = st.selectbox("Lý do nghỉ:", ["-- Chọn lý do nghỉ --"] + list_loai_nghi, key="sb_loai_nghi_live")
             
             default_songay = 1.0
@@ -687,7 +694,7 @@ st.markdown("---")
 col_date, col_name, col_refresh = st.columns([4, 4, 2])
 
 with col_date:
-    today = date.today()
+    today = get_vn_today()  # <-- Đã áp dụng giờ Việt Nam
     filter_type = st.selectbox(
         "Lọc thời gian:", 
         ["Hôm nay", "Hôm qua", "Tuần này", "Tuần trước", "Tháng này", "Tháng trước", "Chọn ngày", "Khoảng thời gian"]

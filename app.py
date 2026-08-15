@@ -7,6 +7,7 @@ import os
 import io
 import gspread
 from google.oauth2.service_account import Credentials
+import streamlit.components.v1 as components
 
 # --- CẤU HÌNH MÚI GIỜ VIỆT NAM ---
 VN_TZ = timezone(timedelta(hours=7))
@@ -14,8 +15,23 @@ VN_TZ = timezone(timedelta(hours=7))
 def get_vn_today():
     return datetime.now(VN_TZ).date()
 
-# --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout="wide", initial_sidebar_state="expanded")
+# --- CẤU HÌNH TRANG (THU GỌN SIDEBAR MẶC ĐỊNH TRÊN ĐIỆN THOẠI) ---
+st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout="wide", initial_sidebar_state="auto")
+
+# --- CHẶN SỰ KIỆN PHÍM TẮT CLEAR CACHE BẰNG JAVASCRIPT ---
+components.html("""
+<script>
+    const parentDoc = window.parent.document;
+    parentDoc.addEventListener('keydown', function(event) {
+        if ((event.key === 'c' || event.key === 'C')) {
+            const tag = event.target.tagName.toLowerCase();
+            if (tag !== 'input' && tag !== 'textarea') {
+                event.stopPropagation();
+            }
+        }
+    }, true);
+</script>
+""", height=0, width=0)
 
 # --- KHỞI TẠO BIẾN GIAO DIỆN (TIÊU ĐỀ) ---
 if "title_font" not in st.session_state:
@@ -23,32 +39,47 @@ if "title_font" not in st.session_state:
 if "title_size" not in st.session_state:
     st.session_state.title_size = 28
 
-# --- ÉP CSS THU GỌN GIAO DIỆN & TÙY CHỈNH FONT TIÊU ĐỀ ---
+# --- ÉP CSS THU GỌN GIAO DIỆN, MOBILE OPTIMIZATION & FONT ---
 st.markdown(f"""
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@400;700&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Arial:wght@400;700&display=swap');
         
+        /* Tối ưu khoảng cách tổng thể */
         .block-container {{
             padding-top: 1.5rem;
             padding-bottom: 1rem;
         }}
-        div[data-testid="stVerticalBlock"] > div {{
-            gap: 0.2rem !important;
+        
+        /* Tối ưu riêng cho màn hình Điện thoại */
+        @media (max-width: 768px) {{
+            .block-container {{
+                padding-top: 1rem !important;
+                padding-left: 0.5rem !important;
+                padding-right: 0.5rem !important;
+            }}
+            h1 {{ font-size: 1.5rem !important; }}
+            h2 {{ font-size: 1.25rem !important; }}
+            h3 {{ font-size: 1.1rem !important; }}
         }}
-        button {{
-            margin-top: 5px !important;
-        }}
-        /* Loại bỏ thanh cuộn, tự động fit height cho dropdown để hiển thị full list */
+        
+        div[data-testid="stVerticalBlock"] > div {{ gap: 0.2rem !important; }}
+        button {{ margin-top: 5px !important; }}
+        
+        /* Loại bỏ thanh cuộn dropdown */
         div[data-baseweb="popover"] > div,
         div[data-baseweb="select"] ul[role="listbox"],
         div[data-testid="stSelectboxVirtualDropdown"] {{
             max-height: 85vh !important; 
         }}
-        /* Tiêu đề thương hiệu */
+        
+        /* Áp dụng Font cho toàn bộ Tiêu đề (Headers) trên trang */
+        h1, h2, h3, .custom-main-title {{
+            font-family: '{st.session_state.title_font}', sans-serif !important;
+        }}
+        
         .custom-main-title {{
-            font-family: '{st.session_state.title_font}', sans-serif;
             font-size: {st.session_state.title_size}px;
             font-weight: bold;
             color: #333;
@@ -72,7 +103,7 @@ def get_gspread_client():
     except Exception as e:
         return None
 
-# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN (MỞ RỘNG CỘT TỚI M) ---
+# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN ---
 @st.cache_data(ttl=30)
 def load_credentials():
     try:
@@ -159,17 +190,16 @@ def batch_update_shift_schedule(edited_df):
             if len(row) > 1:
                 nv_name = str(row[1]).strip().lower()
                 if nv_name in shift_map:
-                    while len(row) < 13: row.append("") # Mở rộng cột nếu thiếu (Cột M = Index 12)
+                    while len(row) < 13: row.append("") # Mở rộng cột nếu thiếu
                     row[10] = shift_map[nv_name]['ca']
                     row[11] = shift_map[nv_name]['ngay']
                     row[12] = shift_map[nv_name]['chuky']
                     all_vals[i] = row
         
-        # Ghi toàn bộ dữ liệu trở lại Google Sheet
         try:
             sheet.update('A1', all_vals)
         except:
-            sheet.update(all_vals) # Tương thích các phiên bản gspread khác nhau
+            sheet.update(all_vals) 
             
         st.cache_data.clear()
         return True, "Đã lưu đồng loạt cấu hình Ca làm việc thành công!"
@@ -357,7 +387,45 @@ if not st.session_state.logged_in:
     st.stop()
 
 
-# --- GIAO DIỆN HEADER CHÍNH ---
+# ==========================================
+# ẨN HOÀN TOÀN SIDEBAR NẾU LÀ NHÂN VIÊN
+# ==========================================
+if st.session_state.current_role == "nhanvien":
+    st.markdown("""
+        <style>
+            [data-testid="collapsedControl"] { display: none !important; }
+            [data-testid="stSidebar"] { display: none !important; }
+        </style>
+    """, unsafe_allow_html=True)
+
+
+# ==========================================
+# THIẾT LẬP MENU ĐIỀU HƯỚNG BÊN TRÁI (SIDEBAR)
+# ==========================================
+is_admin_letan = st.session_state.current_role in ["admin", "letan"]
+
+if is_admin_letan:
+    st.sidebar.title("📌 MENU CHỨC NĂNG")
+    menu_options = ["📊 Tình Hình Nghỉ Phép", "⏰ Thiết Lập Ca Làm Việc"]
+    
+    # Khu vực tùy chỉnh giao diện đưa vào Sidebar gọn gàng cho Admin
+    if st.session_state.current_role == "admin":
+        st.sidebar.markdown("---")
+        with st.sidebar.expander("🎨 Tùy chỉnh Tiêu đề (Chỉ Admin)"):
+            fonts_list = ["Cinzel Decorative", "Arial", "Roboto", "Times New Roman"]
+            sel_font = st.selectbox("Font chữ:", fonts_list, index=fonts_list.index(st.session_state.title_font))
+            sel_size = st.slider("Cỡ chữ (px):", 15, 60, st.session_state.title_size)
+            if st.button("💾 Lưu giao diện"):
+                st.session_state.title_font = sel_font
+                st.session_state.title_size = sel_size
+                st.rerun()
+                
+    selected_page = st.sidebar.radio("Chọn trang:", menu_options)
+else:
+    selected_page = "📊 Tình Hình Nghỉ Phép"
+
+
+# --- GIAO DIỆN HEADER CHÍNH BÊN PHẢI ---
 col_title, col_logout = st.columns([7, 3]) 
 with col_title:
     r_label = {"admin": "Quản Trị Viên", "letan": "Lễ Tân"}.get(st.session_state.current_role, "Nhân Viên")
@@ -376,20 +444,6 @@ with col_logout:
             except: pass
             st.rerun()
 
-# --- TÙY CHỈNH TIÊU ĐỀ (CHỈ ADMIN) ---
-if st.session_state.current_role == "admin":
-    with st.expander("🎨 Tùy chỉnh Tiêu đề (Chỉ Admin)", expanded=False):
-        f_col1, f_col2 = st.columns(2)
-        with f_col1:
-            fonts_list = ["Cinzel Decorative", "Arial", "Roboto", "Times New Roman"]
-            sel_font = st.selectbox("Font chữ thương hiệu:", fonts_list, index=fonts_list.index(st.session_state.title_font))
-        with f_col2:
-            sel_size = st.slider("Kích thước chữ (px):", 15, 60, st.session_state.title_size)
-            
-        if st.button("💾 Lưu thay đổi giao diện"):
-            st.session_state.title_font = sel_font
-            st.session_state.title_size = sel_size
-            st.rerun()
 
 # --- MODAL HỒ SƠ / QUẢN LÝ TÀI KHOẢN ---
 if 'show_modal' not in st.session_state:
@@ -426,21 +480,6 @@ if st.session_state.show_modal:
 
 
 # ==========================================
-# THIẾT LẬP MENU ĐIỀU HƯỚNG BÊN TRÁI (SIDEBAR)
-# ==========================================
-st.sidebar.title("📌 MENU CHỨC NĂNG")
-is_admin_letan = st.session_state.current_role in ["admin", "letan"]
-
-# Danh sách menu tùy theo quyền hạn
-if is_admin_letan:
-    menu_options = ["📊 Tình Hình Nghỉ Phép", "⏰ Thiết Lập Ca Làm Việc"]
-else:
-    menu_options = ["📊 Tình Hình Nghỉ Phép"]
-
-selected_page = st.sidebar.radio("Chọn trang:", menu_options)
-
-
-# ==========================================
 # PAGE 1: ⏰ THIẾT LẬP CA LÀM VIỆC (CHỈ ADMIN/LỄ TÂN)
 # ==========================================
 if selected_page == "⏰ Thiết Lập Ca Làm Việc" and is_admin_letan:
@@ -450,9 +489,13 @@ if selected_page == "⏰ Thiết Lập Ca Làm Việc" and is_admin_letan:
     # Chuẩn bị dữ liệu bảng
     df_shifts = df_credentials[['Tên nhân viên', 'Ca làm việc', 'Ngày bắt đầu ca', 'Chu kỳ']].copy()
     
+    # Tính toán chiều cao linh hoạt để loại bỏ thanh cuộn bên trong (Scroll)
+    calc_height = (len(df_shifts) * 36) + 42 
+    
     # Hiển thị bảng Edit dưới dạng lưới (Grid)
     edited_df = st.data_editor(
         df_shifts,
+        height=calc_height,
         column_config={
             "Tên nhân viên": st.column_config.TextColumn("Tên nhân viên", disabled=True),
             "Ca làm việc": st.column_config.SelectboxColumn(
@@ -473,8 +516,7 @@ if selected_page == "⏰ Thiết Lập Ca Làm Việc" and is_admin_letan:
             )
         },
         hide_index=True,
-        use_container_width=True,
-        num_rows="fixed"
+        use_container_width=True
     )
     
     st.write("")

@@ -900,8 +900,25 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
             st.download_button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", data=to_excel(df_for_excel), file_name=f"LichNghi_{start_date.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         else: st.button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", disabled=True, use_container_width=True)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ PHÁT SINH", "Danh sách Nghỉ KHÔNG phép"])
-    with tab1: st.dataframe(export_df, use_container_width=True, hide_index=True)
-    with tab2: st.info("Trống.") if co_phep_df.empty else st.dataframe(co_phep_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
-    with tab3: st.info("Trống.") if phat_sinh_df.empty else st.dataframe(phat_sinh_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
-    with tab4: st.success("Không có ai!") if khong_phep_df.empty else st.dataframe(khong_phep_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
+   tab1, tab2, tab3, tab4 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ PHÁT SINH", "Danh sách Nghỉ KHÔNG phép"])
+    
+    with tab1: 
+        st.dataframe(export_df, use_container_width=True, hide_index=True)
+        
+    with tab2: 
+        if co_phep_df.empty:
+            st.info("Trống.")
+        else:
+            st.dataframe(co_phep_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
+            
+    with tab3: 
+        if phat_sinh_df.empty:
+            st.info("Trống.")
+        else:
+            st.dataframe(phat_sinh_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
+            
+    with tab4: 
+        if khong_phep_df.empty:
+            st.success("Không có ai!")
+        else:
+            st.dataframe(khong_phep_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)

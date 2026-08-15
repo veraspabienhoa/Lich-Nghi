@@ -1320,26 +1320,37 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
     # --- KHU VỰC CHỈ DÀNH CHO ADMIN: GỬI EMAIL BÁO CÁO ---
     if st.session_state.current_role == "admin" and not filtered_df.empty:
         with st.expander("📧 GỬI BÁO CÁO QUA EMAIL CHO NHÂN VIÊN"):
-            st.info("Hệ thống sẽ tự động tách dữ liệu của từng nhân viên và gửi đến đúng Email của họ. Bạn cần cung cấp Email Gmail và Mật khẩu ứng dụng để thực hiện việc gửi này.")
+            st.info("Hệ thống sẽ tự động tách dữ liệu của từng nhân viên và gửi đến đúng Email của họ. Bạn có thể chọn gửi cho 1 người, nhiều người hoặc tất cả.")
+            
+            unique_employees_in_filter = filtered_df['Tên nhân viên'].dropna().unique().tolist()
             
             with st.form("form_send_email"):
+                # Thêm multiselect cho phép chọn người nhận
+                selected_to_send = st.multiselect(
+                    "Chọn nhân viên nhận báo cáo:", 
+                    options=unique_employees_in_filter, 
+                    default=unique_employees_in_filter,
+                    help="Có thể xóa bớt hoặc chọn lại. Mặc định là gửi cho tất cả những người có trong danh sách lọc bên trên."
+                )
+                
                 col_em1, col_em2 = st.columns(2)
                 with col_em1:
                     sender_email = st.text_input("Email gửi (Gmail của bạn):")
                 with col_em2:
                     sender_pass = st.text_input("Mật khẩu ứng dụng (16 ký tự):", type="password")
                 
-                if st.form_submit_button("🚀 Xác Nhận Gửi Đồng Loạt"):
+                if st.form_submit_button("🚀 Xác Nhận Gửi Email"):
                     if not sender_email or not sender_pass:
                         st.error("❌ Vui lòng nhập đầy đủ Email và Mật khẩu ứng dụng!")
+                    elif not selected_to_send:
+                        st.warning("⚠️ Vui lòng chọn ít nhất 1 nhân viên để gửi!")
                     else:
                         success_count = 0
                         error_messages = []
                         
-                        unique_employees = filtered_df['Tên nhân viên'].dropna().unique()
                         progress_bar = st.progress(0)
                         
-                        for i, emp in enumerate(unique_employees):
+                        for i, emp in enumerate(selected_to_send):
                             df_emp = filtered_df[filtered_df['Tên nhân viên'] == emp]
                             total_phat = df_emp['Phạt vi phạm'].sum()
                             
@@ -1358,7 +1369,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                 else:
                                     error_messages.append(f"❌ Lỗi gửi {emp}: {msg}")
                                     
-                            progress_bar.progress((i + 1) / len(unique_employees))
+                            progress_bar.progress((i + 1) / len(selected_to_send))
                             time.sleep(0.5) # Chờ nửa giây để tránh bị Google chặn Spam
                         
                         if success_count > 0:

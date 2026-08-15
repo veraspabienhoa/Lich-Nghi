@@ -56,9 +56,9 @@ components.html("""
 
 # --- KHỞI TẠO BIẾN GIAO DIỆN (TIÊU ĐỀ) ---
 if "title_font" not in st.session_state:
-    st.session_state.title_font = "Cinzel Decorative"
+    st.session_state.title_font = "Roboto"
 if "title_size" not in st.session_state:
-    st.session_state.title_size = 28
+    st.session_state.title_size = 35
 
 # --- ÉP CSS THU GỌN GIAO DIỆN, MOBILE OPTIMIZATION & FONT ---
 st.markdown(f"""
@@ -109,9 +109,9 @@ st.markdown(f"""
         
         /* LÀM NỔI BẬT KHU VỰC NHẬP LỊCH NGHỈ */
         [data-testid="stExpander"] details summary p {{
-            font-size: 1.35rem !important;
+            font-size: 1.8rem !important;
             font-weight: 900 !important;
-            color: #0056b3 !important; /* Đổi màu xanh đậm để thu hút sự chú ý */
+            color: #d32f2f !important; /* Đổi màu Đỏ sậm để cực kỳ thu hút */
             text-transform: uppercase;
         }}
     </style>
@@ -271,7 +271,7 @@ def load_loai_nghi_from_gsheet():
         pass
     return pd.DataFrame()
 
-# --- GHI VÀ XÓA LỊCH (ĐÃ CẬP NHẬT CẤU TRÚC 10 CỘT MỚI) ---
+# --- GHI VÀ XÓA LỊCH ---
 def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, role):
     try:
         client = get_gspread_client()
@@ -471,7 +471,6 @@ col_title, col_logout = st.columns([7, 3])
 with col_title:
     r_label = {"admin": "Quản Trị Viên", "letan": "Lễ Tân"}.get(st.session_state.current_role, "Nhân Viên")
     
-    # Chuẩn bị danh sách hiển thị tên online (chỉ admin mới thấy)
     admin_view_online = ""
     if st.session_state.current_role == "admin" and online_users_list:
         admin_view_online = f"<br><span style='font-size: 13px; font-weight: normal; color: #666;'>👤 Chi tiết: {', '.join(online_users_list)}</span>"
@@ -597,7 +596,7 @@ if selected_page == "⏰ Thiết Lập Ca Làm Việc" and is_admin_letan:
 # ==========================================
 elif selected_page == "📊 Tình Hình Nghỉ Phép":
 
-    with st.expander("📝 NHẬP & ĐĂNG KÝ LỊCH", expanded=False):
+    with st.expander("📝 Nhập & Đăng ký lịch", expanded=False):
         if is_admin_letan:
             tabs = st.tabs(["➕ Nhập lịch nghỉ mới", "✏️ Quản lý / Xóa lịch đã đăng ký"])
             tab_input_lich, tab_manage_lich = tabs[0], tabs[1]
@@ -692,6 +691,32 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
             is_nghi_ly_do_khac = "nghỉ lý do khác" in chosen_loai.lower() if chosen_loai else False
             if is_loi_vi_pham: default_songay = 0.0
 
+            # Cảnh báo sớm ngay khi vừa chọn Lý do nghỉ
+            early_warning = ""
+            norm_loai_temp = chosen_loai.strip().lower() if chosen_loai else ""
+            if chosen_loai and chosen_loai != "-- Chọn lý do nghỉ --":
+                num_days_temp = (end_date - start_date).days + 1
+                if num_days_temp > 1 and "phép năm" not in norm_loai_temp:
+                    early_warning = "❌ Chọn Khoảng thời gian nhiều ngày chỉ áp dụng cho 'Nghỉ Phép năm'."
+                elif not is_nghi_ly_do_khac and default_phat <= 0 and "phép năm" not in norm_loai_temp and not is_loi_vi_pham:
+                    for i in range(num_days_temp):
+                        chk_d = start_date + timedelta(days=i)
+                        chk_is_we = chk_d.weekday() >= 5
+                        if norm_loai_temp == "nghỉ phát sinh":
+                            c_ps = len(df_lich[(df_lich['Ngày'] == chk_d) & (df_lich['Lý do nghỉ'].astype(str).str.strip().str.lower() == "nghỉ phát sinh")]) if not df_lich.empty else 0
+                            if c_ps >= 2:
+                                early_warning = f"❌ Ngày {chk_d.strftime('%d/%m/%Y')} đã đạt giới hạn 2 người 'Nghỉ phát sinh'!"
+                                break
+                        else:
+                            m_ppl = 5 if not chk_is_we else 3
+                            c_nghi = len(df_lich[(df_lich['Ngày'] == chk_d) & (df_lich['Số ngày tính'] > 0)]) if not df_lich.empty else 0
+                            if c_nghi >= m_ppl:
+                                early_warning = f"❌ Ngày {chk_d.strftime('%d/%m/%Y')} đã đạt giới hạn {m_ppl} người nghỉ chung/ngày."
+                                break
+
+            if early_warning:
+                st.error(early_warning)
+
             # Lịch sử trong ngày (Lấy theo ngày bắt đầu)
             existing_today = []
             if not df_lich.empty and chosen_nv != "-- Chọn nhân viên --":
@@ -726,15 +751,13 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                         st.error("❌ Vui lòng chọn nhân viên cần nhập lịch nghỉ!")
                     elif chosen_loai == "-- Chọn lý do nghỉ --" or not chosen_loai:
                         st.error("❌ Vui lòng chọn lý do nghỉ!")
+                    elif early_warning:
+                        st.error(f"❌ Không thể lưu: {early_warning}")
                     else:
                         can_proceed = True
                         norm_loai = chosen_loai.strip().lower()
                         
-                        # Kiểm tra nếu chọn nhiều ngày
                         num_days_selected = (end_date - start_date).days + 1
-                        if num_days_selected > 1 and "phép năm" not in norm_loai:
-                            st.error("❌ Tính năng chọn đăng ký Khoảng thời gian nhiều ngày cùng lúc chỉ áp dụng cho 'Nghỉ Phép năm'. Lý do khác vui lòng đăng ký từng ngày một!")
-                            can_proceed = False
                         
                         if val_songay is None:
                             st.error("❌ Vui lòng nhập Số ngày tính (Không được để trống)!")
@@ -804,8 +827,8 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                 if val_songay is not None: accumulated_month += val_songay
                                 else: val_songay = 0.0
                                 
-                                # Check logic tổng thể nếu không phải ngoại lệ
-                                if not is_nghi_ly_do_khac and val_phat <= 0 and "phép năm" not in norm_loai:
+                                # Backend validation lần nữa để cực kỳ an toàn
+                                if not is_nghi_ly_do_khac and val_phat <= 0 and "phép năm" not in norm_loai and not is_loi_vi_pham:
                                     if norm_loai == "nghỉ phát sinh":
                                         current_hour = datetime.now(VN_TZ).hour
                                         if current_hour < 9 or current_hour >= 17:
@@ -820,7 +843,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                                 st.error(f"❌ Ngày {curr_date_iter.strftime('%d/%m/%Y')} đã đạt giới hạn 2 người 'Nghỉ phát sinh'!")
                                                 continue
                                     else:
-                                        max_people = 5 if not is_weekend_iter else 2
+                                        max_people = 5 if not is_weekend_iter else 3
                                         today_total_nghi = len(df_lich[(df_lich['Ngày'] == curr_date_iter) & (df_lich['Số ngày tính'] > 0)]) if not df_lich.empty else 0
                                         if today_total_nghi >= max_people:
                                             st.error(f"❌ Ngày {curr_date_iter.strftime('%d/%m/%Y')} đã đạt giới hạn {max_people} người nghỉ chung/ngày.")

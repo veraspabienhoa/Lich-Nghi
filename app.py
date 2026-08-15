@@ -56,9 +56,9 @@ components.html("""
 
 # --- KHỞI TẠO BIẾN GIAO DIỆN (TIÊU ĐỀ) ---
 if "title_font" not in st.session_state:
-    st.session_state.title_font = "Roboto"
+    st.session_state.title_font = "Cinzel Decorative"
 if "title_size" not in st.session_state:
-    st.session_state.title_size = 35
+    st.session_state.title_size = 28
 
 # --- ÉP CSS THU GỌN GIAO DIỆN, MOBILE OPTIMIZATION & FONT ---
 st.markdown(f"""
@@ -109,9 +109,9 @@ st.markdown(f"""
         
         /* LÀM NỔI BẬT KHU VỰC NHẬP LỊCH NGHỈ */
         [data-testid="stExpander"] details summary p {{
-            font-size: 1.8rem !important;
+            font-size: 1.35rem !important;
             font-weight: 900 !important;
-            color: #d32f2f !important;
+            color: #d32f2f !important; /* Đổi màu xanh đậm/đỏ để thu hút sự chú ý */
             text-transform: uppercase;
         }}
     </style>
@@ -131,71 +131,6 @@ def get_gspread_client():
         return gspread.authorize(creds)
     except Exception as e:
         return None
-
-# --- ĐỒNG BỘ DỮ LIỆU TỪ EXCEL SANG GOOGLE SHEETS (CHỈ ADMIN) ---
-def admin_sync_excel_to_gsheet():
-    try:
-        client = get_gspread_client()
-        if not client: return False, "Chưa cấu hình quyền kết nối Google Sheets."
-        
-        file_id = "1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT"
-        temp_file = "temp_sync.xlsb"
-        download_file_from_google_drive(file_id, temp_file)
-        
-        xls = pd.read_excel(temp_file, sheet_name='LichNghi', engine='pyxlsb')
-        if os.path.exists(temp_file): os.remove(temp_file)
-        
-        # Lấy thô từ cột A đến J (10 cột) - bỏ qua filter và định dạng ẩn
-        df_raw = xls.iloc[:, :10].copy()
-        
-        # Hàm định dạng Ngày/Giờ tránh lỗi chuỗi JSON khi upload
-        def safe_date_str(val):
-            try:
-                if pd.isna(val): return ""
-                if hasattr(val, 'strftime'): return val.strftime('%d/%m/%Y')
-                if isinstance(val, (int, float)): return pd.to_datetime(val, unit='D', origin='1899-12-30').strftime('%d/%m/%Y')
-                s = str(val).strip().split(' ')[0]
-                return pd.to_datetime(s, dayfirst=True).strftime('%d/%m/%Y')
-            except: return str(val)
-            
-        def safe_time_str(val):
-            try:
-                if pd.isna(val): return ""
-                if hasattr(val, 'strftime'): return val.strftime('%H:%M:%S')
-                if isinstance(val, (int, float)):
-                    total_seconds = int(round(val * 86400))
-                    hours = total_seconds // 3600
-                    minutes = (total_seconds % 3600) // 60
-                    seconds = total_seconds % 60
-                    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                return str(val).strip()
-            except: return str(val)
-
-        if len(df_raw.columns) > 0: df_raw.iloc[:, 0] = df_raw.iloc[:, 0].apply(safe_date_str)
-        if len(df_raw.columns) > 7: df_raw.iloc[:, 7] = df_raw.iloc[:, 7].apply(safe_date_str)
-        if len(df_raw.columns) > 8: df_raw.iloc[:, 8] = df_raw.iloc[:, 8].apply(safe_time_str)
-
-        df_raw = df_raw.fillna("")
-        while len(df_raw.columns) < 10: df_raw[f"Col{len(df_raw.columns)}"] = ""
-        
-        values = df_raw.values.tolist()
-        sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        
-        try:
-            sheet_dp.batch_clear(["A2:J"])
-        except:
-            pass # Tương thích gspread cũ
-        
-        if values:
-            try:
-                sheet_dp.update('A2', values, value_input_option='USER_ENTERED')
-            except:
-                sheet_dp.update(values, 'A2')
-                
-        st.cache_data.clear()
-        return True, f"Đã sao chép và dán {len(values)} dòng dữ liệu từ Excel lên Sheet thành công!"
-    except Exception as e:
-        return False, f"Lỗi đồng bộ: {e}"
 
 # --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN ---
 @st.cache_data(ttl=30)
@@ -226,12 +161,21 @@ def load_credentials():
                     
                     if str(ten).strip() != "":
                         data_list.append({
-                            'STT': stt, 'Tên nhân viên': str(ten).strip(), 'Mật khẩu': str(pwd).strip() if str(pwd).strip() else "123456",
+                            'STT': stt,
+                            'Tên nhân viên': str(ten).strip(),
+                            'Mật khẩu': str(pwd).strip() if str(pwd).strip() else "123456",
                             'Phân quyền': str(role).strip().lower() if str(role).strip() else "nhanvien",
-                            'Họ và tên đầy đủ': fullname, 'Ngày sinh': dob, 'Điện thoại': phone,
-                            'Email': email, 'Địa chỉ': address, 'Phát sinh tháng': ps_thang,
-                            'Có phép tháng': cp_thang, 'Phép năm': pn_nam, 'Ca làm việc': ca_lam_viec,
-                            'Ngày bắt đầu ca': ngay_bd, 'Chu kỳ': chu_ky
+                            'Họ và tên đầy đủ': fullname,
+                            'Ngày sinh': dob,
+                            'Điện thoại': phone,
+                            'Email': email,
+                            'Địa chỉ': address,
+                            'Phát sinh tháng': ps_thang,
+                            'Có phép tháng': cp_thang,
+                            'Phép năm': pn_nam,
+                            'Ca làm việc': ca_lam_viec,
+                            'Ngày bắt đầu ca': ngay_bd,
+                            'Chu kỳ': chu_ky
                         })
                 return pd.DataFrame(data_list)
     except Exception:
@@ -277,18 +221,20 @@ def batch_update_shift_schedule(edited_df):
             }
         
         for i, row in enumerate(all_vals):
-            if i == 0: continue 
+            if i == 0: continue # Header
             if len(row) > 1:
                 nv_name = str(row[1]).strip().lower()
                 if nv_name in shift_map:
-                    while len(row) < 15: row.append("") 
+                    while len(row) < 15: row.append("") # Mở rộng cột nếu thiếu
                     row[12] = shift_map[nv_name]['ca']
                     row[13] = shift_map[nv_name]['ngay']
                     row[14] = shift_map[nv_name]['chuky']
                     all_vals[i] = row
         
-        try: sheet.update('A1', all_vals)
-        except: sheet.update(all_vals) 
+        try:
+            sheet.update('A1', all_vals)
+        except:
+            sheet.update(all_vals) 
             
         st.cache_data.clear()
         return True, "Đã lưu đồng loạt cấu hình Ca làm việc thành công!"
@@ -325,7 +271,7 @@ def load_loai_nghi_from_gsheet():
         pass
     return pd.DataFrame()
 
-# --- GHI VÀ XÓA LỊCH ---
+# --- GHI VÀ XÓA LỊCH (ĐÃ CẬP NHẬT CẤU TRÚC 10 CỘT MỚI) ---
 def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, role):
     try:
         client = get_gspread_client()
@@ -334,6 +280,7 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         ngay_cn = get_vn_today().strftime('%d/%m/%Y')
         gio_cn = datetime.now(VN_TZ).strftime('%H:%M:%S')
         
+        # 1. Ghi vào Sheet Dự phòng
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
         if len(sheet_dp.get_all_values()) == 0:
             sheet_dp.append_row(["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"])
@@ -341,16 +288,19 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         sheet_dp.append_row([
             str(ngay), str(nv), str(loai_nghi), str(chi_tiet),
             float(so_ngay) if so_ngay is not None else 0.0, 
-            float(so_ngay_cong_don), float(phat_vi_pham), 
+            float(so_ngay_cong_don), 
+            float(phat_vi_pham), 
             str(ngay_cn), str(gio_cn), str(role)
         ])
 
+        # 2. Ghi vào File chính
         try:
             sheet_chinh_lich = client.open_by_key(SHEET_CHINH_ID).worksheet("LichNghi")
             sheet_chinh_lich.append_row([
                 str(ngay), str(nv), str(loai_nghi), str(chi_tiet),
                 float(so_ngay) if so_ngay is not None else 0.0, 
-                float(so_ngay_cong_don), float(phat_vi_pham), 
+                float(so_ngay_cong_don), 
+                float(phat_vi_pham), 
                 str(ngay_cn), str(gio_cn), str(role)
             ])
         except Exception:
@@ -404,6 +354,19 @@ def load_lich_nghi(url):
                 s = str(val).strip().split(' ')[0]
                 return pd.to_datetime(s, dayfirst=True).date()
             except: return pd.NaT
+                
+        def safe_time_parse(val):
+            try:
+                if pd.isna(val): return ""
+                if isinstance(val, (int, float)):
+                    total_seconds = int(round(val * 86400))
+                    hours = total_seconds // 3600
+                    minutes = (total_seconds % 3600) // 60
+                    seconds = total_seconds % 60
+                    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                return str(val).strip()
+            except:
+                return str(val)
                 
         df_lich['Ngày'] = df_lich['Ngày'].apply(safe_date_parse)
         df_lich = df_lich.dropna(subset=['Ngày'])
@@ -511,16 +474,6 @@ if is_admin_letan:
                 st.session_state.title_size = sel_size
                 st.rerun()
                 
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("🛠 CÔNG CỤ ADMIN")
-        if st.sidebar.button("🔄 Đồng Bộ Excel ➡️ Google Sheets", help="Sao chép dữ liệu từ A-J (File Excel LichNghi.xlsb) sang file Google Sheets Dự phòng"):
-            with st.spinner("Đang tải dữ liệu từ Excel và đồng bộ lên Google Sheets..."):
-                res, msg = admin_sync_excel_to_gsheet()
-                if res:
-                    st.sidebar.success(msg)
-                else:
-                    st.sidebar.error(msg)
-                
     selected_page = st.sidebar.radio("Chọn trang:", menu_options)
 else:
     selected_page = "📊 Tình Hình Nghỉ Phép"
@@ -560,6 +513,10 @@ with col_logout:
             except: pass
             st.rerun()
 
+# --- DROPDOWN HIỂN THỊ ONLINE (CHỈ ADMIN) ---
+if st.session_state.current_role == "admin":
+    with st.expander(f"🟢 Đang trực tuyến: {online_users_count} người", expanded=False):
+        st.write(", ".join(online_users_list) if online_users_list else "Không có ai.")
 
 # --- MODAL HỒ SƠ / QUẢN LÝ TÀI KHOẢN ---
 if 'show_modal' not in st.session_state:
@@ -653,6 +610,7 @@ if selected_page == "⏰ Thiết Lập Ca Làm Việc" and is_admin_letan:
 elif selected_page == "📊 Tình Hình Nghỉ Phép":
 
     with st.expander("📝 ĐĂNG KÝ - THAY ĐỔI LỊCH NGHỈ", expanded=False):
+        # Mở cả 2 tab cho TẤT CẢ mọi người. Việc phân quyền Data/Thời gian được code bên trong.
         tabs = st.tabs(["➕ Nhập lịch nghỉ mới", "✏️ Quản lý / Xóa lịch đã đăng ký"])
         tab_input_lich, tab_manage_lich = tabs[0], tabs[1]
             
@@ -872,6 +830,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                         st.error(f"❌ Vượt số ngày Có phép trong tháng! Nhân viên này chỉ được nghỉ tối đa {limit_cp} ngày/tháng.")
                                         can_proceed = False
 
+                            # Vòng lặp ghi lịch qua từng ngày
                             if can_proceed:
                                 for i in range(num_days_selected):
                                     curr_date_iter = start_date + timedelta(days=i)

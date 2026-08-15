@@ -17,30 +17,42 @@ def get_vn_today():
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout="wide")
 
-# --- ÉP CSS THU GỌN GIAO DIỆN & TĂNG CHIỀU CAO DROPDOWN ---
-st.markdown("""
+# --- KHỞI TẠO BIẾN GIAO DIỆN (TIÊU ĐỀ) ---
+if "title_font" not in st.session_state:
+    st.session_state.title_font = "Cinzel Decorative"
+if "title_size" not in st.session_state:
+    st.session_state.title_size = 28
+
+# --- ÉP CSS THU GỌN GIAO DIỆN & TÙY CHỈNH FONT TIÊU ĐỀ ---
+st.markdown(f"""
     <style>
-        .block-container {
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@400;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
+        
+        .block-container {{
             padding-top: 1.5rem;
             padding-bottom: 1rem;
-        }
-        div[data-testid="stVerticalBlock"] > div {
+        }}
+        div[data-testid="stVerticalBlock"] > div {{
             gap: 0.2rem !important;
-        }
-        h1, h2, h3 {
-            padding-bottom: 0rem !important;
-            margin-bottom: 0rem !important;
-        }
-        button {
+        }}
+        button {{
             margin-top: 5px !important;
-        }
-        
-        /* Loại bỏ thanh cuộn, tự động fit height cho dropdown để hiển thị full list */
+        }}
+        /* Loại bỏ thanh cuộn dropdown */
         div[data-baseweb="popover"] > div,
         div[data-baseweb="select"] ul[role="listbox"],
-        div[data-testid="stSelectboxVirtualDropdown"] {
+        div[data-testid="stSelectboxVirtualDropdown"] {{
             max-height: 85vh !important; 
-        }
+        }}
+        /* Tiêu đề thương hiệu */
+        .custom-main-title {{
+            font-family: '{st.session_state.title_font}', sans-serif;
+            font-size: {st.session_state.title_size}px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 20px;
+        }}
     </style>
 """, unsafe_allow_html=True)
 
@@ -59,7 +71,7 @@ def get_gspread_client():
     except Exception as e:
         return None
 
-# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN (MỞ RỘNG CỘT TỚI J) ---
+# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN ---
 @st.cache_data(ttl=30)
 def load_credentials():
     try:
@@ -80,6 +92,9 @@ def load_credentials():
                     ps_thang = str(row[7]).strip() if len(row) > 7 else "0"
                     cp_thang = str(row[8]).strip() if len(row) > 8 else "0"
                     pn_nam = str(row[9]).strip() if len(row) > 9 else "0"
+                    ca_lam_viec = str(row[10]).strip() if len(row) > 10 else ""
+                    ngay_bd = str(row[11]).strip() if len(row) > 11 else ""
+                    chu_ky = str(row[12]).strip() if len(row) > 12 else ""
                     
                     if str(ten).strip() != "":
                         data_list.append({
@@ -92,25 +107,26 @@ def load_credentials():
                             'Địa chỉ': address,
                             'Phát sinh tháng': ps_thang,
                             'Có phép tháng': cp_thang,
-                            'Phép năm': pn_nam
+                            'Phép năm': pn_nam,
+                            'Ca làm việc': ca_lam_viec,
+                            'Ngày bắt đầu ca': ngay_bd,
+                            'Chu kỳ': chu_ky
                         })
                 return pd.DataFrame(data_list)
     except Exception:
         pass
-    return pd.DataFrame(columns=['STT', 'Tên nhân viên', 'Mật khẩu', 'Phân quyền', 'Điện thoại', 'Email', 'Địa chỉ', 'Phát sinh tháng', 'Có phép tháng', 'Phép năm'])
+    return pd.DataFrame(columns=['STT', 'Tên nhân viên', 'Mật khẩu', 'Phân quyền'])
 
 # --- CẬP NHẬT THÔNG TIN CÁ NHÂN VÀ MẬT KHẨU ---
 def update_user_profile(username, new_pass, phone, email, address):
     try:
         client = get_gspread_client()
-        if not client:
-            return False, "Chưa cấu hình quyền kết nối."
+        if not client: return False, "Chưa cấu hình quyền kết nối."
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
         cells = sheet.findall(username, in_column=2)
         if cells:
             row_idx = cells[0].row
             if new_pass: sheet.update_cell(row_idx, 3, str(new_pass))
-            # Format text bằng dấu nháy đơn ' để hiển thị số 0 ở đầu
             sheet.update_cell(row_idx, 5, f"'{phone}") 
             sheet.update_cell(row_idx, 6, str(email))
             sheet.update_cell(row_idx, 7, str(address))
@@ -119,6 +135,24 @@ def update_user_profile(username, new_pass, phone, email, address):
         return False, "Không tìm thấy tài khoản."
     except Exception as e:
         return False, f"Lỗi cập nhật: {e}"
+
+# --- CẬP NHẬT CA LÀM VIỆC (ADMIN & LỄ TÂN) ---
+def update_shift_schedule(username, ca, ngay_bd, chu_ky):
+    try:
+        client = get_gspread_client()
+        if not client: return False, "Chưa cấu hình quyền kết nối."
+        sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
+        cells = sheet.findall(username, in_column=2)
+        if cells:
+            row_idx = cells[0].row
+            sheet.update_cell(row_idx, 11, str(ca))
+            sheet.update_cell(row_idx, 12, str(ngay_bd))
+            sheet.update_cell(row_idx, 13, str(chu_ky))
+            st.cache_data.clear()
+            return True, f"Đã cập nhật cấu hình ca cho {username}!"
+        return False, "Không tìm thấy nhân viên."
+    except Exception as e:
+        return False, f"Lỗi: {e}"
 
 # --- TẢI DỮ LIỆU TỪ GOOGLE SHEET DỰ PHÒNG ---
 @st.cache_data(ttl=10)
@@ -300,11 +334,14 @@ if not st.session_state.logged_in:
                 else: st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
     st.stop()
 
+
 # --- HEADER GIAO DIỆN CHÍNH ---
 col_title, col_logout = st.columns([7, 3]) 
 with col_title:
     r_label = {"admin": "Quản Trị Viên", "letan": "Lễ Tân"}.get(st.session_state.current_role, "Nhân Viên")
-    st.title(f"📊 Tình Hình Nghỉ Phép - {st.session_state.current_user} ({r_label})")
+    # Hiển thị Tiêu đề thương hiệu
+    st.markdown(f"<div class='custom-main-title'>WELCOME TO VERA SPA - {st.session_state.current_user} ({r_label})</div>", unsafe_allow_html=True)
+
 with col_logout:
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
@@ -315,6 +352,21 @@ with col_logout:
             try:
                 if "admin_token" in st.query_params: del st.query_params["admin_token"]
             except: pass
+            st.rerun()
+
+# --- TÙY CHỈNH TIÊU ĐỀ (CHỈ ADMIN) ---
+if st.session_state.current_role == "admin":
+    with st.expander("🎨 Tùy chỉnh Tiêu đề (Chỉ Admin)", expanded=False):
+        f_col1, f_col2 = st.columns(2)
+        with f_col1:
+            fonts_list = ["Cinzel Decorative", "Arial", "Roboto", "Times New Roman"]
+            sel_font = st.selectbox("Font chữ thương hiệu:", fonts_list, index=fonts_list.index(st.session_state.title_font))
+        with f_col2:
+            sel_size = st.slider("Kích thước chữ (px):", 15, 60, st.session_state.title_size)
+            
+        if st.button("💾 Lưu giao diện"):
+            st.session_state.title_font = sel_font
+            st.session_state.title_size = sel_size
             st.rerun()
 
 # --- MODAL HỒ SƠ / QUẢN LÝ TÀI KHOẢN ---
@@ -351,10 +403,39 @@ if st.session_state.show_modal:
                 else: st.error(f"❌ {msg}")
 
 
+# --- QUẢN LÝ CA LÀM VIỆC (ADMIN / LỄ TÂN) ---
+is_admin_letan = st.session_state.current_role in ["admin", "letan"]
+users_s = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
+users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
+all_users = sorted(list(set(users_s + users_e)))
+
+if is_admin_letan:
+    with st.expander("⏰ Thiết lập Lịch & Ca làm việc (Admin / Lễ Tân)", expanded=False):
+        with st.form("form_ca_lam_viec"):
+            st.info("Chỉ định luân phiên Ca làm việc cho nhân viên. Dữ liệu được ghi trực tiếp vào Sheet Danh sách Nhân viên.")
+            c1, c2 = st.columns(2)
+            with c1:
+                nv_ca = st.selectbox("Chọn nhân viên:", ["-- Chọn nhân viên --"] + all_users)
+            with c2:
+                ca_sel = st.selectbox("Ca làm việc:", ["Ca 1 (10:00 - 19:00)", "Ca 2 (13:00 - 22:00)", "Hành chính"])
+            
+            c3, c4 = st.columns(2)
+            with c3:
+                ngay_bd_ca = st.date_input("Ngày bắt đầu làm việc của ca này:", get_vn_today())
+            with c4:
+                chu_ky_ca = st.selectbox("Chu kỳ luân phiên đổi ca:", ["Luân phiên (14 ngày)", "Theo chu kỳ Tháng", "Cố định (Không đổi)"])
+            
+            if st.form_submit_button("💾 Lưu Cấu Hình Ca"):
+                if nv_ca == "-- Chọn nhân viên --":
+                    st.error("❌ Vui lòng chọn nhân viên cần thiết lập.")
+                else:
+                    res_ca, msg_ca = update_shift_schedule(nv_ca, ca_sel, ngay_bd_ca.strftime('%d/%m/%Y'), chu_ky_ca)
+                    if res_ca: st.success(f"✅ {msg_ca}")
+                    else: st.error(f"❌ {msg_ca}")
+
+
 # --- KHU VỰC NHẬP LỊCH NGHỈ & QUẢN LÝ ---
 with st.expander("📝 Nhập & Đăng ký lịch", expanded=False):
-    is_admin_letan = st.session_state.current_role in ["admin", "letan"]
-    
     if is_admin_letan:
         tabs = st.tabs(["➕ Nhập lịch nghỉ mới", "✏️ Quản lý / Xóa lịch đã đăng ký"])
         tab_input_lich, tab_manage_lich = tabs[0], tabs[1]
@@ -362,12 +443,7 @@ with st.expander("📝 Nhập & Đăng ký lịch", expanded=False):
         tab_input_lich = st.tabs(["➕ Đăng ký lịch nghỉ"])[0]
         tab_manage_lich = None
         
-    users_s = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
-    users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
-    all_users = sorted(list(set(users_s + users_e)))
-    
     with tab_input_lich:
-        # Quyền nhân viên: Chỉ chọn được ngày hôm nay và tương lai
         if is_admin_letan:
             list_nv_input = ["-- Chọn nhân viên --"] + all_users
             min_date = None
@@ -411,7 +487,7 @@ with st.expander("📝 Nhập & Đăng ký lịch", expanded=False):
                     if day_allowed and role_allowed:
                         list_loai_nghi.append(l_name)
                         
-                        # Lấy cột E (Số ngày tính - Index 4) -> Trống thì trả về None
+                        # Lấy cột E (Số ngày tính - Index 4)
                         try:
                             s_ngay_str = str(row_vals[4]).replace(',', '').strip() if len(row_vals) > 4 else ""
                             s_ngay = float(s_ngay_str) if s_ngay_str != "" else None
@@ -491,7 +567,7 @@ with st.expander("📝 Nhập & Đăng ký lịch", expanded=False):
                     
                     # Ràng buộc "Lỗi vi phạm khác"
                     if is_loi_vi_pham:
-                        val_songay = 0.0 # Bắt ép bằng 0 an toàn lần nữa
+                        val_songay = 0.0 
                         if not input_chitiet:
                             st.error("❌ Bắt buộc nhập Chi tiết vi phạm / Ghi chú đối với 'Lỗi vi phạm khác'.")
                             can_proceed = False

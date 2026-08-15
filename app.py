@@ -901,7 +901,8 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
         else: st.button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", disabled=True, use_container_width=True)
 
     tab1, tab2, tab3, tab4 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ PHÁT SINH", "Danh sách Nghỉ KHÔNG phép"])
-   with tab1: 
+    
+    with tab1: 
         st.dataframe(export_df, use_container_width=True, hide_index=True)
         
     with tab2: 

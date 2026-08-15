@@ -9,10 +9,6 @@ import gspread
 from google.oauth2.service_account import Credentials
 import streamlit.components.v1 as components
 import time
-from streamlit.runtime.scriptrunner import get_script_run_ctx
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 # --- CẤU HÌNH MÚI GIỜ VIỆT NAM ---
 VN_TZ = timezone(timedelta(hours=7))
@@ -20,24 +16,27 @@ VN_TZ = timezone(timedelta(hours=7))
 def get_vn_today():
     return datetime.now(VN_TZ).date()
 
-# --- THEO DÕI SỐ NGƯỜI ĐANG TRUY CẬP (SESSIONS) ---
+# --- THEO DÕI SỐ NGƯỜI ĐANG TRUY CẬP ---
 @st.cache_resource
-def get_active_sessions():
+def get_active_users():
     return {}
 
-active_sessions = get_active_sessions()
-ctx = get_script_run_ctx()
-if ctx:
-    active_sessions[ctx.session_id] = time.time()
+active_users = get_active_users()
 
-# Dọn dẹp session đã ngưng hoạt động > 5 phút (300 giây)
+# Cập nhật thời gian hoạt động của user hiện tại
+if st.session_state.get("logged_in") and st.session_state.get("current_user"):
+    active_users[st.session_state.current_user] = time.time()
+
+# Dọn dẹp user đã ngưng hoạt động > 5 phút (300 giây)
 current_t = time.time()
-for sid in list(active_sessions.keys()):
-    if current_t - active_sessions[sid] > 300: 
-        del active_sessions[sid]
-online_users_count = len(active_sessions)
+for u in list(active_users.keys()):
+    if current_t - active_users[u] > 300: 
+        del active_users[u]
 
-# --- CẤU HÌNH TRANG (THU GỌN SIDEBAR MẶC ĐỊNH TRÊN ĐIỆN THOẠI) ---
+online_users_count = len(active_users)
+online_users_list = list(active_users.keys())
+
+# --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout="wide", initial_sidebar_state="auto")
 
 # --- CHẶN SỰ KIỆN PHÍM TẮT CLEAR CACHE BẰNG JAVASCRIPT ---
@@ -84,7 +83,6 @@ st.markdown(f"""
             h1 {{ font-size: 1.5rem !important; }}
             h2 {{ font-size: 1.25rem !important; }}
             h3 {{ font-size: 1.1rem !important; }}
-            .online-indicator {{ display: block; margin-top: 5px; float: none !important; }}
         }}
         
         div[data-testid="stVerticalBlock"] > div {{ gap: 0.2rem !important; }}
@@ -97,7 +95,7 @@ st.markdown(f"""
             max-height: 85vh !important; 
         }}
         
-        /* Áp dụng Font cho toàn bộ Tiêu đề (Headers) trên trang */
+        /* Áp dụng Font cho Tiêu đề thương hiệu */
         h1, h2, h3, .custom-main-title {{
             font-family: '{st.session_state.title_font}', sans-serif !important;
         }}
@@ -108,32 +106,16 @@ st.markdown(f"""
             color: #333;
             margin-bottom: 20px;
         }}
+        
+        /* LÀM NỔI BẬT KHU VỰC NHẬP LỊCH NGHỈ */
+        [data-testid="stExpander"] details summary p {{
+            font-size: 1.35rem !important;
+            font-weight: 900 !important;
+            color: #0056b3 !important; /* Đổi màu xanh đậm để thu hút sự chú ý */
+            text-transform: uppercase;
+        }}
     </style>
 """, unsafe_allow_html=True)
-
-# --- CẤU HÌNH EMAIL THÔNG BÁO TỰ ĐỘNG ---
-def send_notification_email(subject, body):
-    try:
-        if "email" not in st.secrets:
-            print("Cảnh báo: Chưa cấu hình Secrets [email] nên không thể gửi thư tự động.")
-            return
-        sender = st.secrets["email"]["sender"]
-        password = st.secrets["email"]["password"]
-        receiver = "veraspabienhoa@gmail.com"
-        
-        msg = MIMEMultipart()
-        msg['From'] = sender
-        msg['To'] = receiver
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
-        
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, password)
-        server.send_message(msg)
-        server.quit()
-    except Exception as e:
-        print(f"Lỗi gửi email: {e}")
 
 # --- KẾT NỐI GSPREAD ---
 SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"
@@ -150,7 +132,7 @@ def get_gspread_client():
     except Exception as e:
         return None
 
-# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN (ĐÃ DỊCH CHUYỂN CỘT) ---
+# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN ---
 @st.cache_data(ttl=30)
 def load_credentials():
     try:
@@ -239,7 +221,7 @@ def batch_update_shift_schedule(edited_df):
             }
         
         for i, row in enumerate(all_vals):
-            if i == 0: continue # Header
+            if i == 0: continue 
             if len(row) > 1:
                 nv_name = str(row[1]).strip().lower()
                 if nv_name in shift_map:
@@ -249,8 +231,10 @@ def batch_update_shift_schedule(edited_df):
                     row[14] = shift_map[nv_name]['chuky']
                     all_vals[i] = row
         
-        try: sheet.update('A1', all_vals)
-        except: sheet.update(all_vals) 
+        try:
+            sheet.update('A1', all_vals)
+        except:
+            sheet.update(all_vals) 
             
         st.cache_data.clear()
         return True, "Đã lưu đồng loạt cấu hình Ca làm việc thành công!"
@@ -272,7 +256,7 @@ def load_backup_sheet_data():
                 return df_bk
     except Exception:
         pass
-    return pd.DataFrame(columns=["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
+    return pd.DataFrame(columns=["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"])
 
 @st.cache_data(ttl=60)
 def load_loai_nghi_from_gsheet():
@@ -287,29 +271,37 @@ def load_loai_nghi_from_gsheet():
         pass
     return pd.DataFrame()
 
-# --- GHI VÀ XÓA LỊCH ---
-def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, phat_vi_pham, nguoi_tao):
+# --- GHI VÀ XÓA LỊCH (ĐÃ CẬP NHẬT CẤU TRÚC 10 CỘT MỚI) ---
+def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, role):
     try:
         client = get_gspread_client()
         if not client: return False, "Chưa cấu hình quyền kết nối Google Sheets."
         
+        ngay_cn = get_vn_today().strftime('%d/%m/%Y')
+        gio_cn = datetime.now(VN_TZ).strftime('%H:%M:%S')
+        
+        # 1. Ghi vào Sheet Dự phòng
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
         if len(sheet_dp.get_all_values()) == 0:
-            sheet_dp.append_row(["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
+            sheet_dp.append_row(["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"])
         
         sheet_dp.append_row([
             str(ngay), str(nv), str(loai_nghi), str(chi_tiet),
-            float(so_ngay), float(phat_vi_pham), str(get_vn_today()), str(nguoi_tao)
+            float(so_ngay) if so_ngay is not None else 0.0, 
+            float(so_ngay_cong_don), 
+            float(phat_vi_pham), 
+            str(ngay_cn), str(gio_cn), str(role)
         ])
 
+        # 2. Ghi vào File chính
         try:
             sheet_chinh_lich = client.open_by_key(SHEET_CHINH_ID).worksheet("LichNghi")
             sheet_chinh_lich.append_row([
                 str(ngay), str(nv), str(loai_nghi), str(chi_tiet),
-                float(so_ngay), "", float(phat_vi_pham), 
-                str(get_vn_today().strftime('%d/%m/%Y')), 
-                str(datetime.now(VN_TZ).strftime('%H:%M:%S')), 
-                str(nguoi_tao)
+                float(so_ngay) if so_ngay is not None else 0.0, 
+                float(so_ngay_cong_don), 
+                float(phat_vi_pham), 
+                str(ngay_cn), str(gio_cn), str(role)
             ])
         except Exception:
             pass
@@ -350,7 +342,7 @@ def load_lich_nghi(url):
         
         xls = pd.read_excel(temp_file, sheet_name=['LichNghi', 'DanhSachNV', 'LoaiNghi'], engine='pyxlsb')
         df_lich = xls['LichNghi'].iloc[:, :10]
-        df_lich.columns = ['Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 'Số ngày tính', 'Số ngày đã nghỉ trong tháng', 'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật']
+        df_lich.columns = ['Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 'Số ngày tính', 'Số ngày phép cộng dồn', 'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật']
         
         if os.path.exists(temp_file): os.remove(temp_file)
             
@@ -478,13 +470,21 @@ else:
 col_title, col_logout = st.columns([7, 3]) 
 with col_title:
     r_label = {"admin": "Quản Trị Viên", "letan": "Lễ Tân"}.get(st.session_state.current_role, "Nhân Viên")
-    # Hiển thị Tiêu đề thương hiệu kèm Bộ đếm số người Online
+    
+    # Chuẩn bị danh sách hiển thị tên online (chỉ admin mới thấy)
+    admin_view_online = ""
+    if st.session_state.current_role == "admin" and online_users_list:
+        admin_view_online = f"<br><span style='font-size: 13px; font-weight: normal; color: #666;'>👤 Chi tiết: {', '.join(online_users_list)}</span>"
+        
     st.markdown(f"""
         <div class='custom-main-title'>
             WELCOME TO VERA SPA - {st.session_state.current_user} ({r_label})
-            <span class='online-indicator' style="font-size: 16px; font-family: Arial; font-weight: normal; float: right; color: #28a745; margin-top: 8px;">
-                🟢 Đang trực tuyến: {online_users_count}
-            </span>
+            <div style="float: right; text-align: right; margin-top: 8px;">
+                <span style="font-size: 16px; font-family: Arial; font-weight: normal; color: #28a745;">
+                    🟢 Đang trực tuyến: {online_users_count}
+                </span>
+                {admin_view_online}
+            </div>
         </div>
     """, unsafe_allow_html=True)
 
@@ -597,7 +597,7 @@ if selected_page == "⏰ Thiết Lập Ca Làm Việc" and is_admin_letan:
 # ==========================================
 elif selected_page == "📊 Tình Hình Nghỉ Phép":
 
-    with st.expander("📝 Nhập & Đăng ký lịch", expanded=False):
+    with st.expander("📝 NHẬP & ĐĂNG KÝ LỊCH", expanded=False):
         if is_admin_letan:
             tabs = st.tabs(["➕ Nhập lịch nghỉ mới", "✏️ Quản lý / Xóa lịch đã đăng ký"])
             tab_input_lich, tab_manage_lich = tabs[0], tabs[1]
@@ -610,7 +610,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
         all_users = sorted(list(set(users_s + users_e)))
         
         with tab_input_lich:
-            # Cho phép chọn 1 ngày hoặc nhiều ngày nếu là Admin/Letan
+            # Cho phép chọn 1 ngày hoặc nhiều ngày (Khoảng thời gian)
             if is_admin_letan:
                 list_nv_input = ["-- Chọn nhân viên --"] + all_users
                 chosen_dates = st.date_input("Chọn ngày nghỉ (Chọn khoảng thời gian nếu là Phép năm):", value=(get_vn_today(), get_vn_today()), key="sb_chosen_date")
@@ -618,7 +618,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                 list_nv_input = [st.session_state.current_user]
                 chosen_dates = st.date_input("Chọn ngày nghỉ:", get_vn_today(), min_value=get_vn_today(), key="sb_chosen_date")
             
-            # Xử lý tuple trả về từ date_input
+            # Xử lý tuple ngày trả về
             if isinstance(chosen_dates, tuple):
                 if len(chosen_dates) == 2:
                     start_date, end_date = chosen_dates
@@ -733,7 +733,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                         # Kiểm tra nếu chọn nhiều ngày
                         num_days_selected = (end_date - start_date).days + 1
                         if num_days_selected > 1 and "phép năm" not in norm_loai:
-                            st.error("❌ Tính năng chọn đăng ký nhiều ngày cùng lúc chỉ áp dụng cho 'Nghỉ Phép năm'. Lý do khác vui lòng đăng ký từng ngày một!")
+                            st.error("❌ Tính năng chọn đăng ký Khoảng thời gian nhiều ngày cùng lúc chỉ áp dụng cho 'Nghỉ Phép năm'. Lý do khác vui lòng đăng ký từng ngày một!")
                             can_proceed = False
                         
                         if val_songay is None:
@@ -753,6 +753,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                             st.error("❌ Bắt buộc nhập Chi tiết vi phạm / Ghi chú đối với 'Nghỉ lý do khác'.")
                             can_proceed = False
                         
+                        # KIỂM TRA GIỚI HẠN NHÂN SỰ CÁ NHÂN
                         if can_proceed:
                             nv_info = df_credentials[df_credentials['Tên nhân viên'].str.lower() == chosen_nv.lower()]
                             limit_ps = pd.to_numeric(nv_info.iloc[0].get('Phát sinh tháng', 0), errors='coerce') if not nv_info.empty else 0
@@ -764,14 +765,16 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                             if pd.isna(limit_pn): limit_pn = 0
                             
                             user_hist = df_lich[df_lich['Tên nhân viên'] == chosen_nv] if not df_lich.empty else pd.DataFrame(columns=['Ngày', 'Lý do nghỉ', 'Số ngày tính'])
-                            user_hist['M'] = pd.to_datetime(user_hist['Ngày']).dt.month
-                            user_hist['Y'] = pd.to_datetime(user_hist['Ngày']).dt.year
+                            user_hist['Ngày_DT'] = pd.to_datetime(user_hist['Ngày'], errors='coerce')
+                            user_hist['M'] = user_hist['Ngày_DT'].dt.month
+                            user_hist['Y'] = user_hist['Ngày_DT'].dt.year
                             
                             curr_m = start_date.month
                             curr_y = start_date.year
                             
-                            # Tổng phép tiêu thụ cho toàn bộ chuỗi ngày
+                            # Tính tổng phép tiêu thụ cho toàn bộ chuỗi ngày
                             total_phep_required = val_songay * num_days_selected
+                            accumulated_month = user_hist[(user_hist['M'] == curr_m) & (user_hist['Y'] == curr_y)]['Số ngày tính'].sum()
                             
                             if "phép năm" in norm_loai:
                                 used_pn = user_hist[(user_hist['Y'] == curr_y) & (user_hist['Lý do nghỉ'].str.lower().str.contains("phép năm", na=False))]['Số ngày tính'].sum()
@@ -791,13 +794,17 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                     st.error(f"❌ Vượt số ngày Có phép trong tháng! Nhân viên này chỉ được nghỉ tối đa {limit_cp} ngày/tháng.")
                                     can_proceed = False
 
-                        # Chạy vòng lặp để ghi từng ngày
+                        # Vòng lặp ghi lịch qua từng ngày
                         if can_proceed:
                             for i in range(num_days_selected):
                                 curr_date_iter = start_date + timedelta(days=i)
                                 is_weekend_iter = curr_date_iter.weekday() >= 5
                                 
-                                # Bỏ qua check max nhân sự nếu là Phép năm, Phạt, Nghỉ lý do khác
+                                # Tính lũy kế dần
+                                if val_songay is not None: accumulated_month += val_songay
+                                else: val_songay = 0.0
+                                
+                                # Check logic tổng thể nếu không phải ngoại lệ
                                 if not is_nghi_ly_do_khac and val_phat <= 0 and "phép năm" not in norm_loai:
                                     if norm_loai == "nghỉ phát sinh":
                                         current_hour = datetime.now(VN_TZ).hour
@@ -821,14 +828,9 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
 
                                 success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
                                     curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, chosen_loai, 
-                                    input_chitiet, val_songay, val_phat, st.session_state.current_user
+                                    input_chitiet, val_songay, accumulated_month, val_phat, st.session_state.current_role
                                 )
                                 
-                                # Gửi Email tự động cho Lễ tân
-                                if success_bk and st.session_state.current_role == "letan":
-                                    email_body = f"Nhân sự Lễ tân '{st.session_state.current_user}' vừa thêm lịch nghỉ mới.\n\nThông tin chi tiết:\n- Tên nhân viên: {chosen_nv}\n- Ngày nghỉ: {curr_date_iter.strftime('%d/%m/%Y')}\n- Lý do: {chosen_loai}\n- Ghi chú: {input_chitiet}\n- Số ngày tính: {val_songay}\n- Phạt vi phạm: {val_phat} VNĐ"
-                                    send_notification_email("Vera Spa - Thông báo thêm lịch nghỉ", email_body)
-                                    
                             st.success(f"✅ Đã ghi nhận lịch nghỉ thành công cho {num_days_selected} ngày!")
                             st.cache_data.clear()
 
@@ -845,12 +847,6 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                         
                         if st.form_submit_button("🗑️ Xóa Lịch Nghỉ Đã Chọn") and selected_row_str:
                             selected_idx = row_options.index(selected_row_str)
-                            
-                            # Gửi Email trước khi Lễ tân Xóa
-                            if st.session_state.current_role == "letan":
-                                email_body = f"Nhân sự Lễ tân '{st.session_state.current_user}' đang tiến hành xóa dữ liệu lịch nghỉ.\n\nDữ liệu bị xóa:\n- {selected_row_str}"
-                                send_notification_email("Vera Spa - Cảnh báo xóa lịch nghỉ", email_body)
-                                
                             success_del, msg_del = delete_backup_row(selected_idx + 2)
                             if success_del:
                                 st.success(f"✅ {msg_del}")

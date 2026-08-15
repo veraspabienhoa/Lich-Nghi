@@ -18,7 +18,7 @@ def get_vn_today():
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout="wide")
 
-# --- ÉP CSS THU GỌN GIAO DIỆN ---
+# --- ÉP CSS THU GỌN GIAO DIỆN & TĂNG CHIỀU CAO DROPDOWN ---
 st.markdown("""
     <style>
         .block-container {
@@ -34,6 +34,12 @@ st.markdown("""
         }
         button {
             margin-top: 5px !important;
+        }
+        
+        /* Tăng chiều cao tối đa của danh sách dropdown để loại bỏ thanh cuộn */
+        div[data-baseweb="popover"] > div,
+        div[data-baseweb="select"] ul[role="listbox"] {
+            max-height: 70vh !important; 
         }
     </style>
 """, unsafe_allow_html=True)
@@ -391,13 +397,11 @@ if not st.session_state.logged_in:
             user_chuan = ""
             user_role = "nhanvien"
             
-            # Xử lý admin/Admin (không phân biệt hoa thường)
             if username_input.lower() == "admin" and password_input == "32531235":
                 st.session_state.logged_in = True
                 st.session_state.current_user = "Quản Trị Viên"
                 st.session_state.current_role = "admin"
                 
-                # Ghi URL parameter để duy trì khi F5
                 try:
                     st.query_params["admin_token"] = "active"
                 except Exception:
@@ -443,7 +447,6 @@ with col_logout:
             st.session_state.logged_in = False
             st.session_state.current_user = ""
             st.session_state.current_role = ""
-            # Xóa token URL khi logout
             try:
                 if "admin_token" in st.query_params:
                     del st.query_params["admin_token"]
@@ -565,51 +568,66 @@ if st.session_state.current_role in ["admin", "letan"]:
             chosen_nv = st.selectbox("Chọn nhân viên:", ["-- Chọn nhân viên --"] + list_nv_input, key="sb_chosen_nv")
             chosen_date = st.date_input("Chọn ngày nghỉ:", get_vn_today(), key="sb_chosen_date")
             
-            # --- BỘ LỌC ĐỘNG CHO LÝ DO NGHỈ (Theo Cột G: Ngày, Cột H: Phân quyền) ---
+            # --- BỘ LỌC ĐỘNG CHO LÝ DO NGHỈ TỪ FILE ẢNH BẢNG (Theo Cột G: Ngày, Cột H: Phân quyền) ---
             list_loai_nghi = []
             loai_nghi_dict = {}
             current_role = st.session_state.current_role.lower()
 
             if not df_loai_nghi.empty:
                 for idx, row in df_loai_nghi.iterrows():
+                    # Ép dòng về list để thao tác theo Index cột an toàn
+                    row_vals = row.tolist()
                     l_name = ""
-                    if len(row) > 1:
-                        l_name = str(row.iloc[1]).strip()
+                    
+                    # Bắt Cột B (Lý do nghỉ - Index 1)
+                    if len(row_vals) > 1:
+                        l_name = str(row_vals[1]).strip()
                     
                     if not l_name or l_name.lower() in ["nan", "none"]:
                         l_name = str(row.get('Lý do nghỉ', row.get('Loại nghỉ', ''))).strip()
                     
                     if l_name and l_name.lower() not in ["nan", "loại nghỉ", "lý do nghỉ", "none", ""]:
-                        dk_ngay = str(row.iloc[6]).strip().lower() if len(row) > 6 else ""
-                        dk_role = str(row.iloc[7]).strip().lower() if len(row) > 7 else ""
+                        # Bắt Cột G (Chỉ nhập được cuối tuần - Index 6)
+                        dk_ngay = str(row_vals[6]).strip().lower() if len(row_vals) > 6 else ""
+                        # Bắt Cột H (User quyền nhập - Index 7)
+                        dk_role = str(row_vals[7]).strip().lower() if len(row_vals) > 7 else ""
                         
+                        # Điều kiện 1: Phân quyền User (Cột H)
                         role_allowed = True
                         if dk_role and dk_role not in ["nan", "none", "tất cả", "all", ""]:
                             if current_role not in dk_role:
                                 role_allowed = False
                                 
+                        # Điều kiện 2: Thứ Ngày (Cột G)
                         day_allowed = True
                         if dk_ngay and dk_ngay not in ["nan", "none", "tất cả", "all", ""]:
                             wd = chosen_date.weekday()
-                            if wd == 0: day_allowed = any(k in dk_ngay for k in ["t2", "hai", "thường", "tất cả"])
-                            elif wd == 1: day_allowed = any(k in dk_ngay for k in ["t3", "ba", "thường", "tất cả"])
-                            elif wd == 2: day_allowed = any(k in dk_ngay for k in ["t4", "tư", "thường", "tất cả"])
-                            elif wd == 3: day_allowed = any(k in dk_ngay for k in ["t5", "năm", "thường", "tất cả"])
-                            elif wd == 4: day_allowed = any(k in dk_ngay for k in ["t6", "sáu", "thường", "tất cả"])
-                            elif wd == 5: day_allowed = any(k in dk_ngay for k in ["t7", "bảy", "cuối tuần", "tất cả"])
-                            elif wd == 6: day_allowed = any(k in dk_ngay for k in ["cn", "chủ nhật", "chủ", "cuối tuần", "tất cả"])
+                            # Tạo bộ từ khóa quét siêu linh hoạt cho các kiểu viết tiếng Việt
+                            wd_map = {
+                                0: ["hai", "t2"],
+                                1: ["ba", "t3"],
+                                2: ["tư", "tu", "t4"],
+                                3: ["năm", "nam", "t5"], # Bắt cả trường hợp "Thứ Nam"
+                                4: ["sáu", "sau", "t6"],
+                                5: ["bảy", "bẩy", "t7", "cuối tuần"], # Bắt cả "Bẩy" và "Bảy"
+                                6: ["chủ nhật", "chu nhat", "cn", "cuối tuần"]
+                            }
+                            day_allowed = any(k in dk_ngay for k in wd_map[wd])
 
+                        # NẾU thỏa mãn cả Ngày và Role -> Thêm vào Dropdown
                         if day_allowed and role_allowed:
                             list_loai_nghi.append(l_name)
                             
+                            # Bắt Cột E (Số ngày tính phép - Index 4)
                             try:
-                                s_ngay_raw = str(row.get('Số ngày tính', row.iloc[3] if len(row)>3 else 1.0))
+                                s_ngay_raw = str(row_vals[4] if len(row_vals)>4 else 1.0)
                                 s_ngay = float(s_ngay_raw.replace(',', '').strip()) if s_ngay_raw.strip() else 1.0
                             except:
                                 s_ngay = 1.0
                             
+                            # Bắt Cột F (Phạt vi phạm - Index 5)
                             try:
-                                p_raw = str(row.iloc[5] if len(row)>5 else "0").strip()
+                                p_raw = str(row_vals[5] if len(row_vals)>5 else "0").strip()
                                 p_str = p_raw.replace('.', '').replace(',', '').replace(' ', '').replace('đ', '').replace('VNĐ', '').replace('VND', '')
                                 p_val = 0.0 if p_str in ["", "-", "nan", "None"] else float(p_str)
                             except:
@@ -734,7 +752,6 @@ col_date, col_name, col_refresh = st.columns([5, 4, 2])
 
 with col_date:
     today = get_vn_today() 
-    # Chia giao diện bộ lọc thời gian thành 2 cột con để nhìn gọn gàng hơn
     col_d1, col_d2 = st.columns(2)
     with col_d1:
         filter_type = st.selectbox(
@@ -801,7 +818,7 @@ if selected_nv != "- Tất cả nhân viên -":
     filtered_df = filtered_df[filtered_df['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
 
 
-# --- XỬ LÝ SỐ LIỆU THỐNG KÊ (ĐÃ FIX LỖI KEYERROR BẰNG KIỂM TRA EMPTY) ---
+# --- XỬ LÝ SỐ LIỆU THỐNG KÊ ---
 excluded_keywords = [
     "đi trễ", "di tre",
     "không dọn vệ sinh", "khong don ve sinh",
@@ -822,7 +839,6 @@ def is_excluded(reason):
             return True
     return False
 
-# Bổ sung kiểm tra an toàn cho dataframe rỗng
 if filtered_df.empty:
     df_thuc_nghi = pd.DataFrame(columns=df_lich.columns)
     phat_sinh_df = pd.DataFrame(columns=df_lich.columns)

@@ -317,8 +317,17 @@ def load_backup_sheet_data():
             rows = sheet.get_all_values()
             if len(rows) > 1:
                 df_bk = pd.DataFrame(rows[1:], columns=rows[0])
+                
+                # 1. Đổi tên nếu có cột 'Loại nghỉ'
                 if 'Loại nghỉ' in df_bk.columns:
                     df_bk.rename(columns={'Loại nghỉ': 'Lý do nghỉ'}, inplace=True)
+                
+                # 2. FIX LỖI PYARROW: Bỏ các cột rỗng tên (cột dư thừa của Google Sheet)
+                df_bk = df_bk.loc[:, df_bk.columns.astype(str).str.strip() != '']
+                
+                # 3. FIX LỖI PYARROW: Loại bỏ các cột trùng tên nhau (nếu có)
+                df_bk = df_bk.loc[:, ~df_bk.columns.duplicated(keep='first')]
+                
                 return df_bk
     except Exception:
         pass

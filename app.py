@@ -1333,11 +1333,11 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                     help="Có thể xóa bớt hoặc chọn lại. Mặc định là gửi cho tất cả những người có trong danh sách lọc bên trên."
                 )
                 
-                col_em1, col_em2 = st.columns(2)
-                with col_em1:
-                    sender_email = st.text_input("Email gửi (Gmail của bạn):")
-                with col_em2:
-                    sender_pass = st.text_input("Mật khẩu ứng dụng (16 ký tự):", type="password")
+                # Đã lưu cứng thông tin Email và Mật khẩu ứng dụng vào code
+                sender_email = "veraspabienhoa@gmail.com"
+                sender_pass = "zvtgbysfmdaqxaau" # Đã bỏ khoảng trắng
+                
+                st.write(f"📧 **Email gửi đi mặc định:** `{sender_email}`")
                 
                 if st.form_submit_button("🚀 Xác Nhận Gửi Email"):
                     if not sender_email or not sender_pass:

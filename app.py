@@ -21,6 +21,26 @@ def normalize_name(name):
     """Đồng nhất cách gõ Thúy/Thuý để tránh lỗi so sánh"""
     return str(name).replace("Thuý", "Thúy").replace("thuý", "thúy").strip()
 
+# --- HÀM ĐỊNH DẠNG BẢNG HIỂN THỊ TRỰC QUAN ---
+def format_display_df(df):
+    d = df.copy()
+    def fmt_num(val):
+        if pd.isna(val) or val == "": return ""
+        try:
+            v = float(val)
+            if v == 0: return ""
+            return str(int(v)) if v.is_integer() else str(v)
+        except: return str(val)
+    
+    for col in ['Số ngày tính', 'Số ngày phép cộng dồn']:
+        if col in d.columns:
+            d[col] = d[col].apply(fmt_num)
+            
+    if 'Ngày' in d.columns:
+        d['Ngày'] = pd.to_datetime(d['Ngày'], errors='coerce').dt.strftime('%d/%m/%Y').fillna(d['Ngày'])
+        
+    return d
+
 # --- THEO DÕI SỐ NGƯỜI ĐANG TRUY CẬP & TRẠNG THÁI HỆ THỐNG ---
 @st.cache_resource
 def get_active_users():
@@ -429,6 +449,31 @@ def load_lich_nghi(url):
         df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
         
+        # FIX FORMAT NGÀY GIỜ CẬP NHẬT TỪ EXCEL SERIAL
+        def format_excel_date(val):
+            if pd.isna(val) or str(val).strip() == "": return ""
+            try:
+                if isinstance(val, (int, float)):
+                    return pd.to_datetime(val, unit='D', origin='1899-12-30').strftime('%d/%m/%Y')
+                if hasattr(val, 'strftime'): return val.strftime('%d/%m/%Y')
+                return str(val).split(' ')[0]
+            except: return str(val)
+
+        def format_excel_time(val):
+            if pd.isna(val) or str(val).strip() == "": return ""
+            try:
+                if isinstance(val, (int, float)):
+                    s = int(round(val * 86400))
+                    return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+                if hasattr(val, 'strftime'): return val.strftime('%H:%M:%S')
+                return str(val)
+            except: return str(val)
+
+        if 'Ngày cập nhật' in df_lich.columns:
+            df_lich['Ngày cập nhật'] = df_lich['Ngày cập nhật'].apply(format_excel_date)
+        if 'Giờ cập nhật' in df_lich.columns:
+            df_lich['Giờ cập nhật'] = df_lich['Giờ cập nhật'].apply(format_excel_time)
+            
         df_nv_excel = xls['DanhSachNV'].dropna(subset=['Tên nhân viên'])
         return df_lich, df_nv_excel, xls['LoaiNghi']
     except Exception as e:
@@ -884,7 +929,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                     with col_p1:
                         val_songay = st.number_input("Số ngày tính:", value=float(default_songay), step=0.5, key=f"num_songay_{dyn_key_suffix}", disabled=is_loi_vi_pham)
                     
-                    # HIỂN THỊ Ô MỨC PHẠT CHO TẤT CẢ MỌI NGƯỜI
+                    # HIỂN THỊ Ô MỨC PHẠT CHO TẤT CẢ TÀI KHOẢN (ĐÃ MỞ LẠI)
                     with col_p2:
                         txt_phat_label = "Mức phạt vi phạm VNĐ (🔴 **Bắt buộc**):" if is_loi_vi_pham else "Mức phạt vi phạm (VNĐ):"
                         val_phat = st.number_input(txt_phat_label, value=float(default_phat), step=50000.0, key=f"num_phat_{dyn_key_suffix}")
@@ -929,7 +974,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                     if not input_chitiet:
                                         st.error("❌ Bắt buộc nhập Chi tiết vi phạm / Ghi chú đối với 'Lỗi vi phạm khác'.")
                                         can_proceed = False
-                                    if val_phat <= 0:
+                                    if val_phat <= 0 and st.session_state.current_role == "admin":
                                         st.error("❌ Bắt buộc nhập số tiền Phạt vi phạm > 0 đối với 'Lỗi vi phạm khác'.")
                                         can_proceed = False
                                 
@@ -1038,11 +1083,12 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
             if df_backup_view.empty: 
                 st.info("Chưa có lịch nghỉ nào được đăng ký.")
             else:
-                # ẨN CỘT PHẠT VI PHẠM TRONG BẢNG QUẢN LÝ CHO NON-ADMIN
+                # ẨN CỘT PHẠT VI PHẠM TRONG BẢNG QUẢN LÝ CHO NON-ADMIN NHƯNG ĐÃ QUA ĐỊNH DẠNG SẠCH
                 df_view_display = df_backup_view.copy()
                 if st.session_state.current_role != "admin" and "Phạt vi phạm" in df_view_display.columns:
                     df_view_display = df_view_display.drop(columns=["Phạt vi phạm"])
-                    
+                
+                df_view_display = format_display_df(df_view_display)
                 st.dataframe(df_view_display, use_container_width=True, hide_index=True)
                 
                 if st.session_state.current_role == "nhanvien" and system_status["lock_nv"]:
@@ -1203,7 +1249,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
 
     st.markdown("---")
 
-    export_df = filtered_df.drop(columns=cols_to_hide, errors='ignore')
+    export_df = format_display_df(filtered_df.drop(columns=cols_to_hide, errors='ignore'))
     df_for_excel = export_df.copy()
     if st.session_state.current_role == "admin" and not df_for_excel.empty:
         tong_cong_row = pd.Series(index=df_for_excel.columns, dtype=object)
@@ -1232,12 +1278,12 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
         
     with tab2: 
         if co_phep_df.empty: st.info("Trống.")
-        else: st.dataframe(co_phep_df.drop(columns=cols_to_hide, errors='ignore').style.map(highlight_khong_phep), use_container_width=True, hide_index=True)
+        else: st.dataframe(format_display_df(co_phep_df.drop(columns=cols_to_hide, errors='ignore')).style.map(highlight_khong_phep), use_container_width=True, hide_index=True)
             
     with tab3: 
         if phat_sinh_df.empty: st.info("Trống.")
-        else: st.dataframe(phat_sinh_df.drop(columns=cols_to_hide, errors='ignore').style.map(highlight_khong_phep), use_container_width=True, hide_index=True)
+        else: st.dataframe(format_display_df(phat_sinh_df.drop(columns=cols_to_hide, errors='ignore')).style.map(highlight_khong_phep), use_container_width=True, hide_index=True)
             
     with tab4: 
         if khong_phep_df.empty: st.success("Không có ai!")
-        else: st.dataframe(khong_phep_df.drop(columns=cols_to_hide, errors='ignore').style.map(highlight_khong_phep), use_container_width=True, hide_index=True)
+        else: st.dataframe(format_display_df(khong_phep_df.drop(columns=cols_to_hide, errors='ignore')).style.map(highlight_khong_phep), use_container_width=True, hide_index=True)

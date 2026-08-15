@@ -9,6 +9,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 import streamlit.components.v1 as components
 import time
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # --- CẤU HÌNH MÚI GIỜ VIỆT NAM ---
 VN_TZ = timezone(timedelta(hours=7))
@@ -40,6 +43,55 @@ def format_display_df(df):
         d['Ngày'] = pd.to_datetime(d['Ngày'], errors='coerce').dt.strftime('%d/%m/%Y').fillna(d['Ngày'])
         
     return d
+
+# --- HÀM GỬI EMAIL BÁO CÁO ---
+def send_email_report(sender_email, sender_password, to_email, emp_name, df_emp, total_phat, start_str, end_str):
+    try:
+        subject = f"Báo cáo chi tiết lịch nghỉ và vi phạm - {emp_name} ({start_str} đến {end_str})"
+        
+        # Định dạng lại bảng để hiển thị đẹp trong email
+        df_display = format_display_df(df_emp[['Ngày', 'Lý do nghỉ', 'Chi tiết', 'Số ngày tính', 'Phạt vi phạm']])
+        df_display['Phạt vi phạm'] = df_display['Phạt vi phạm'].apply(lambda x: f"{float(x):,.0f}" if float(x) > 0 else "")
+        
+        # Thêm style CSS cho bảng HTML
+        html_table = df_display.to_html(index=False, justify='center')
+        html_table = html_table.replace('<table border="1" class="dataframe">', '<table style="width:100%; border-collapse: collapse; border: 1px solid #ddd; font-family: Arial, sans-serif;">')
+        html_table = html_table.replace('<th>', '<th style="background-color: #f2f2f2; border: 1px solid #ddd; padding: 8px; text-align: center;">')
+        html_table = html_table.replace('<td>', '<td style="border: 1px solid #ddd; padding: 8px; text-align: center;">')
+        
+        html_content = f"""
+        <html>
+        <body>
+            <p>Chào <b>{emp_name}</b>,</p>
+            <p>Hệ thống quản lý Vera Spa gửi bạn chi tiết lịch nghỉ và vi phạm trong giai đoạn từ <b>{start_str}</b> đến <b>{end_str}</b>:</p>
+            <br>
+            {html_table}
+            <br>
+            <h3 style="color: red;">Tổng tiền phạt vi phạm: {total_phat:,.0f} VNĐ</h3>
+            <p><i>Vui lòng kiểm tra lại thông tin. Nếu có bất kỳ sai sót nào, xin vui lòng phản hồi lại trong thời gian sớm nhất.</i></p>
+            <br>
+            <p>Trân trọng,</p>
+            <p><b>VERA SPA</b></p>
+        </body>
+        </html>
+        """
+        
+        msg = MIMEMultipart()
+        msg['From'] = f"Vera Spa <{sender_email}>"
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(html_content, 'html'))
+        
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.send_message(msg)
+        server.quit()
+        
+        return True, "Thành công"
+    except Exception as e:
+        return False, str(e)
+
 
 # --- THEO DÕI SỐ NGƯỜI ĐANG TRUY CẬP & TRẠNG THÁI HỆ THỐNG ---
 @st.cache_resource
@@ -1264,6 +1316,56 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
         if not export_df.empty:
             st.download_button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", data=to_excel(df_for_excel), file_name=f"LichNghi_{start_date.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         else: st.button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", disabled=True, use_container_width=True)
+
+    # --- KHU VỰC CHỈ DÀNH CHO ADMIN: GỬI EMAIL BÁO CÁO ---
+    if st.session_state.current_role == "admin" and not filtered_df.empty:
+        with st.expander("📧 GỬI BÁO CÁO QUA EMAIL CHO NHÂN VIÊN"):
+            st.info("Hệ thống sẽ tự động tách dữ liệu của từng nhân viên và gửi đến đúng Email của họ. Bạn cần cung cấp Email Gmail và Mật khẩu ứng dụng để thực hiện việc gửi này.")
+            
+            with st.form("form_send_email"):
+                col_em1, col_em2 = st.columns(2)
+                with col_em1:
+                    sender_email = st.text_input("Email gửi (Gmail của bạn):")
+                with col_em2:
+                    sender_pass = st.text_input("Mật khẩu ứng dụng (16 ký tự):", type="password")
+                
+                if st.form_submit_button("🚀 Xác Nhận Gửi Đồng Loạt"):
+                    if not sender_email or not sender_pass:
+                        st.error("❌ Vui lòng nhập đầy đủ Email và Mật khẩu ứng dụng!")
+                    else:
+                        success_count = 0
+                        error_messages = []
+                        
+                        unique_employees = filtered_df['Tên nhân viên'].dropna().unique()
+                        progress_bar = st.progress(0)
+                        
+                        for i, emp in enumerate(unique_employees):
+                            df_emp = filtered_df[filtered_df['Tên nhân viên'] == emp]
+                            total_phat = df_emp['Phạt vi phạm'].sum()
+                            
+                            emp_row = df_credentials[df_credentials['Tên nhân viên'].str.lower() == str(emp).strip().lower()]
+                            emp_email = str(emp_row.iloc[0].get('Email', '')).strip() if not emp_row.empty else ""
+                            
+                            if not emp_email or "@" not in emp_email:
+                                error_messages.append(f"⚠️ Bỏ qua {emp}: Không có Email hợp lệ.")
+                            else:
+                                res, msg = send_email_report(
+                                    sender_email, sender_pass, emp_email, emp, df_emp, 
+                                    total_phat, start_date.strftime('%d/%m/%Y'), end_date.strftime('%d/%m/%Y')
+                                )
+                                if res:
+                                    success_count += 1
+                                else:
+                                    error_messages.append(f"❌ Lỗi gửi {emp}: {msg}")
+                                    
+                            progress_bar.progress((i + 1) / len(unique_employees))
+                            time.sleep(0.5) # Chờ nửa giây để tránh bị Google chặn Spam
+                        
+                        if success_count > 0:
+                            st.success(f"✅ Đã gửi thành công {success_count} email báo cáo!")
+                        if error_messages:
+                            for err in error_messages:
+                                st.error(err)
 
     # ĐỊNH DẠNG MÀU ĐỎ KHÔNG PHÉP CHO DATAFRAME
     def highlight_khong_phep(val):

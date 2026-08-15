@@ -884,13 +884,10 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                     with col_p1:
                         val_songay = st.number_input("Số ngày tính:", value=float(default_songay), step=0.5, key=f"num_songay_{dyn_key_suffix}", disabled=is_loi_vi_pham)
                     
-                    # ẨN Ô MỨC PHẠT NẾU KHÔNG PHẢI LÀ ADMIN
+                    # HIỂN THỊ Ô MỨC PHẠT CHO TẤT CẢ MỌI NGƯỜI
                     with col_p2:
-                        if st.session_state.current_role == "admin":
-                            txt_phat_label = "Mức phạt vi phạm VNĐ (🔴 **Bắt buộc**):" if is_loi_vi_pham else "Mức phạt vi phạm (VNĐ):"
-                            val_phat = st.number_input(txt_phat_label, value=float(default_phat), step=50000.0, key=f"num_phat_{dyn_key_suffix}")
-                        else:
-                            val_phat = float(default_phat)
+                        txt_phat_label = "Mức phạt vi phạm VNĐ (🔴 **Bắt buộc**):" if is_loi_vi_pham else "Mức phạt vi phạm (VNĐ):"
+                        val_phat = st.number_input(txt_phat_label, value=float(default_phat), step=50000.0, key=f"num_phat_{dyn_key_suffix}")
                     
                     confirm_multiple = True
                     if existing_today:
@@ -932,7 +929,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                     if not input_chitiet:
                                         st.error("❌ Bắt buộc nhập Chi tiết vi phạm / Ghi chú đối với 'Lỗi vi phạm khác'.")
                                         can_proceed = False
-                                    if val_phat <= 0 and st.session_state.current_role == "admin":
+                                    if val_phat <= 0:
                                         st.error("❌ Bắt buộc nhập số tiền Phạt vi phạm > 0 đối với 'Lỗi vi phạm khác'.")
                                         can_proceed = False
                                 

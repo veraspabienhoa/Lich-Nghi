@@ -465,7 +465,7 @@ with col_title:
 with col_logout:
     c_btn1, c_btn2 = st.columns(2)
     with c_btn1:
-        btn_manage_account = st.button("🛠 Cấu hình / Hồ sơ", use_container_width=True)
+        btn_manage_account = st.button("🛠 Hồ sơ Nhân Viên", use_container_width=True)
     with c_btn2:
         if st.button("🚪 Đăng xuất", use_container_width=True):
             st.session_state.logged_in = False
@@ -571,7 +571,6 @@ if selected_page == "⏰ Thiết Lập Ca Làm Việc" and is_admin_letan:
 elif selected_page == "📊 Tình Hình Nghỉ Phép":
 
     with st.expander("📝 NHẬP & ĐĂNG KÝ LỊCH", expanded=False):
-        # Mở cả 2 tab cho TẤT CẢ mọi người. Việc phân quyền Data/Thời gian được code bên trong.
         tabs = st.tabs(["➕ Nhập lịch nghỉ mới", "✏️ Quản lý / Xóa lịch đã đăng ký"])
         tab_input_lich, tab_manage_lich = tabs[0], tabs[1]
             
@@ -714,7 +713,6 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                     today = get_vn_today()
                     can_proceed = True
                     
-                    # PHÂN QUYỀN THỜI GIAN NHẬP LỊCH
                     if current_role == "nhanvien" and start_date <= today:
                         st.error("❌ Lỗi: Tài khoản NHÂN VIÊN chỉ được đăng ký lịch từ **NGÀY MAI** trở đi. Muốn đổi lịch hôm nay, vui lòng liên hệ Lễ Tân / Admin.")
                         can_proceed = False
@@ -861,7 +859,6 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                         except:
                             sel_date = get_vn_today()
                         
-                        # PHÂN QUYỀN THỜI GIAN XÓA LỊCH
                         can_delete = True
                         today = get_vn_today()
                         if st.session_state.current_role == "nhanvien" and sel_date <= today:

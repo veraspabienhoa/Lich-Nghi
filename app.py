@@ -970,42 +970,56 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                         st.error(f"❌ Vượt số ngày Có phép trong tháng! Nhân viên này chỉ được nghỉ tối đa {limit_cp} ngày/tháng.")
                                         can_proceed = False
 
-                            if can_proceed:
-                                for i in range(num_days_selected):
-                                    curr_date_iter = start_date + timedelta(days=i)
-                                    is_weekend_iter = curr_date_iter.weekday() >= 5
-                                    
-                                    if val_songay is not None: accumulated_month += val_songay
-                                    else: val_songay = 0.0
-                                    
-                                    if not is_nghi_ly_do_khac and val_phat <= 0 and "phép năm" not in norm_loai and not is_loi_vi_pham:
-                                        if norm_loai == "nghỉ phát sinh":
-                                            current_hour = datetime.now(VN_TZ).hour
-                                            if current_hour < 9 or current_hour >= 17:
-                                                st.error("❌ Khung giờ đăng ký 'Nghỉ phát sinh' chỉ cho phép từ 09:00 đến 17:00!")
-                                                continue
-                                            elif is_weekend_iter:
-                                                st.error(f"❌ Ngày {curr_date_iter.strftime('%d/%m/%Y')} là cuối tuần, không được phép 'Nghỉ phát sinh'!")
-                                                continue
+                                if can_proceed:
+                                    all_saved = True  # Thêm cờ kiểm tra lưu thành công
+                                    for i in range(num_days_selected):
+                                        curr_date_iter = start_date + timedelta(days=i)
+                                        is_weekend_iter = curr_date_iter.weekday() >= 5
+                                        
+                                        if val_songay is not None: accumulated_month += val_songay
+                                        else: val_songay = 0.0
+                                        
+                                        if not is_nghi_ly_do_khac and val_phat <= 0 and "phép năm" not in norm_loai and not is_loi_vi_pham:
+                                            if norm_loai == "nghỉ phát sinh":
+                                                current_hour = datetime.now(VN_TZ).hour
+                                                if current_hour < 9 or current_hour >= 17:
+                                                    st.error("❌ Khung giờ đăng ký 'Nghỉ phát sinh' chỉ cho phép từ 09:00 đến 17:00!")
+                                                    all_saved = False
+                                                    break
+                                                elif is_weekend_iter:
+                                                    st.error(f"❌ Ngày {curr_date_iter.strftime('%d/%m/%Y')} là cuối tuần, không được phép 'Nghỉ phát sinh'!")
+                                                    all_saved = False
+                                                    break
+                                                else:
+                                                    count_ps = len(df_lich[(df_lich['Ngày'] == curr_date_iter) & (df_lich['Lý do nghỉ'].astype(str).str.strip().str.lower() == "nghỉ phát sinh")]) if not df_lich.empty else 0
+                                                    if count_ps >= 2:
+                                                        st.error(f"❌ Ngày {curr_date_iter.strftime('%d/%m/%Y')} đã đạt giới hạn 2 người 'Nghỉ phát sinh'!")
+                                                        all_saved = False
+                                                        break
                                             else:
-                                                count_ps = len(df_lich[(df_lich['Ngày'] == curr_date_iter) & (df_lich['Lý do nghỉ'].astype(str).str.strip().str.lower() == "nghỉ phát sinh")]) if not df_lich.empty else 0
-                                                if count_ps >= 2:
-                                                    st.error(f"❌ Ngày {curr_date_iter.strftime('%d/%m/%Y')} đã đạt giới hạn 2 người 'Nghỉ phát sinh'!")
-                                                    continue
-                                        else:
-                                            max_people = 5 if not is_weekend_iter else 3
-                                            today_total_nghi = len(df_lich[(df_lich['Ngày'] == curr_date_iter) & (df_lich['Số ngày tính'] > 0)]) if not df_lich.empty else 0
-                                            if today_total_nghi >= max_people:
-                                                st.error(f"❌ Ngày {curr_date_iter.strftime('%d/%m/%Y')} đã đạt giới hạn {max_people} người nghỉ chung/ngày.")
-                                                continue
+                                                max_people = 5 if not is_weekend_iter else 3
+                                                today_total_nghi = len(df_lich[(df_lich['Ngày'] == curr_date_iter) & (df_lich['Số ngày tính'] > 0)]) if not df_lich.empty else 0
+                                                if today_total_nghi >= max_people:
+                                                    st.error(f"❌ Ngày {curr_date_iter.strftime('%d/%m/%Y')} đã đạt giới hạn {max_people} người nghỉ chung/ngày.")
+                                                    all_saved = False
+                                                    break
 
-                                    success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
-                                        curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, chosen_loai.replace("🔴 ", ""), 
-                                        input_chitiet, val_songay, accumulated_month, val_phat, st.session_state.current_role
-                                    )
+                                        # GỌI HÀM LƯU LÊN GOOGLE SHEETS
+                                        success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
+                                            curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, chosen_loai.replace("🔴 ", ""), 
+                                            input_chitiet, val_songay, accumulated_month, val_phat, st.session_state.current_role
+                                        )
+                                        
+                                        # KIỂM TRA NẾU LỖI THÌ BÁO VÀ DỪNG LẠI NGAY
+                                        if not success_bk:
+                                            st.error(f"❌ LỖI GOOGLE SHEETS: {msg_bk}")
+                                            all_saved = False
+                                            break
                                     
-                                st.success(f"✅ Đã ghi nhận lịch nghỉ thành công cho {num_days_selected} ngày!")
-                                st.cache_data.clear()
+                                    # CHỈ IN THÀNH CÔNG NẾU API THỰC SỰ TRẢ VỀ SUCCESS
+                                    if all_saved:
+                                        st.success(f"✅ Đã ghi nhận lịch nghỉ thành công cho {num_days_selected} ngày!")
+                                        st.cache_data.clear()
 
         with tab_manage_lich:
             st.markdown("### 🗑️ Xóa / Quản lý lịch nghỉ đã đăng ký")

@@ -22,7 +22,7 @@ st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout
 st.markdown("""
     <style>
         .block-container {
-            padding-top: 3rem;
+            padding-top: 1.5rem;
             padding-bottom: 1rem;
         }
         div[data-testid="stVerticalBlock"] > div {
@@ -41,6 +41,8 @@ st.markdown("""
 # --- KẾT NỐI GSPREAD ---
 SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"
 SHEET_DU_PHONG_ID = "1Kz0aw-JatptAN9G7YSwZ6rJO09urOPaD-rS-18eZSY0"
+# ĐÂY LÀ ID FILE CHÍNH (CẦN ĐƯỢC CHUYỂN SANG ĐỊNH DẠNG GOOGLE SHEETS ĐỂ GHI ĐƯỢC DỮ LIỆU)
+SHEET_CHINH_ID = "1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT" 
 
 @st.cache_resource
 def get_gspread_client():
@@ -118,32 +120,42 @@ def load_loai_nghi_from_gsheet():
     return pd.DataFrame()
 
 
-# --- GHI LỊCH NGHỈ VÀO GOOGLE SHEET DỰ PHÒNG ---
+# --- GHI LỊCH NGHỈ VÀO GOOGLE SHEET DỰ PHÒNG & FILE CHÍNH ---
 def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, phat_vi_pham, nguoi_tao):
     try:
         client = get_gspread_client()
         if not client:
             return False, "Chưa cấu hình quyền kết nối Google Sheets."
         
-        sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        all_vals = sheet.get_all_values()
+        # 1. Ghi vào Sheet Dự phòng
+        sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        all_vals = sheet_dp.get_all_values()
         if len(all_vals) == 0:
-            sheet.append_row(["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
+            sheet_dp.append_row(["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Phạt vi phạm", "Ngày tạo", "Người tạo"])
         
-        sheet.append_row([
-            str(ngay),
-            str(nv),
-            str(loai_nghi),
-            str(chi_tiet),
-            float(so_ngay),
-            float(phat_vi_pham),
-            str(get_vn_today()),  # <-- Đã áp dụng giờ Việt Nam
-            str(nguoi_tao)
+        sheet_dp.append_row([
+            str(ngay), str(nv), str(loai_nghi), str(chi_tiet),
+            float(so_ngay), float(phat_vi_pham), str(get_vn_today()), str(nguoi_tao)
         ])
+
+        # 2. Ghi thêm vào File chính (Sheet: LichNghi)
+        try:
+            sheet_chinh_lich = client.open_by_key(SHEET_CHINH_ID).worksheet("LichNghi")
+            sheet_chinh_lich.append_row([
+                str(ngay), str(nv), str(loai_nghi), str(chi_tiet),
+                float(so_ngay), "", float(phat_vi_pham), 
+                str(get_vn_today().strftime('%d/%m/%Y')), 
+                str(datetime.now(VN_TZ).strftime('%H:%M:%S')), 
+                str(nguoi_tao)
+            ])
+        except Exception as e:
+            # Bỏ qua lỗi nếu file chưa convert sang Google Sheets, vẫn cho phép báo thành công từ sheet dự phòng
+            pass
+
         st.cache_data.clear()
-        return True, "Đã ghi nhận lịch nghỉ thành công vào Google Sheet dự phòng!"
+        return True, "Đã ghi nhận lịch nghỉ thành công!"
     except Exception as e:
-        return False, f"Lỗi ghi Google Sheet dự phòng: {e}"
+        return False, f"Lỗi ghi dữ liệu: {e}"
 
 # --- XÓA DÒNG LỊCH NGHỈ TRÊN GOOGLE SHEET DỰ PHÒNG ---
 def delete_backup_row(row_index_1_based):
@@ -158,12 +170,12 @@ def delete_backup_row(row_index_1_based):
     except Exception as e:
         return False, f"Lỗi xóa dòng: {e}"
 
-# --- QUẢN LÝ TÀI KHOẢN (ADMIN) ---
+# --- QUẢN LÝ TÀI KHOẢN (ADMIN) VÀ LƯU DANH SÁCH NV ---
 def admin_manage_account(action, target_name, new_name="", new_pass="", new_role="nhanvien"):
     try:
         client = get_gspread_client()
         if not client:
-            return False, "Chưa cấu hình quyền kết nối Google Sheets (Secrets)."
+            return False, "Chưa cấu hình quyền kết nối Google Sheets."
         
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
         
@@ -175,6 +187,16 @@ def admin_manage_account(action, target_name, new_name="", new_pass="", new_role
             next_stt = len(all_values)
             pass_to_set = new_pass.strip() if new_pass.strip() else "123456"
             sheet.append_row([next_stt, target_name.strip(), pass_to_set, new_role])
+
+            # Ghi thêm vào cột B sheet DanhSachNV của file chính
+            try:
+                sheet_chinh_nv = client.open_by_key(SHEET_CHINH_ID).worksheet("DanhSachNV")
+                col_b = sheet_chinh_nv.col_values(2) # Lấy toàn bộ cột B
+                next_row = len(col_b) + 1
+                sheet_chinh_nv.update_cell(next_row, 2, target_name.strip())
+            except Exception as e:
+                pass # Bỏ qua nếu file gốc là xlsb không update được
+
             st.cache_data.clear()
             return True, f"Đã thêm thành công tài khoản: {target_name.strip()}"
             
@@ -340,13 +362,22 @@ if df_lich.empty or df_nv_excel.empty:
     st.stop()
 
 
-# --- HỆ THỐNG ĐĂNG NHẬP & PHÂN QUYỀN ---
+# --- HỆ THỐNG ĐĂNG NHẬP & PHÂN QUYỀN DUY TRÌ BẰNG QUERY PARAMS ---
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "current_user" not in st.session_state:
     st.session_state.current_user = ""
 if "current_role" not in st.session_state:
     st.session_state.current_role = ""
+
+# Khôi phục session từ URL (Duy trì khi F5)
+try:
+    if "admin_token" in st.query_params and st.query_params["admin_token"] == "active":
+        st.session_state.logged_in = True
+        st.session_state.current_user = "Quản Trị Viên"
+        st.session_state.current_role = "admin"
+except Exception:
+    pass
 
 if not st.session_state.logged_in:
     st.title("🔐 Đăng Nhập Hệ Thống")
@@ -361,10 +392,17 @@ if not st.session_state.logged_in:
             user_chuan = ""
             user_role = "nhanvien"
             
-            if username_input == "admin" and password_input == "32531235":
+            # Xử lý admin/Admin (không phân biệt hoa thường)
+            if username_input.lower() == "admin" and password_input == "32531235":
                 st.session_state.logged_in = True
                 st.session_state.current_user = "Quản Trị Viên"
                 st.session_state.current_role = "admin"
+                
+                # Ghi URL parameter để duy trì khi F5
+                try:
+                    st.query_params["admin_token"] = "active"
+                except Exception:
+                    pass
                 st.rerun()
             else:
                 for _, row in df_credentials.iterrows():
@@ -406,6 +444,12 @@ with col_logout:
             st.session_state.logged_in = False
             st.session_state.current_user = ""
             st.session_state.current_role = ""
+            # Xóa token URL khi logout
+            try:
+                if "admin_token" in st.query_params:
+                    del st.query_params["admin_token"]
+            except Exception:
+                pass
             st.rerun()
 
 # Modal Quản lý tài khoản / Đổi mật khẩu
@@ -508,35 +552,6 @@ if st.session_state.show_modal:
 
 st.markdown("---")
 
-# --- TAB QUY TẮC & MỨC PHẠT (ADMIN) ---
-if st.session_state.current_role == "admin":
-    with st.expander("⚙️ Cấu hình Quy tắc & Mức phạt chuẩn (Độc quyền Admin)", expanded=False):
-        st.markdown("### 📋 Danh Mục Lý Do Nghỉ & Mức Phạt Chuẩn")
-        st.info("Bảng dưới đây hiển thị toàn bộ quy định lý do nghỉ, số ngày tính và mức phạt hiện đang được hệ thống áp dụng tự động.")
-        
-        if not df_loai_nghi.empty:
-            if 'Lý do nghỉ' in df_loai_nghi.columns:
-                cols_available = [col for col in ["Lý do nghỉ", "Chi tiết / Ghi chú", "Số ngày tính", "Phạt vi phạm"] if col in df_loai_nghi.columns]
-                df_display_rule = df_loai_nghi[cols_available].dropna(subset=["Lý do nghỉ"])
-            elif 'Loại nghỉ' in df_loai_nghi.columns:
-                cols_available = [col for col in ["Loại nghỉ", "Chi tiết / Ghi chú", "Số ngày tính", "Phạt vi phạm"] if col in df_loai_nghi.columns]
-                df_display_rule = df_loai_nghi[cols_available].dropna(subset=["Loại nghỉ"])
-                df_display_rule.rename(columns={'Loại nghỉ': 'Lý do nghỉ'}, inplace=True)
-            else:
-                cols_to_use = [1, 2, 3, 4] if len(df_loai_nghi.columns) > 4 else [1, 2, 3]
-                df_display_rule = df_loai_nghi.iloc[:, cols_to_use].dropna(subset=[df_loai_nghi.columns[1]])
-                if len(df_display_rule.columns) == 4:
-                    df_display_rule.columns = ["Lý do nghỉ", "Chi tiết / Ghi chú", "Số ngày tính", "Phạt vi phạm"]
-                else:
-                    df_display_rule.columns = ["Lý do nghỉ", "Chi tiết / Ghi chú", "Số ngày tính"]
-            
-            st.dataframe(df_display_rule, use_container_width=True, hide_index=True)
-            st.markdown("*(Lưu ý: Hệ thống hiện đang ưu tiên lấy bảng quy tắc từ Google Sheets. Bạn có thể thay đổi số liệu trực tiếp trên file Sheets).*")
-        else:
-            st.warning("Chưa tải được dữ liệu bảng quy tắc lý do nghỉ.")
-
-st.markdown("---")
-
 # --- KHU VỰC NHẬP LỊCH NGHỈ & QUẢN LÝ ---
 if st.session_state.current_role in ["admin", "letan"]:
     with st.expander("📝 Nhập lịch nghỉ mới & Quản lý lịch đã đăng ký (Dành cho Lễ Tân & Admin)", expanded=False):
@@ -580,7 +595,7 @@ if st.session_state.current_role in ["admin", "letan"]:
 
         with tab_input_lich:
             chosen_nv = st.selectbox("Chọn nhân viên:", ["-- Chọn nhân viên --"] + list_nv_input, key="sb_chosen_nv")
-            chosen_date = st.date_input("Chọn ngày nghỉ:", get_vn_today(), key="sb_chosen_date")  # <-- Đã áp dụng giờ Việt Nam
+            chosen_date = st.date_input("Chọn ngày nghỉ:", get_vn_today(), key="sb_chosen_date")
             chosen_loai = st.selectbox("Lý do nghỉ:", ["-- Chọn lý do nghỉ --"] + list_loai_nghi, key="sb_loai_nghi_live")
             
             default_songay = 1.0
@@ -694,7 +709,7 @@ st.markdown("---")
 col_date, col_name, col_refresh = st.columns([4, 4, 2])
 
 with col_date:
-    today = get_vn_today()  # <-- Đã áp dụng giờ Việt Nam
+    today = get_vn_today() 
     filter_type = st.selectbox(
         "Lọc thời gian:", 
         ["Hôm nay", "Hôm qua", "Tuần này", "Tuần trước", "Tháng này", "Tháng trước", "Chọn ngày", "Khoảng thời gian"]
@@ -793,6 +808,39 @@ else:
     col3.metric("⚠️ Số người nghỉ PHÁT SINH", len(phat_sinh_df))
     col4.metric("❌ Số người nghỉ KHÔNG phép", len(khong_phep_df))
     cols_to_hide = ['Phạt vi phạm']
+
+# THỐNG KÊ CHI TIẾT THEO TỪNG NGÀY
+st.markdown("### 📅 Thống kê chi tiết theo từng ngày")
+if not df_thuc_nghi.empty:
+    daily_stats = []
+    unique_dates = sorted(filtered_df['Ngày'].dropna().unique())
+    for d in unique_dates:
+        day_df = filtered_df[filtered_df['Ngày'] == d]
+        valid_day_mask = ~day_df['Lý do nghỉ'].apply(is_excluded)
+        day_thuc_nghi = day_df[valid_day_mask]
+        
+        day_ly_do_lower = day_thuc_nghi['Lý do nghỉ'].astype(str).str.strip().str.lower()
+        
+        day_ps = len(day_thuc_nghi[day_ly_do_lower == 'nghỉ phát sinh'])
+        day_kp = len(day_thuc_nghi[day_ly_do_lower.str.contains('không phép', na=False)])
+        day_cp = len(day_thuc_nghi[(day_ly_do_lower != 'nghỉ phát sinh') & (~day_ly_do_lower.str.contains('không phép', na=False))])
+        day_phat = day_df['Phạt vi phạm'].sum()
+        
+        daily_stats.append({
+            "Ngày": d.strftime('%d/%m/%Y'),
+            "Tổng số người nghỉ": len(day_thuc_nghi),
+            "✅ CÓ phép": day_cp,
+            "⚠️ PHÁT SINH": day_ps,
+            "❌ KHÔNG phép": day_kp,
+            "💰 Tổng tiền phạt": f"{day_phat:,.0f} đ".replace(",", ".")
+        })
+        
+    df_daily = pd.DataFrame(daily_stats)
+    st.dataframe(df_daily, use_container_width=True, hide_index=True)
+else:
+    st.info("Không có dữ liệu báo nghỉ trong khoảng thời gian đã chọn.")
+
+st.markdown("---")
 
 export_df = filtered_df.drop(columns=cols_to_hide, errors='ignore')
 

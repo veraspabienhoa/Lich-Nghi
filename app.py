@@ -1017,23 +1017,29 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                 st.cache_data.clear()
 
         with tab_manage_lich:
+         
             st.markdown("### 🗑️ Xóa / Quản lý lịch nghỉ đã đăng ký")
             
             df_backup_view = df_backup.copy()
+            # Đảm bảo các cột không bị trùng tên bằng cách đặt lại danh sách cột chuẩn
+            df_backup_view.columns = ['Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 'Số ngày tính', 'Số ngày phép cộng dồn', 'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật']
+            
             if st.session_state.current_role == "nhanvien":
                 df_backup_view = df_backup_view[df_backup_view['Tên nhân viên'] == st.session_state.current_user]
 
             if df_backup_view.empty: 
                 st.info("Chưa có lịch nghỉ nào được đăng ký.")
             else:
+                # Hiển thị dataframe với các cột đã được chuẩn hóa tên
                 st.dataframe(df_backup_view, use_container_width=True, hide_index=True)
                 with st.form("form_delete_backup_row"):
-                    col_ly_do_disp = 'Lý do nghỉ' if 'Lý do nghỉ' in df_backup_view.columns else 'Loại nghỉ'
+                    # Sử dụng tên cột chuẩn để lọc
+                    col_ly_do_disp = 'Lý do nghỉ'
                     
                     row_options = []
                     valid_indices = []
                     for i, row in df_backup.iterrows():
-                        if st.session_state.current_role == "nhanvien" and row.get('Tên nhân viên') != st.session_state.current_user:
+                        if st.session_state.current_role == "nhanvien" and str(row.get('Tên nhân viên')).strip() != st.session_state.current_user:
                             continue
                         row_options.append(f"Dòng {i+1}: {row.get('Ngày')} - {row.get('Tên nhân viên')} - {row.get(col_ly_do_disp, '')}")
                         valid_indices.append((i, str(row.get('Ngày'))))

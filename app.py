@@ -16,6 +16,11 @@ VN_TZ = timezone(timedelta(hours=7))
 def get_vn_today():
     return datetime.now(VN_TZ).date()
 
+# --- CHUẨN HÓA TÊN (SỬA LỖI GÕ THÚY/THUÝ) ---
+def normalize_name(name):
+    """Đồng nhất cách gõ Thúy/Thuý để tránh lỗi so sánh"""
+    return str(name).replace("Thuý", "Thúy").replace("thuý", "thúy").strip()
+
 # --- THEO DÕI SỐ NGƯỜI ĐANG TRUY CẬP ---
 @st.cache_resource
 def get_active_users():
@@ -54,35 +59,32 @@ components.html("""
 </script>
 """, height=0, width=0)
 
-# --- KHỞI TẠO BIẾN GIAO DIỆN (TIÊU ĐỀ) ---
-if "title_font" not in st.session_state:
-    st.session_state.title_font = "Roboto"
-if "title_size" not in st.session_state:
-    st.session_state.title_size = 35
+# --- KHỞI TẠO BIẾN GIAO DIỆN TOÀN TRANG ---
+if "global_font" not in st.session_state: st.session_state.global_font = "Roboto"
+if "global_size" not in st.session_state: st.session_state.global_size = 16
+if "global_color" not in st.session_state: st.session_state.global_color = "#333333"
 
-# --- ÉP CSS THU GỌN GIAO DIỆN, MOBILE OPTIMIZATION & FONT ---
+# --- ÉP CSS GIAO DIỆN & TÙY CHỈNH TOÀN TRANG ---
 st.markdown(f"""
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@400;700&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Arial:wght@400;700&display=swap');
         
-        /* Tối ưu khoảng cách tổng thể */
-        .block-container {{
-            padding-top: 1.5rem;
-            padding-bottom: 1rem;
+        /* Cấu hình Giao diện toàn trang */
+        html, body, [class*="st-"], .stMarkdown, .stText, div, span, p {{
+            font-family: '{st.session_state.global_font}', sans-serif !important;
+            color: {st.session_state.global_color} !important;
         }}
         
-        /* Tối ưu riêng cho màn hình Điện thoại */
+        p, .stText, [data-testid="stMarkdownContainer"] {{
+            font-size: {st.session_state.global_size}px !important;
+        }}
+        
+        .block-container {{ padding-top: 1.5rem; padding-bottom: 1rem; }}
+        
         @media (max-width: 768px) {{
-            .block-container {{
-                padding-top: 1rem !important;
-                padding-left: 0.5rem !important;
-                padding-right: 0.5rem !important;
-            }}
-            h1 {{ font-size: 1.5rem !important; }}
-            h2 {{ font-size: 1.25rem !important; }}
-            h3 {{ font-size: 1.1rem !important; }}
+            .block-container {{ padding-top: 1rem !important; padding-left: 0.5rem !important; padding-right: 0.5rem !important; }}
         }}
         
         div[data-testid="stVerticalBlock"] > div {{ gap: 0.2rem !important; }}
@@ -95,22 +97,15 @@ st.markdown(f"""
             max-height: 85vh !important; 
         }}
         
-        /* Áp dụng Font cho Tiêu đề thương hiệu */
-        h1, h2, h3, .custom-main-title {{
-            font-family: '{st.session_state.title_font}', sans-serif !important;
-        }}
-        
         .custom-main-title {{
-            font-size: {st.session_state.title_size}px;
-            font-weight: bold;
-            color: #333;
-            margin-bottom: 20px;
+            font-family: 'Cinzel Decorative', sans-serif !important;
+            font-size: 35px; font-weight: bold; margin-bottom: 20px; color: #333;
         }}
         
-        /* LÀM NỔI BẬT KHU VỰC NHẬP LỊCH NGHỈ */
+        /* GIẢM SIZE CHỮ: ĐĂNG KÝ - THAY ĐỔI LỊCH NGHỈ */
         [data-testid="stExpander"] details summary p {{
-            font-size: 1.8rem !important;
-            font-weight: 900 !important;
+            font-size: 1.3rem !important;
+            font-weight: 700 !important;
             color: #d32f2f !important;
             text-transform: uppercase;
         }}
@@ -132,7 +127,7 @@ def get_gspread_client():
     except Exception as e:
         return None
 
-# --- ĐỒNG BỘ DỮ LIỆU TỪ EXCEL SANG GOOGLE SHEETS (CHỈ ADMIN) ---
+# --- ĐỒNG BỘ EXCEL SANG GOOGLE SHEETS (CHỈ THÊM MỚI) ---
 def admin_sync_excel_to_gsheet():
     try:
         client = get_gspread_client()
@@ -145,69 +140,67 @@ def admin_sync_excel_to_gsheet():
         xls = pd.read_excel(temp_file, sheet_name='LichNghi', engine='pyxlsb')
         if os.path.exists(temp_file): os.remove(temp_file)
         
-        # Lấy thô từ cột A đến J (10 cột)
-        df_raw = xls.iloc[:, :10].copy()
+        df_excel = xls.iloc[:, :10].copy()
         
-        # Hàm định dạng chuẩn chuỗi thuần túy cho từng ô
-        def clean_val(val, is_date=False, is_time=False):
+        def clean_val(val, is_date=False):
             try:
-                if pd.isna(val) or str(val).strip() in ["nan", "NaT", "None", ""]:
-                    return ""
-                if is_time:
-                    if hasattr(val, 'strftime'): return val.strftime('%H:%M:%S')
-                    if isinstance(val, (int, float)):
-                        total_seconds = int(round(val * 86400))
-                        hours = total_seconds // 3600
-                        minutes = (total_seconds % 3600) // 60
-                        seconds = total_seconds % 60
-                        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                    return str(val).strip()
-                
+                if pd.isna(val) or str(val).strip() in ["nan", "NaT", "None", ""]: return ""
                 if is_date or hasattr(val, 'strftime'):
                     if hasattr(val, 'strftime'): return val.strftime('%d/%m/%Y')
-                    if isinstance(val, (int, float)):
-                        return pd.to_datetime(val, unit='D', origin='1899-12-30').strftime('%d/%m/%Y')
-                    s = str(val).strip().split(' ')[0]
-                    return pd.to_datetime(s, dayfirst=True).strftime('%d/%m/%Y')
-                
+                    if isinstance(val, (int, float)): return pd.to_datetime(val, unit='D', origin='1899-12-30').strftime('%d/%m/%Y')
+                    return pd.to_datetime(str(val).strip().split(' ')[0], dayfirst=True).strftime('%d/%m/%Y')
                 return str(val).strip()
-            except:
-                return str(val).strip()
+            except: return str(val).strip()
 
-        # Làm sạch từng cột cụ thể để không bị dính index hoặc lỗi kiểu dữ liệu
-        cols = df_raw.columns.tolist()
-        if len(cols) > 0: df_raw[cols[0]] = df_raw[cols[0]].apply(lambda x: clean_val(x, is_date=True))
-        if len(cols) > 7: df_raw[cols[7]] = df_raw[cols[7]].apply(lambda x: clean_val(x, is_date=True))
-        if len(cols) > 8: df_raw[cols[8]] = df_raw[cols[8]].apply(lambda x: clean_val(x, is_time=True))
-        
-        # Làm sạch các cột còn lại
+        cols = df_excel.columns.tolist()
+        if len(cols) > 0: df_excel[cols[0]] = df_excel[cols[0]].apply(lambda x: clean_val(x, is_date=True))
+        if len(cols) > 7: df_excel[cols[7]] = df_excel[cols[7]].apply(lambda x: clean_val(x, is_date=True))
         for c in cols:
-            if c != cols[0] and c != cols[7] and c != cols[8]:
-                df_raw[c] = df_raw[c].apply(lambda x: clean_val(x))
+            if c not in [cols[0], cols[7]] if len(cols)>7 else [cols[0]]:
+                df_excel[c] = df_excel[c].apply(lambda x: clean_val(x))
 
-        df_raw = df_raw.fillna("")
-        while len(df_raw.columns) < 10: 
-            df_raw[f"Col{len(df_raw.columns)}"] = ""
+        df_excel = df_excel.fillna("")
+        df_excel.columns = ["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"]
         
-        # Chuyển đổi an toàn sang mảng list thuần túy
-        values = df_raw.astype(str).values.tolist()
+        # Tải dữ liệu hiện tại trên GSheet
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        gsheet_data = sheet_dp.get_all_values()
         
-        try:
-            sheet_dp.batch_clear(["A2:J"])
-        except:
-            pass
+        if len(gsheet_data) > 1:
+            df_gsheet = pd.DataFrame(gsheet_data[1:], columns=gsheet_data[0])
+        else:
+            df_gsheet = pd.DataFrame(columns=df_excel.columns)
+
+        # Lọc ra những dòng chưa có trên GSheet
+        df_gsheet['Merge_Key'] = df_gsheet['Ngày'].astype(str) + "_" + df_gsheet['Tên nhân viên'].apply(normalize_name) + "_" + df_gsheet.get('Lý do nghỉ', df_gsheet.get('Loại nghỉ', '')).astype(str)
+        df_excel['Merge_Key'] = df_excel['Ngày'].astype(str) + "_" + df_excel['Tên nhân viên'].apply(normalize_name) + "_" + df_excel['Lý do nghỉ'].astype(str)
         
-        if values:
-            try:
-                sheet_dp.update('A2', values, value_input_option='USER_ENTERED')
-            except:
-                sheet_dp.update(values, 'A2')
-                
+        new_rows_df = df_excel[~df_excel['Merge_Key'].isin(df_gsheet['Merge_Key'])].drop(columns=['Merge_Key'])
+        
+        if new_rows_df.empty:
+            return True, "Không có dữ liệu mới nào từ Excel để đồng bộ."
+
+        values_to_append = new_rows_df.values.tolist()
+        sheet_dp.append_rows(values_to_append, value_input_option='USER_ENTERED')
+        
         st.cache_data.clear()
-        return True, f"Đã sao chép và dán {len(values)} dòng dữ liệu từ Excel lên Sheet thành công!"
+        return True, f"Đã thêm mới {len(values_to_append)} dòng dữ liệu từ Excel lên Sheet (không ghi đè)!"
     except Exception as e:
         return False, f"Lỗi đồng bộ: {e}"
+
+# --- ĐỒNG BỘ GOOGLE SHEETS SANG EXCEL (TẠO FILE DOWNLOAD CHỈ THÊM MỚI) ---
+def admin_sync_gsheet_to_excel(df_gsheet, df_excel_goc):
+    df_gsheet['Merge_Key'] = df_gsheet['Ngày'].astype(str) + "_" + df_gsheet['Tên nhân viên'].apply(normalize_name) + "_" + df_gsheet.get('Lý do nghỉ', df_gsheet.get('Loại nghỉ', '')).astype(str)
+    df_excel_goc['Merge_Key'] = df_excel_goc.iloc[:, 0].astype(str) + "_" + df_excel_goc.iloc[:, 1].apply(normalize_name) + "_" + df_excel_goc.iloc[:, 2].astype(str)
+    
+    new_rows = df_gsheet[~df_gsheet['Merge_Key'].isin(df_excel_goc['Merge_Key'])].copy()
+    
+    if new_rows.empty:
+        return df_excel_goc, False
+        
+    new_rows = new_rows.drop(columns=['Merge_Key'], errors='ignore')
+    df_excel_merged = pd.concat([df_excel_goc.drop(columns=['Merge_Key'], errors='ignore'), new_rows], ignore_index=True)
+    return df_excel_merged, True
 
 # --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN ---
 @st.cache_data(ttl=30)
@@ -317,15 +310,11 @@ def load_backup_sheet_data():
             rows = sheet.get_all_values()
             if len(rows) > 1:
                 df_bk = pd.DataFrame(rows[1:], columns=rows[0])
-                
-                # 1. Đổi tên nếu có cột 'Loại nghỉ'
                 if 'Loại nghỉ' in df_bk.columns:
                     df_bk.rename(columns={'Loại nghỉ': 'Lý do nghỉ'}, inplace=True)
-                
-                # 2. FIX LỖI PYARROW: Bỏ các cột rỗng tên (cột dư thừa của Google Sheet)
+                    
+                # Bỏ các cột rỗng tên và trùng tên (Fix lỗi PyArrow)
                 df_bk = df_bk.loc[:, df_bk.columns.astype(str).str.strip() != '']
-                
-                # 3. FIX LỖI PYARROW: Loại bỏ các cột trùng tên nhau (nếu có)
                 df_bk = df_bk.loc[:, ~df_bk.columns.duplicated(keep='first')]
                 
                 return df_bk
@@ -360,7 +349,7 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
             sheet_dp.append_row(["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"])
         
         sheet_dp.append_row([
-            str(ngay), str(nv), str(loai_nghi), str(chi_tiet),
+            str(ngay), str(nv), str(loai_nghi).replace("🔴 ", ""), str(chi_tiet),
             float(so_ngay) if so_ngay is not None else 0.0, 
             float(so_ngay_cong_don), float(phat_vi_pham), 
             str(ngay_cn), str(gio_cn), str(role)
@@ -369,7 +358,7 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         try:
             sheet_chinh_lich = client.open_by_key(SHEET_CHINH_ID).worksheet("LichNghi")
             sheet_chinh_lich.append_row([
-                str(ngay), str(nv), str(loai_nghi), str(chi_tiet),
+                str(ngay), str(nv), str(loai_nghi).replace("🔴 ", ""), str(chi_tiet),
                 float(so_ngay) if so_ngay is not None else 0.0, 
                 float(so_ngay_cong_don), float(phat_vi_pham), 
                 str(ngay_cn), str(gio_cn), str(role)
@@ -519,30 +508,38 @@ is_admin_letan = st.session_state.current_role in ["admin", "letan"]
 
 if is_admin_letan:
     st.sidebar.title("📌 MENU CHỨC NĂNG")
-    menu_options = ["📊 Tình Hình Nghỉ Phép", "⏰ Thiết Lập Ca Làm Việc"]
+    menu_options = ["📊 Tình Hình Nghỉ Phép", "⏰ Thiết Lập Ca Làm Việc", "👥 Quản Lý Nhân Sự"]
+    
+    selected_page = st.sidebar.radio("Chọn trang:", menu_options)
     
     if st.session_state.current_role == "admin":
         st.sidebar.markdown("---")
-        with st.sidebar.expander("🎨 Tùy chỉnh Tiêu đề (Chỉ Admin)"):
-            fonts_list = ["Cinzel Decorative", "Arial", "Roboto", "Times New Roman"]
-            sel_font = st.selectbox("Font chữ:", fonts_list, index=fonts_list.index(st.session_state.title_font))
-            sel_size = st.slider("Cỡ chữ (px):", 15, 60, st.session_state.title_size)
-            if st.button("💾 Lưu giao diện"):
-                st.session_state.title_font = sel_font
-                st.session_state.title_size = sel_size
+        with st.sidebar.expander("🎨 Tùy chỉnh Giao Diện Toàn Trang"):
+            fonts_list = ["Roboto", "Arial", "Times New Roman", "Cinzel Decorative"]
+            sel_font = st.selectbox("Font chữ:", fonts_list, index=fonts_list.index(st.session_state.global_font))
+            sel_size = st.slider("Cỡ chữ (px):", 12, 30, st.session_state.global_size)
+            sel_color = st.color_picker("Màu chữ:", st.session_state.global_color)
+            if st.button("💾 Lưu giao diện toàn trang"):
+                st.session_state.global_font = sel_font
+                st.session_state.global_size = sel_size
+                st.session_state.global_color = sel_color
                 st.rerun()
                 
         st.sidebar.markdown("---")
-        st.sidebar.subheader("🛠 CÔNG CỤ ADMIN")
-        if st.sidebar.button("🔄 Đồng Bộ Excel ➡️ Google Sheets", help="Sao chép dữ liệu từ A-J (File Excel LichNghi.xlsb) sang file Google Sheets Dự phòng"):
-            with st.spinner("Đang tải dữ liệu từ Excel và đồng bộ lên Google Sheets..."):
+        st.sidebar.subheader("🛠 CÔNG CỤ ĐỒNG BỘ")
+        if st.sidebar.button("🔄 Đồng Bộ Excel ➡️ Google Sheets", help="Chỉ thêm những dòng mới từ Excel vào Sheet"):
+            with st.spinner("Đang kiểm tra và đồng bộ..."):
                 res, msg = admin_sync_excel_to_gsheet()
-                if res:
-                    st.sidebar.success(msg)
-                else:
-                    st.sidebar.error(msg)
+                if res: st.sidebar.success(msg)
+                else: st.sidebar.error(msg)
                 
-    selected_page = st.sidebar.radio("Chọn trang:", menu_options)
+        if st.sidebar.button("⬇️ Xuất Excel Mới (GSheet ➡️ Excel)", help="Gộp dữ liệu mới từ Sheet vào file Excel gốc và tải xuống"):
+            with st.spinner("Đang tạo file..."):
+                df_merged, has_new = admin_sync_gsheet_to_excel(df_backup, df_lich)
+                if has_new:
+                    st.sidebar.download_button("📥 Bấm tải file Excel cập nhật", data=to_excel(df_merged), file_name="LichNghi_CapNhat.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                else:
+                    st.sidebar.info("Excel gốc đã cập nhật đủ dữ liệu, không có dòng mới.")
 else:
     selected_page = "📊 Tình Hình Nghỉ Phép"
 
@@ -551,15 +548,13 @@ else:
 st.write("")
 col_title, col_logout = st.columns([7, 3]) 
 with col_title:
-    r_label = {"admin": "Quản Trị Viên", "letan": "Lễ Tân"}.get(st.session_state.current_role, "Nhân Viên")
-    
     admin_view_online = ""
     if st.session_state.current_role == "admin" and online_users_list:
         admin_view_online = f"<br><span style='font-size: 13px; font-weight: normal; color: #666;'>👤 Chi tiết: {', '.join(online_users_list)}</span>"
         
     st.markdown(f"""
         <div class='custom-main-title'>
-            WELCOME TO VERA SPA - {st.session_state.current_user} ({r_label})
+            WELCOME TO VERA SPA
             <div style="float: right; text-align: right; margin-top: 8px;">
                 <span style="font-size: 16px; font-family: Arial; font-weight: normal; color: #28a745;">
                     🟢 Đang trực tuyến: {online_users_count}
@@ -572,7 +567,7 @@ with col_title:
 with col_logout:
     c_btn1, c_btn2 = st.columns(2)
     with c_btn1:
-        btn_manage_account = st.button("🛠 Hồ sơ Nhân Viên", use_container_width=True)
+        btn_manage_account = st.button("🛠 Hồ sơ Cá Nhân", use_container_width=True)
     with c_btn2:
         if st.button("🚪 Đăng xuất", use_container_width=True):
             st.session_state.logged_in = False
@@ -582,7 +577,7 @@ with col_logout:
             st.rerun()
 
 
-# --- MODAL HỒ SƠ / QUẢN LÝ TÀI KHOẢN ---
+# --- MODAL HỒ SƠ CÁ NHÂN ---
 if 'show_modal' not in st.session_state:
     st.session_state.show_modal = False
 if btn_manage_account:
@@ -669,7 +664,84 @@ if selected_page == "⏰ Thiết Lập Ca Làm Việc" and is_admin_letan:
 
 
 # ==========================================
-# PAGE 2: 📊 TÌNH HÌNH NGHỈ PHÉP
+# PAGE 2: 👥 QUẢN LÝ NHÂN SỰ
+# ==========================================
+elif selected_page == "👥 Quản Lý Nhân Sự" and is_admin_letan:
+    st.subheader("Quản Lý Hồ Sơ Nhân Viên")
+    
+    tab_add, tab_edit_delete = st.tabs(["➕ Thêm Nhân Viên Mới", "✏️ Chỉnh sửa / 🗑️ Xóa"])
+    
+    with tab_add:
+        with st.form("form_add_emp"):
+            st.write("Nhập thông tin nhân viên mới:")
+            col1, col2 = st.columns(2)
+            with col1:
+                new_usr = st.text_input("Tên đăng nhập (Bắt buộc)")
+                new_pwd = st.text_input("Mật khẩu", value="123456")
+                new_role = st.selectbox("Phân quyền", ["nhanvien", "letan", "admin"])
+            with col2:
+                new_fn = st.text_input("Họ và tên đầy đủ")
+                new_phone = st.text_input("Số điện thoại")
+            
+            if st.form_submit_button("Lưu Nhân Viên Mới"):
+                if new_usr:
+                    try:
+                        client = get_gspread_client()
+                        sheet_mk = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
+                        all_emps = sheet_mk.col_values(2)
+                        
+                        if new_usr in all_emps:
+                            st.error("Tên đăng nhập đã tồn tại!")
+                        else:
+                            stt_new = len(all_emps)
+                            row_data = [stt_new, new_usr, new_pwd, new_role, new_fn, "", new_phone, "", "", "0", "0", "0", "", "", ""]
+                            sheet_mk.append_row(row_data)
+                            st.cache_data.clear()
+                            st.success(f"Đã thêm thành công: {new_usr}")
+                    except Exception as e:
+                        st.error(f"Lỗi: {e}")
+                else:
+                    st.error("Vui lòng nhập Tên đăng nhập.")
+
+    with tab_edit_delete:
+        st.write("Danh sách nhân sự hiện tại:")
+        st.dataframe(df_credentials[['Tên nhân viên', 'Họ và tên đầy đủ', 'Phân quyền', 'Điện thoại']], use_container_width=True, hide_index=True)
+        
+        col_action1, col_action2 = st.columns(2)
+        with col_action1:
+            st.markdown("#### 🗑️ Xóa nhân viên")
+            del_usr = st.selectbox("Chọn nhân viên cần xóa:", [""] + df_credentials['Tên nhân viên'].tolist())
+            if st.button("Xác Nhận Xóa"):
+                if del_usr:
+                    try:
+                        client = get_gspread_client()
+                        sheet_mk = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
+                        cell = sheet_mk.find(del_usr, in_column=2)
+                        sheet_mk.delete_rows(cell.row)
+                        st.cache_data.clear()
+                        st.success(f"Đã xóa nhân viên: {del_usr}")
+                    except Exception as e:
+                        st.error(f"Lỗi xóa: {e}")
+                
+        with col_action2:
+            st.markdown("#### ✏️ Chỉnh sửa hồ sơ (Chỉ Admin)")
+            if st.session_state.current_role == "admin":
+                edit_usr = st.selectbox("Chọn nhân viên cần sửa:", [""] + df_credentials['Tên nhân viên'].tolist(), key='sb_edit')
+                if edit_usr:
+                    usr_data = df_credentials[df_credentials['Tên nhân viên'] == edit_usr].iloc[0]
+                    with st.form("form_edit_emp_admin"):
+                        e_pass = st.text_input("Mật khẩu", value=usr_data['Mật khẩu'])
+                        e_fn = st.text_input("Họ Tên", value=usr_data['Họ và tên đầy đủ'])
+                        e_phone = st.text_input("SĐT", value=usr_data['Điện thoại'])
+                        if st.form_submit_button("Cập nhật dữ liệu"):
+                            update_user_profile(edit_usr, e_pass, e_fn, usr_data['Ngày sinh'], e_phone, usr_data['Email'], usr_data['Địa chỉ'])
+                            st.success("Đã cập nhật!")
+            else:
+                st.info("Chỉ tài khoản Admin mới được phép chỉnh sửa chi tiết hồ sơ người khác.")
+
+
+# ==========================================
+# PAGE 3: 📊 TÌNH HÌNH NGHỈ PHÉP
 # ==========================================
 elif selected_page == "📊 Tình Hình Nghỉ Phép":
 
@@ -729,11 +801,12 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                             day_allowed = any(k in dk_ngay for k in wd_map[wd])
 
                         if day_allowed and role_allowed:
+                            if "không phép" in l_name.lower(): l_name = f"🔴 {l_name}"
                             list_loai_nghi.append(l_name)
                             try:
                                 s_ngay_str = str(row_vals[4]).replace(',', '').strip() if len(row_vals) > 4 else ""
-                                s_ngay = float(s_ngay_str) if s_ngay_str != "" else None
-                            except: s_ngay = None
+                                s_ngay = float(s_ngay_str) if s_ngay_str != "" else 0.0
+                            except: s_ngay = 0.0
                             
                             try:
                                 p_str = str(row_vals[5] if len(row_vals)>5 else "0").replace('.', '').replace(',', '').replace(' ', '').replace('đ', '').replace('VNĐ', '').replace('VND', '')
@@ -743,12 +816,12 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                             loai_nghi_dict[l_name.lower()] = [s_ngay, p_val]
                             
             if not list_loai_nghi:
-                list_loai_nghi = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
-                loai_nghi_dict = {l.lower(): [None, 0.0] for l in list_loai_nghi}
+                list_loai_nghi = ["Nghỉ phép", "🔴 Nghỉ không phép", "Nghỉ phát sinh", "🔴 Đi trễ không phép"]
+                loai_nghi_dict = {l.lower(): [0.0, 0.0] for l in list_loai_nghi}
 
             chosen_loai = st.selectbox("Lý do nghỉ:", ["-- Chọn lý do nghỉ --"] + list_loai_nghi, key="sb_loai_nghi_live")
             
-            default_songay = None
+            default_songay = 0.0
             default_phat = 0.0
             if chosen_loai and chosen_loai != "-- Chọn lý do nghỉ --" and chosen_loai.lower() in loai_nghi_dict:
                 default_songay = loai_nghi_dict[chosen_loai.lower()][0]
@@ -796,14 +869,14 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                 
                 col_p1, col_p2 = st.columns(2)
                 with col_p1:
-                    val_songay = st.number_input("Số ngày tính (🔴 **Bắt buộc**):", value=default_songay, step=0.5, key=f"num_songay_{dyn_key_suffix}", disabled=is_loi_vi_pham)
+                    val_songay = st.number_input("Số ngày tính:", value=float(default_songay), step=0.5, key=f"num_songay_{dyn_key_suffix}", disabled=is_loi_vi_pham)
                 with col_p2:
                     txt_phat_label = "Mức phạt vi phạm VNĐ (🔴 **Bắt buộc**):" if is_loi_vi_pham else "Mức phạt vi phạm (VNĐ):"
                     val_phat = st.number_input(txt_phat_label, value=float(default_phat), step=50000.0, key=f"num_phat_{dyn_key_suffix}")
                 
                 confirm_multiple = True
                 if existing_today:
-                    if chosen_loai in existing_today:
+                    if chosen_loai.replace("🔴 ", "") in existing_today:
                         st.error(f"❌ Nhân viên này đã có Lý do nghỉ: '{chosen_loai}' vào ngày này rồi. KHÔNG THỂ trùng cùng 1 lý do!")
                         confirm_multiple = False
                     else:
@@ -833,12 +906,8 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                         elif early_warning:
                             st.error(f"❌ Không thể lưu: {early_warning}")
                         else:
-                            norm_loai = chosen_loai.strip().lower()
+                            norm_loai = chosen_loai.strip().lower().replace("🔴 ", "")
                             num_days_selected = (end_date - start_date).days + 1
-                            
-                            if val_songay is None:
-                                st.error("❌ Vui lòng nhập Số ngày tính (🔴 Bắt buộc không được để trống)!")
-                                can_proceed = False
                             
                             if is_loi_vi_pham:
                                 val_songay = 0.0 
@@ -923,7 +992,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                                 continue
 
                                     success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
-                                        curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, chosen_loai, 
+                                        curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, chosen_loai.replace("🔴 ", ""), 
                                         input_chitiet, val_songay, accumulated_month, val_phat, st.session_state.current_role
                                     )
                                     
@@ -1107,25 +1176,25 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
             st.download_button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", data=to_excel(df_for_excel), file_name=f"LichNghi_{start_date.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         else: st.button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", disabled=True, use_container_width=True)
 
+    # ĐỊNH DẠNG MÀU ĐỎ KHÔNG PHÉP CHO DATAFRAME
+    def highlight_khong_phep(val):
+        if isinstance(val, str) and "không phép" in val.lower():
+            return 'color: red; font-weight: bold;'
+        return ''
+
     tab1, tab2, tab3, tab4 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ PHÁT SINH", "Danh sách Nghỉ KHÔNG phép"])
     
     with tab1: 
-        st.dataframe(export_df, use_container_width=True, hide_index=True)
+        st.dataframe(export_df.style.map(highlight_khong_phep), use_container_width=True, hide_index=True)
         
     with tab2: 
-        if co_phep_df.empty:
-            st.info("Trống.")
-        else:
-            st.dataframe(co_phep_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
+        if co_phep_df.empty: st.info("Trống.")
+        else: st.dataframe(co_phep_df.drop(columns=cols_to_hide, errors='ignore').style.map(highlight_khong_phep), use_container_width=True, hide_index=True)
             
     with tab3: 
-        if phat_sinh_df.empty:
-            st.info("Trống.")
-        else:
-            st.dataframe(phat_sinh_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
+        if phat_sinh_df.empty: st.info("Trống.")
+        else: st.dataframe(phat_sinh_df.drop(columns=cols_to_hide, errors='ignore').style.map(highlight_khong_phep), use_container_width=True, hide_index=True)
             
     with tab4: 
-        if khong_phep_df.empty:
-            st.success("Không có ai!")
-        else:
-            st.dataframe(khong_phep_df.drop(columns=cols_to_hide, errors='ignore'), use_container_width=True, hide_index=True)
+        if khong_phep_df.empty: st.success("Không có ai!")
+        else: st.dataframe(khong_phep_df.drop(columns=cols_to_hide, errors='ignore').style.map(highlight_khong_phep), use_container_width=True, hide_index=True)

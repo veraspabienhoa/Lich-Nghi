@@ -77,6 +77,14 @@ st.markdown(f"""
             color: {st.session_state.global_color} !important;
         }}
         
+        /* --- FIX LỖI MŨI TÊN (KHÔI PHỤC FONT ICON CỦA STREAMLIT) --- */
+        span.material-symbols-rounded, 
+        [data-testid="stIconMaterial"], 
+        .stIcon, 
+        span[class*="stIcon"] {{
+            font-family: "Material Symbols Rounded" !important;
+        }}
+        
         p, .stText, [data-testid="stMarkdownContainer"] {{
             font-size: {st.session_state.global_size}px !important;
         }}
@@ -99,7 +107,7 @@ st.markdown(f"""
         
         .custom-main-title {{
             font-family: 'Cinzel Decorative', sans-serif !important;
-            font-size: 35px; font-weight: bold; margin-bottom: 20px; color: #333;
+            font-size: 35px; font-weight: bold; margin-bottom: 20px; color: #333 !important;
         }}
         
         /* GIẢM SIZE CHỮ: ĐĂNG KÝ - THAY ĐỔI LỊCH NGHỈ */

@@ -59,64 +59,60 @@ components.html("""
 </script>
 """, height=0, width=0)
 
-# --- KHỞI TẠO BIẾN GIAO DIỆN TOÀN TRANG ---
-if "global_font" not in st.session_state: st.session_state.global_font = "Roboto"
-if "global_size" not in st.session_state: st.session_state.global_size = 16
-if "global_color" not in st.session_state: st.session_state.global_color = "#333333"
 
-# --- ÉP CSS GIAO DIỆN & TÙY CHỈNH TOÀN TRANG ---
-st.markdown(f"""
+# --- ÉP CSS GIAO DIỆN CỐ ĐỊNH (TỐI ƯU HIỆU NĂNG) ---
+st.markdown("""
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@400;700&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Arial:wght@400;700&display=swap');
         
         /* Cấu hình Giao diện toàn trang */
-        html, body, [class*="st-"], .stMarkdown, .stText, div, span, p {{
-            font-family: '{st.session_state.global_font}', sans-serif !important;
-            color: {st.session_state.global_color} !important;
-        }}
+        html, body, [class*="st-"], .stMarkdown, .stText, div, span, p {
+            font-family: 'Roboto', sans-serif !important;
+            color: #333333 !important;
+        }
         
         /* --- FIX LỖI MŨI TÊN (KHÔI PHỤC FONT ICON CỦA STREAMLIT) --- */
         span.material-symbols-rounded, 
         [data-testid="stIconMaterial"], 
         .stIcon, 
-        span[class*="stIcon"] {{
+        span[class*="stIcon"] {
             font-family: "Material Symbols Rounded" !important;
-        }}
+        }
         
-        p, .stText, [data-testid="stMarkdownContainer"] {{
-            font-size: {st.session_state.global_size}px !important;
-        }}
+        p, .stText, [data-testid="stMarkdownContainer"] {
+            font-size: 16px !important;
+        }
         
-        .block-container {{ padding-top: 1.5rem; padding-bottom: 1rem; }}
+        .block-container { padding-top: 1.5rem; padding-bottom: 1rem; }
         
-        @media (max-width: 768px) {{
-            .block-container {{ padding-top: 1rem !important; padding-left: 0.5rem !important; padding-right: 0.5rem !important; }}
-        }}
+        @media (max-width: 768px) {
+            .block-container { padding-top: 1rem !important; padding-left: 0.5rem !important; padding-right: 0.5rem !important; }
+        }
         
-        div[data-testid="stVerticalBlock"] > div {{ gap: 0.2rem !important; }}
-        button {{ margin-top: 5px !important; }}
+        div[data-testid="stVerticalBlock"] > div { gap: 0.2rem !important; }
+        button { margin-top: 5px !important; }
         
         /* Loại bỏ thanh cuộn dropdown */
         div[data-baseweb="popover"] > div,
         div[data-baseweb="select"] ul[role="listbox"],
-        div[data-testid="stSelectboxVirtualDropdown"] {{
+        div[data-testid="stSelectboxVirtualDropdown"] {
             max-height: 85vh !important; 
-        }}
+        }
         
-        .custom-main-title {{
+        .custom-main-title {
             font-family: 'Cinzel Decorative', sans-serif !important;
             font-size: 35px; font-weight: bold; margin-bottom: 20px; color: #333 !important;
-        }}
+        }
         
         /* GIẢM SIZE CHỮ: ĐĂNG KÝ - THAY ĐỔI LỊCH NGHỈ */
-        [data-testid="stExpander"] details summary p {{
+        [data-testid="stExpander"] details summary p {
             font-size: 1.3rem !important;
             font-weight: 700 !important;
             color: #d32f2f !important;
             text-transform: uppercase;
-        }}
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -521,18 +517,6 @@ if is_admin_letan:
     selected_page = st.sidebar.radio("Chọn trang:", menu_options)
     
     if st.session_state.current_role == "admin":
-        st.sidebar.markdown("---")
-        with st.sidebar.expander("🎨 Tùy chỉnh Giao Diện Toàn Trang"):
-            fonts_list = ["Roboto", "Arial", "Times New Roman", "Cinzel Decorative"]
-            sel_font = st.selectbox("Font chữ:", fonts_list, index=fonts_list.index(st.session_state.global_font))
-            sel_size = st.slider("Cỡ chữ (px):", 12, 30, st.session_state.global_size)
-            sel_color = st.color_picker("Màu chữ:", st.session_state.global_color)
-            if st.button("💾 Lưu giao diện toàn trang"):
-                st.session_state.global_font = sel_font
-                st.session_state.global_size = sel_size
-                st.session_state.global_color = sel_color
-                st.rerun()
-                
         st.sidebar.markdown("---")
         st.sidebar.subheader("🛠 CÔNG CỤ ĐỒNG BỘ")
         if st.sidebar.button("🔄 Đồng Bộ Excel ➡️ Google Sheets", help="Chỉ thêm những dòng mới từ Excel vào Sheet"):

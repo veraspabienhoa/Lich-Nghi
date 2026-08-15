@@ -56,7 +56,7 @@ components.html("""
 
 # --- KHỞI TẠO BIẾN GIAO DIỆN (TIÊU ĐỀ) ---
 if "title_font" not in st.session_state:
-    st.session_state.title_font = "Cinzel Decorative"
+    st.session_state.title_font = "Roboto"
 if "title_size" not in st.session_state:
     st.session_state.title_size = 28
 

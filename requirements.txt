@@ -5,5 +5,3 @@ requests
 openpyxl
 gspread
 google-auth
-Flask==3.0.0
-tzdata==2023.3

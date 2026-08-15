@@ -22,7 +22,7 @@ st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout
 st.markdown("""
     <style>
         .block-container {
-            padding-top: 2rem;
+            padding-top: 0.5rem;
             padding-bottom: 1rem;
         }
         div[data-testid="stVerticalBlock"] > div {

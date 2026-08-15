@@ -149,7 +149,6 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, phat_
                 str(nguoi_tao)
             ])
         except Exception as e:
-            # Bỏ qua lỗi nếu file chưa convert sang Google Sheets, vẫn cho phép báo thành công từ sheet dự phòng
             pass
 
         st.cache_data.clear()
@@ -195,7 +194,7 @@ def admin_manage_account(action, target_name, new_name="", new_pass="", new_role
                 next_row = len(col_b) + 1
                 sheet_chinh_nv.update_cell(next_row, 2, target_name.strip())
             except Exception as e:
-                pass # Bỏ qua nếu file gốc là xlsb không update được
+                pass
 
             st.cache_data.clear()
             return True, f"Đã thêm thành công tài khoản: {target_name.strip()}"
@@ -581,22 +580,17 @@ if st.session_state.current_role in ["admin", "letan"]:
                         l_name = str(row.get('Lý do nghỉ', row.get('Loại nghỉ', ''))).strip()
                     
                     if l_name and l_name.lower() not in ["nan", "loại nghỉ", "lý do nghỉ", "none", ""]:
-                        # Cột G: Điều kiện Ngày (Index 6)
                         dk_ngay = str(row.iloc[6]).strip().lower() if len(row) > 6 else ""
-                        # Cột H: Điều kiện Role (Index 7)
                         dk_role = str(row.iloc[7]).strip().lower() if len(row) > 7 else ""
                         
-                        # 1. Lọc theo Phân quyền (Cột H)
                         role_allowed = True
                         if dk_role and dk_role not in ["nan", "none", "tất cả", "all", ""]:
                             if current_role not in dk_role:
                                 role_allowed = False
                                 
-                        # 2. Lọc theo Thứ/Ngày (Cột G)
                         day_allowed = True
                         if dk_ngay and dk_ngay not in ["nan", "none", "tất cả", "all", ""]:
                             wd = chosen_date.weekday()
-                            # 0: Thứ 2, 1: Thứ 3, ..., 5: Thứ 7, 6: Chủ nhật
                             if wd == 0: day_allowed = any(k in dk_ngay for k in ["t2", "hai", "thường", "tất cả"])
                             elif wd == 1: day_allowed = any(k in dk_ngay for k in ["t3", "ba", "thường", "tất cả"])
                             elif wd == 2: day_allowed = any(k in dk_ngay for k in ["t4", "tư", "thường", "tất cả"])
@@ -605,18 +599,15 @@ if st.session_state.current_role in ["admin", "letan"]:
                             elif wd == 5: day_allowed = any(k in dk_ngay for k in ["t7", "bảy", "cuối tuần", "tất cả"])
                             elif wd == 6: day_allowed = any(k in dk_ngay for k in ["cn", "chủ nhật", "chủ", "cuối tuần", "tất cả"])
 
-                        # Nếu thỏa mãn cả 2 điều kiện thì thêm vào danh sách
                         if day_allowed and role_allowed:
                             list_loai_nghi.append(l_name)
                             
-                            # Lấy số ngày tính (Cột D - Index 3)
                             try:
                                 s_ngay_raw = str(row.get('Số ngày tính', row.iloc[3] if len(row)>3 else 1.0))
                                 s_ngay = float(s_ngay_raw.replace(',', '').strip()) if s_ngay_raw.strip() else 1.0
                             except:
                                 s_ngay = 1.0
                             
-                            # Lấy Phạt vi phạm (Cột F - Index 5)
                             try:
                                 p_raw = str(row.iloc[5] if len(row)>5 else "0").strip()
                                 p_str = p_raw.replace('.', '').replace(',', '').replace(' ', '').replace('đ', '').replace('VNĐ', '').replace('VND', '')
@@ -674,7 +665,6 @@ if st.session_state.current_role in ["admin", "letan"]:
                         
                         can_proceed = True
                         
-                        # Nếu mức phạt > 0 hoặc là Phép năm thì bỏ qua giới hạn số người
                         if val_phat <= 0 and not is_phep_nam:
                             if norm_loai_submit == "nghỉ phát sinh":
                                 vn_tz = timezone(timedelta(hours=7))
@@ -740,38 +730,55 @@ if st.session_state.current_role in ["admin", "letan"]:
 st.markdown("---")
 
 # Bộ lọc thời gian & nhân viên
-col_date, col_name, col_refresh = st.columns([4, 4, 2])
+col_date, col_name, col_refresh = st.columns([5, 4, 2])
 
 with col_date:
     today = get_vn_today() 
-    filter_type = st.selectbox(
-        "Lọc thời gian:", 
-        ["Hôm nay", "Hôm qua", "Tuần này", "Tuần trước", "Tháng này", "Tháng trước", "Chọn ngày", "Khoảng thời gian"]
-    )
-    
-    if filter_type == "Hôm nay":
-        start_date = end_date = today
-    elif filter_type == "Hôm qua":
-        start_date = end_date = today - timedelta(days=1)
-    elif filter_type == "Tuần này":
-        start_date = today - timedelta(days=today.weekday())
-        end_date = start_date + timedelta(days=6)
-    elif filter_type == "Tuần trước":
-        start_date = today - timedelta(days=today.weekday() + 7)
-        end_date = start_date + timedelta(days=6)
-    elif filter_type == "Tháng này":
-        start_date = today.replace(day=1)
-        last_day = calendar.monthrange(today.year, today.month)[1]
-        end_date = today.replace(day=last_day)
-    elif filter_type == "Tháng trước":
-        first_day_this_month = today.replace(day=1)
-        end_date = first_day_this_month - timedelta(days=1)
-        start_date = end_date.replace(day=1)
-    elif filter_type == "Chọn ngày":
-        start_date = end_date = st.date_input("Chọn ngày:", today, label_visibility="collapsed")
-    elif filter_type == "Khoảng thời gian":
-        date_range = st.date_input("Chọn khoảng thời gian:", [today, today], label_visibility="collapsed")
-        start_date, end_date = (date_range[0], date_range[1]) if len(date_range) == 2 else (date_range[0], date_range[0])
+    # Chia giao diện bộ lọc thời gian thành 2 cột con để nhìn gọn gàng hơn
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        filter_type = st.selectbox(
+            "Lọc thời gian:", 
+            ["Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian", "Tuần này", "Tuần trước", "Tuần sau", "Tháng này", "Tháng sau"]
+        )
+    with col_d2:
+        if filter_type == "Hôm nay":
+            start_date = end_date = today
+        elif filter_type == "Hôm qua":
+            start_date = end_date = today - timedelta(days=1)
+        elif filter_type == "Ngày mai":
+            start_date = end_date = today + timedelta(days=1)
+        elif filter_type == "Tuần này":
+            start_date = today - timedelta(days=today.weekday())
+            end_date = start_date + timedelta(days=6)
+        elif filter_type == "Tuần trước":
+            start_date = today - timedelta(days=today.weekday() + 7)
+            end_date = start_date + timedelta(days=6)
+        elif filter_type == "Tuần sau":
+            start_date = today - timedelta(days=today.weekday()) + timedelta(days=7)
+            end_date = start_date + timedelta(days=6)
+        elif filter_type == "Tháng này":
+            start_date = today.replace(day=1)
+            last_day = calendar.monthrange(today.year, today.month)[1]
+            end_date = today.replace(day=last_day)
+        elif filter_type == "Tháng trước":
+            first_day_this_month = today.replace(day=1)
+            end_date = first_day_this_month - timedelta(days=1)
+            start_date = end_date.replace(day=1)
+        elif filter_type == "Tháng sau":
+            if today.month == 12:
+                start_date = today.replace(year=today.year + 1, month=1, day=1)
+            else:
+                start_date = today.replace(month=today.month + 1, day=1)
+            last_day = calendar.monthrange(start_date.year, start_date.month)[1]
+            end_date = start_date.replace(day=last_day)
+        elif filter_type == "Chọn ngày":
+            start_date = end_date = st.date_input("Chọn ngày:", today)
+        elif filter_type == "Khoảng thời gian":
+            date_range = st.date_input("Chọn khoảng thời gian:", [today, today])
+            start_date, end_date = (date_range[0], date_range[1]) if len(date_range) == 2 else (date_range[0], date_range[0])
+        else:
+            start_date = end_date = today
 
 with col_name:
     users_s = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
@@ -788,13 +795,13 @@ with col_refresh:
 
 # Lọc dữ liệu theo thời gian và nhân viên
 mask_date = (df_lich['Ngày'] >= start_date) & (df_lich['Ngày'] <= end_date)
-filtered_df = df_lich[mask_date]
+filtered_df = df_lich[mask_date].copy()
 
 if selected_nv != "- Tất cả nhân viên -":
     filtered_df = filtered_df[filtered_df['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
 
 
-# --- XỬ LÝ SỐ LIỆU THỐNG KÊ ---
+# --- XỬ LÝ SỐ LIỆU THỐNG KÊ (ĐÃ FIX LỖI KEYERROR BẰNG KIỂM TRA EMPTY) ---
 excluded_keywords = [
     "đi trễ", "di tre",
     "không dọn vệ sinh", "khong don ve sinh",
@@ -815,15 +822,28 @@ def is_excluded(reason):
             return True
     return False
 
-valid_nghi_mask = ~filtered_df['Lý do nghỉ'].apply(is_excluded)
-df_thuc_nghi = filtered_df[valid_nghi_mask]
-ly_do_thuc_nghi_lower = df_thuc_nghi['Lý do nghỉ'].astype(str).str.strip().str.lower()
+# Bổ sung kiểm tra an toàn cho dataframe rỗng
+if filtered_df.empty:
+    df_thuc_nghi = pd.DataFrame(columns=df_lich.columns)
+    phat_sinh_df = pd.DataFrame(columns=df_lich.columns)
+    khong_phep_df = pd.DataFrame(columns=df_lich.columns)
+    co_phep_df = pd.DataFrame(columns=df_lich.columns)
+    tong_phat = 0.0
+else:
+    valid_nghi_mask = ~filtered_df['Lý do nghỉ'].apply(is_excluded)
+    df_thuc_nghi = filtered_df[valid_nghi_mask].copy()
+    
+    if df_thuc_nghi.empty:
+        phat_sinh_df = pd.DataFrame(columns=df_lich.columns)
+        khong_phep_df = pd.DataFrame(columns=df_lich.columns)
+        co_phep_df = pd.DataFrame(columns=df_lich.columns)
+    else:
+        ly_do_thuc_nghi_lower = df_thuc_nghi['Lý do nghỉ'].astype(str).str.strip().str.lower()
+        phat_sinh_df = df_thuc_nghi[ly_do_thuc_nghi_lower == 'nghỉ phát sinh']
+        khong_phep_df = df_thuc_nghi[ly_do_thuc_nghi_lower.str.contains('không phép', na=False)]
+        co_phep_df = df_thuc_nghi[(ly_do_thuc_nghi_lower != 'nghỉ phát sinh') & (~ly_do_thuc_nghi_lower.str.contains('không phép', na=False))]
 
-phat_sinh_df = df_thuc_nghi[ly_do_thuc_nghi_lower == 'nghỉ phát sinh']
-khong_phep_df = df_thuc_nghi[ly_do_thuc_nghi_lower.str.contains('không phép', na=False)]
-co_phep_df = df_thuc_nghi[(ly_do_thuc_nghi_lower != 'nghỉ phát sinh') & (~ly_do_thuc_nghi_lower.str.contains('không phép', na=False))]
-
-tong_phat = filtered_df['Phạt vi phạm'].sum()
+    tong_phat = filtered_df['Phạt vi phạm'].sum()
 
 # Thống kê KPI hiển thị
 st.write("") 

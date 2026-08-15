@@ -552,6 +552,7 @@ if st.session_state.show_modal:
 
 st.markdown("---")
 
+
 # --- KHU VỰC NHẬP LỊCH NGHỈ & QUẢN LÝ ---
 if st.session_state.current_role in ["admin", "letan"]:
     with st.expander("📝 Nhập lịch nghỉ mới & Quản lý lịch đã đăng ký (Dành cho Lễ Tân & Admin)", expanded=False):
@@ -561,41 +562,74 @@ if st.session_state.current_role in ["admin", "letan"]:
         users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
         list_nv_input = sorted(list(set(users_s + users_e)))
         
-        list_loai_nghi = []
-        loai_nghi_dict = {}
-        if not df_loai_nghi.empty:
-            for idx, row in df_loai_nghi.iterrows():
-                l_name = ""
-                if len(row) > 1:
-                    l_name = str(row.iloc[1]).strip()
-                
-                if not l_name or l_name.lower() in ["nan", "none"]:
-                    l_name = str(row.get('Lý do nghỉ', row.get('Loại nghỉ', ''))).strip()
-                
-                if l_name and l_name.lower() not in ["nan", "loại nghỉ", "lý do nghỉ", "none", ""]:
-                    list_loai_nghi.append(l_name)
-                    
-                    try:
-                        s_ngay_raw = str(row.get('Số ngày tính', row.iloc[3] if len(row)>3 else 1.0))
-                        s_ngay = float(s_ngay_raw.replace(',', '').strip()) if s_ngay_raw.strip() else 1.0
-                    except:
-                        s_ngay = 1.0
-                    
-                    try:
-                        p_raw = str(row.get('Phạt vi phạm', row.iloc[4] if len(row)>4 else "0")).strip()
-                        p_str = p_raw.replace('.', '').replace(',', '').replace(' ', '').replace('đ', '').replace('VNĐ', '').replace('VND', '')
-                        p_val = 0.0 if p_str in ["", "-", "nan", "None"] else float(p_str)
-                    except:
-                        p_val = 0.0
-                        
-                    loai_nghi_dict[l_name.lower()] = [s_ngay, p_val]
-                    
-        if not list_loai_nghi:
-            list_loai_nghi = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
-
         with tab_input_lich:
             chosen_nv = st.selectbox("Chọn nhân viên:", ["-- Chọn nhân viên --"] + list_nv_input, key="sb_chosen_nv")
             chosen_date = st.date_input("Chọn ngày nghỉ:", get_vn_today(), key="sb_chosen_date")
+            
+            # --- BỘ LỌC ĐỘNG CHO LÝ DO NGHỈ (Theo Cột G: Ngày, Cột H: Phân quyền) ---
+            list_loai_nghi = []
+            loai_nghi_dict = {}
+            current_role = st.session_state.current_role.lower()
+
+            if not df_loai_nghi.empty:
+                for idx, row in df_loai_nghi.iterrows():
+                    l_name = ""
+                    if len(row) > 1:
+                        l_name = str(row.iloc[1]).strip()
+                    
+                    if not l_name or l_name.lower() in ["nan", "none"]:
+                        l_name = str(row.get('Lý do nghỉ', row.get('Loại nghỉ', ''))).strip()
+                    
+                    if l_name and l_name.lower() not in ["nan", "loại nghỉ", "lý do nghỉ", "none", ""]:
+                        # Cột G: Điều kiện Ngày (Index 6)
+                        dk_ngay = str(row.iloc[6]).strip().lower() if len(row) > 6 else ""
+                        # Cột H: Điều kiện Role (Index 7)
+                        dk_role = str(row.iloc[7]).strip().lower() if len(row) > 7 else ""
+                        
+                        # 1. Lọc theo Phân quyền (Cột H)
+                        role_allowed = True
+                        if dk_role and dk_role not in ["nan", "none", "tất cả", "all", ""]:
+                            if current_role not in dk_role:
+                                role_allowed = False
+                                
+                        # 2. Lọc theo Thứ/Ngày (Cột G)
+                        day_allowed = True
+                        if dk_ngay and dk_ngay not in ["nan", "none", "tất cả", "all", ""]:
+                            wd = chosen_date.weekday()
+                            # 0: Thứ 2, 1: Thứ 3, ..., 5: Thứ 7, 6: Chủ nhật
+                            if wd == 0: day_allowed = any(k in dk_ngay for k in ["t2", "hai", "thường", "tất cả"])
+                            elif wd == 1: day_allowed = any(k in dk_ngay for k in ["t3", "ba", "thường", "tất cả"])
+                            elif wd == 2: day_allowed = any(k in dk_ngay for k in ["t4", "tư", "thường", "tất cả"])
+                            elif wd == 3: day_allowed = any(k in dk_ngay for k in ["t5", "năm", "thường", "tất cả"])
+                            elif wd == 4: day_allowed = any(k in dk_ngay for k in ["t6", "sáu", "thường", "tất cả"])
+                            elif wd == 5: day_allowed = any(k in dk_ngay for k in ["t7", "bảy", "cuối tuần", "tất cả"])
+                            elif wd == 6: day_allowed = any(k in dk_ngay for k in ["cn", "chủ nhật", "chủ", "cuối tuần", "tất cả"])
+
+                        # Nếu thỏa mãn cả 2 điều kiện thì thêm vào danh sách
+                        if day_allowed and role_allowed:
+                            list_loai_nghi.append(l_name)
+                            
+                            # Lấy số ngày tính (Cột D - Index 3)
+                            try:
+                                s_ngay_raw = str(row.get('Số ngày tính', row.iloc[3] if len(row)>3 else 1.0))
+                                s_ngay = float(s_ngay_raw.replace(',', '').strip()) if s_ngay_raw.strip() else 1.0
+                            except:
+                                s_ngay = 1.0
+                            
+                            # Lấy Phạt vi phạm (Cột F - Index 5)
+                            try:
+                                p_raw = str(row.iloc[5] if len(row)>5 else "0").strip()
+                                p_str = p_raw.replace('.', '').replace(',', '').replace(' ', '').replace('đ', '').replace('VNĐ', '').replace('VND', '')
+                                p_val = 0.0 if p_str in ["", "-", "nan", "None"] else float(p_str)
+                            except:
+                                p_val = 0.0
+                                
+                            loai_nghi_dict[l_name.lower()] = [s_ngay, p_val]
+                            
+            if not list_loai_nghi:
+                list_loai_nghi = ["Nghỉ phép", "Nghỉ không phép", "Nghỉ phát sinh", "Đi trễ không phép"]
+                loai_nghi_dict = {l.lower(): [1.0, 0.0] for l in list_loai_nghi}
+
             chosen_loai = st.selectbox("Lý do nghỉ:", ["-- Chọn lý do nghỉ --"] + list_loai_nghi, key="sb_loai_nghi_live")
             
             default_songay = 1.0

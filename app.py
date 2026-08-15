@@ -102,7 +102,7 @@ st.markdown("""
         }
         
         .custom-main-title {
-            font-family: 'Cinzel Decorative', sans-serif !important;
+            font-family: 'Roboto', sans-serif !important;
             font-size: 35px; font-weight: bold; margin-bottom: 20px; color: #333 !important;
         }
         

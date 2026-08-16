@@ -1162,86 +1162,151 @@ def reorder_bang_tour_columns(df):
     return out
 
 
-def style_bang_tour(df):
-    """
-    BẢNG TOUR - TÔ CẢ DÒNG GIỐNG Ô "TRẠNG THÁI".
+def _tour_norm_token(v):
+    """Chuẩn hóa text Tour: không dấu, không phân biệt hoa/thường, bỏ _ và - thừa."""
+    txt = remove_vietnamese_accents(_tour_text(v)).casefold()
+    txt = txt.replace("_", " ").replace("-", " ")
+    return " ".join(txt.split())
 
-    Nguyên tắc:
-    1) Dữ liệu vẫn được đọc theo vị trí cột Excel gốc để xác định màu của ô Trạng Thái.
-    2) Sau khi xác định màu cuối cùng của ô Trạng Thái, áp dụng CHÍNH MÀU ĐÓ
-       cho toàn bộ các ô trên cùng một dòng.
-    3) Không áp thêm màu riêng cho P/Q/L/T/E:F sau đó, vì như vậy sẽ làm
-       một số ô khác màu với ô Trạng Thái và không đúng yêu cầu "cả dòng giống màu Trạng Thái".
-    4) Việc đổi thứ tự cột hiển thị không ảnh hưởng tới rule vì excel_col_index
-       vẫn giữ vị trí cột gốc của workbook Input.
+
+def prepare_bang_tour_display(df):
     """
-    excel_map = df.attrs.get("excel_col_index", {})
-    idx_to_header = {idx: name for name, idx in excel_map.items()}
+    Sau khi lấy dữ liệu từ file:
+    - Đưa Trạng Thái ngay sau Tên Nhân Viên.
+    - Đưa Thời gian còn lại ngay sau Trạng Thái.
+    - Thời gian còn lại hiển thị bằng số nguyên.
+    - Nếu Thời gian còn lại <= -15 thì làm trống VALUE trên bảng web.
+      (Không ghi ngược/xóa dữ liệu trong file XLSM nguồn.)
+    """
+    out = reorder_bang_tour_columns(df)
+    remain_col = _find_tour_col(out, "Thời gian còn lại")
+    if remain_col is not None:
+        def fmt_remaining(v):
+            n = _tour_num(v)
+            if n is None or n <= -15:
+                return ""
+            return int(round(n))
+        out[remain_col] = out[remain_col].apply(fmt_remaining)
+    out.attrs.update(df.attrs)
+    return out
+
+
+def calculate_bang_tour_stats(df):
+    """Tính bảng thống kê số lượng cho Bảng Tour từ dữ liệu gốc vừa tải."""
+    if df.empty:
+        return pd.DataFrame(columns=["Chỉ số", "Số lượng"])
 
     status_col = _find_tour_col(df, "Trạng thái")
+    remain_col = _find_tour_col(df, "Thời gian còn lại")
+    work_col = _find_tour_col(df, "Đi làm")
+    shift_col = _find_tour_col(df, "Vào ca")
+    break_col = _find_tour_col(df, "Break")
+
+    # Nếu tên cột workbook hơi khác, thử các biến thể thường gặp.
+    if break_col is None:
+        break_col = _find_tour_col(df, "Breaktime")
+    if shift_col is None:
+        shift_col = _find_tour_col(df, "Ca")
+
+    blank = pd.Series([""] * len(df), index=df.index, dtype=object)
+    status_s = df[status_col].apply(_tour_norm_token) if status_col else blank.copy()
+    work_s = df[work_col].apply(_tour_norm_token) if work_col else blank.copy()
+    shift_s = df[shift_col].apply(_tour_norm_token) if shift_col else blank.copy()
+    break_s = df[break_col].apply(_tour_norm_token) if break_col else blank.copy()
+    remain_num = df[remain_col].apply(_tour_num) if remain_col else pd.Series([None] * len(df), index=df.index)
+    remain_num = pd.to_numeric(remain_num, errors='coerce')
+    status_num = pd.to_numeric(df[status_col], errors='coerce') if status_col else pd.Series([float('nan')] * len(df), index=df.index)
+
+    dang_thuc_hien_mask = status_s.eq("dang thuc hien")
+    dang_cho_mask = status_s.eq("dang cho")
+
+    # "Sắp xong": hỗ trợ đúng cả hai trường hợp dữ liệu:
+    # - Nếu cột Trạng thái có giá trị số: đếm giá trị <= 30 theo yêu cầu.
+    # - Với cấu trúc hiện tại Trạng thái là chữ DANG THUC HIEN: dùng Thời gian còn lại <= 30.
+    #   Loại <= -15 vì các giá trị này được làm trống khỏi bảng hiển thị.
+    sap_xong_mask = (
+        (status_num.notna() & (status_num <= 30))
+        | (dang_thuc_hien_mask & remain_num.notna() & (remain_num <= 30) & (remain_num > -15))
+    )
+
+    active_shift_mask = shift_s.isin(["ca 1", "ca 2"])
+    di_lam_mask = work_s.eq("di lam")
+    nghi_phep_mask = work_s.eq("nghi phep")
+    idle_time_mask = remain_num.isna() | remain_num.eq(0)
+    dang_ranh_mask = idle_time_mask & active_shift_mask & di_lam_mask
+
+    ca1_mask = shift_s.eq("ca 1")
+    ca2_mask = shift_s.eq("ca 2")
+    break_mask = break_s.eq("break")
+
+    dang_thuc_hien = int(dang_thuc_hien_mask.sum())
+    dang_cho = int(dang_cho_mask.sum())
+    sap_xong = int(sap_xong_mask.sum())
+    dang_ranh = int(dang_ranh_mask.sum())
+    co_the_len_tour = sap_xong + dang_ranh
+
+    rows = [
+        ("Đang thực hiện", dang_thuc_hien),
+        ("Đang chờ", dang_cho),
+        ("Sắp xong (≤ 30 phút)", sap_xong),
+        ("Đang rảnh", dang_ranh),
+        ("Có thể lên tour", co_the_len_tour),
+        ("Đi làm", int(di_lam_mask.sum())),
+        ("Nghỉ phép", int(nghi_phep_mask.sum())),
+        ("Ca 1", int(ca1_mask.sum())),
+        ("Ca 2", int(ca2_mask.sum())),
+        ("Break", int(break_mask.sum())),
+    ]
+    return pd.DataFrame(rows, columns=["Chỉ số", "Số lượng"])
+
+
+def style_bang_tour(df):
+    """
+    Tô NGUYÊN DÒNG Bảng Tour theo đúng bộ quy tắc mới của người dùng.
+
+    Thứ tự áp dụng:
+    1. Đi làm = Nghi phep -> nền trắng, chữ mờ.
+    2. Đi làm = Di lam -> nền trắng, chữ đen.
+    3. Thời gian còn lại >= 15 -> nền xanh lá.
+    4. 0 <= Thời gian còn lại < 15 -> nền vàng.
+    5. -15 < Thời gian còn lại < 0 -> nền đỏ.
+    6. Thời gian <= -15 đã được làm trống ở prepare_bang_tour_display().
+    7. Break = Break -> nền cam (ưu tiên cao nhất).
+    """
+    remain_col = _find_tour_col(df, "Thời gian còn lại")
+    work_col = _find_tour_col(df, "Đi làm")
+    break_col = _find_tour_col(df, "Break")
+    if break_col is None:
+        break_col = _find_tour_col(df, "Breaktime")
 
     def row_style(row):
-        def original_value(pos):
-            header = idx_to_header.get(pos)
-            if header is not None and header in row.index:
-                return row[header]
-            # Fallback khi attrs bị mất: ưu tiên tìm theo tên cho cột Trạng Thái.
-            if pos == 6 and status_col is not None and status_col in row.index:
-                return row[status_col]
-            return ""
+        work_norm = _tour_norm_token(row.get(work_col, "")) if work_col else ""
+        break_norm = _tour_norm_token(row.get(break_col, "")) if break_col else ""
+        remain_num = _tour_num(row.get(remain_col, "")) if remain_col else None
 
-        # Các cột nguồn dùng trong Conditional Formatting của file Excel gốc.
-        b = _tour_text(original_value(1))       # B
-        g = _tour_text(original_value(6))       # G = Trạng Thái gốc
-        k_txt = _tour_text(original_value(10))  # K = Thời gian còn lại / giá trị điều kiện
-        k_num = _tour_num(original_value(10))
-        p = _tour_text(original_value(15))      # P
-        q = _tour_text(original_value(16))      # Q
-        r = _tour_text(original_value(17))      # R
-
-        g_norm = remove_vietnamese_accents(g).casefold().strip()
-        b_norm = remove_vietnamese_accents(b).casefold().strip()
-        p_norm = remove_vietnamese_accents(p).casefold().strip()
-        q_norm = remove_vietnamese_accents(q).casefold().strip()
-        r_norm = remove_vietnamese_accents(r).casefold().strip()
-
-        # Mặc định giống nền trắng của ô Trạng Thái khi chưa có rule màu khác.
         bg = "#FFFFFF"
         fg = "#000000"
         weight = "400"
 
-        # Rule theo K trong VBA: trống -> trắng; <=0 -> đỏ; 0<K<10 -> vàng; >=10 -> xanh.
-        if k_txt == "":
+        # Trạng thái Đi làm / Nghỉ phép làm nền cơ sở.
+        if work_norm == "nghi phep":
+            bg, fg, weight = "#FFFFFF", "#A6A6A6", "400"
+        elif work_norm == "di lam":
             bg, fg, weight = "#FFFFFF", "#000000", "400"
-        elif k_num is not None and k_num <= 0:
-            bg, fg, weight = "#FF0000", "#FFFFFF", "700"
-        elif k_num is not None and 0 < k_num < 10:
-            bg, fg, weight = "#FFFF00", "#000000", "700"
-        elif k_num is not None and k_num >= 10:
-            bg, fg, weight = "#92D050", "#000000", "700"
 
-        # Các trạng thái có rule trực tiếp lên vùng D:G / cột Trạng Thái.
-        # Khi ô Trạng Thái đổi màu bởi rule này, cả dòng lấy cùng màu.
-        if g_norm == "dang cho":
-            bg, fg, weight = "#D9D9D9", "#000000", "700"
+        # Thời gian còn lại quyết định màu tiến độ, nhưng KHÔNG ghi đè dòng Nghỉ phép.
+        if remain_num is not None and work_norm != "nghi phep":
+            if remain_num >= 15:
+                bg, fg, weight = "#92D050", "#000000", "600"
+            elif 0 <= remain_num < 15:
+                bg, fg, weight = "#FFD966", "#000000", "600"
+            elif -15 < remain_num < 0:
+                bg, fg, weight = "#FF6666", "#000000", "600"
 
-        if r_norm == "breaktime":
-            bg, fg, weight = "#FCE4D6", "#000000", "700"
+        # Break là điều kiện ưu tiên cuối cùng.
+        if break_norm == "break":
+            bg, fg, weight = "#F4B183", "#000000", "600"
 
-        # Dòng phân cách trong workbook.
-        if b_norm == "cach dong":
-            bg, fg, weight = "#C1BFD5", "#C1BFD5", "400"
-
-        # Các rule đen của ô Trạng Thái trong VBA.
-        if p_norm == "di lam":
-            bg, fg, weight = "#000000", "#B5C6E7", "700"
-        elif p_norm == "nghi phep":
-            bg, fg, weight = "#000000", "#D9D9D9", "700"
-
-        if q_norm in {"ca 1", "ca 2", "vao ca"}:
-            bg, fg, weight = "#000000", "#FFFFFF", "700"
-
-        # Một CSS duy nhất được trả về cho TẤT CẢ ô trên dòng.
         css = (
             f"background-color:{bg};"
             f"color:{fg};"
@@ -1264,6 +1329,51 @@ def style_bang_tour(df):
         {"selector": "td", "props": [("white-space", "nowrap")]},
     ])
     return styler
+
+
+def combine_leave_sources_for_daily_stats(df_main, df_backup_source):
+    """
+    Hợp nhất dữ liệu nghỉ từ 2 nguồn cho riêng phần thống kê chi tiết theo ngày:
+    - File chính (df_lich)
+    - Google Sheet dự phòng (df_backup)
+
+    Loại trùng theo Ngày + Tên nhân viên + Lý do nghỉ. Nếu cùng bản ghi có ở cả hai
+    nguồn thì ưu tiên bản Google Sheet dự phòng vì đây là nơi nhập liệu trực tiếp mới nhất.
+    """
+    expected = [
+        'Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 'Số ngày tính',
+        'Số ngày phép cộng dồn', 'Phạt vi phạm', 'Ngày cập nhật',
+        'Giờ cập nhật', 'Người cập nhật'
+    ]
+    prepared = []
+    for source in [df_main, df_backup_source]:
+        if source is None or source.empty:
+            continue
+        d = source.copy()
+        if 'Loại nghỉ' in d.columns and 'Lý do nghỉ' not in d.columns:
+            d = d.rename(columns={'Loại nghỉ': 'Lý do nghỉ'})
+        for col in expected:
+            if col not in d.columns:
+                d[col] = ""
+        d = d[expected].copy()
+        d['Ngày'] = pd.to_datetime(d['Ngày'], errors='coerce', dayfirst=True).dt.date
+        d = d.dropna(subset=['Ngày'])
+        d['Số ngày tính'] = pd.to_numeric(d['Số ngày tính'], errors='coerce').fillna(0)
+        d['Phạt vi phạm'] = pd.to_numeric(d['Phạt vi phạm'], errors='coerce').fillna(0)
+        prepared.append(d)
+
+    if not prepared:
+        return pd.DataFrame(columns=expected)
+
+    # Thứ tự main -> backup, keep='last' => backup thắng khi trùng key.
+    combined = pd.concat(prepared, ignore_index=True)
+    combined['_key'] = (
+        combined['Ngày'].astype(str) + '|' +
+        combined['Tên nhân viên'].apply(normalize_name).str.casefold() + '|' +
+        combined['Lý do nghỉ'].astype(str).str.strip().str.casefold()
+    )
+    combined = combined.drop_duplicates(subset=['_key'], keep='last').drop(columns=['_key'])
+    return combined.reset_index(drop=True)
 
 
 @st.cache_data(ttl=60)
@@ -1810,7 +1920,7 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and st.session_state.curre
 
 elif selected_page == "🧭 Bảng Tour":
     st.subheader("🧭 Bảng Tour")
-    st.caption("Dữ liệu lấy từ Google Drive → sheet Input. Màu được mô phỏng theo Conditional Formatting trong file VBA bạn cung cấp.")
+    st.caption("Dữ liệu lấy từ Google Drive → sheet Input. Màu hiển thị áp dụng theo quy tắc vận hành mới của Vera.")
 
     c_refresh, c_info = st.columns([2, 8])
     with c_refresh:
@@ -1826,19 +1936,31 @@ elif selected_page == "🧭 Bảng Tour":
     elif df_tour.empty:
         st.info("Không có dữ liệu trong sheet Input.")
     else:
-        # SAU KHI lấy dữ liệu từ file: sắp lại cột hiển thị trước.
-        # Trạng Thái luôn nằm ngay sau Tên Nhân Viên; Thời gian còn lại ngay sau Trạng Thái.
-        df_tour_display = reorder_bang_tour_columns(df_tour)
+        # Bảng thống kê dùng dữ liệu GỐC vừa đọc, trước khi làm trống thời gian <= -15.
+        tour_stats_df = calculate_bang_tour_stats(df_tour)
+        st.markdown("### 📊 Thống kê Bảng Tour")
+        st.dataframe(
+            tour_stats_df,
+            use_container_width=True,
+            hide_index=True,
+            height="content"
+        )
 
-        # Sau đó xác định màu cuối của ô Trạng Thái và tô NGUYÊN DÒNG đúng màu đó.
-        tour_height = max(260, min(42 + len(df_tour_display) * 35, 1200))
+        # Sau khi lấy dữ liệu: sắp cột + định dạng Thời gian còn lại dạng số nguyên.
+        # Giá trị <= -15 được làm trống trên bảng hiển thị.
+        df_tour_display = prepare_bang_tour_display(df_tour)
+
+        tour_height = max(260, min(42 + len(df_tour_display) * 35, 1400))
         st.dataframe(
             style_bang_tour(df_tour_display),
             use_container_width=True,
             hide_index=True,
             height=tour_height
         )
-        st.caption("Bảng Tour: Tên Nhân Viên → Trạng Thái → Thời gian còn lại. Mỗi dòng được tô đồng nhất theo màu cuối cùng của ô Trạng Thái.")
+        st.caption(
+            "Màu dòng: Nghỉ phép = chữ mờ/nền trắng; Đi làm = chữ đen/nền trắng; "
+            "≥15 phút = xanh; 0–<15 = vàng; -15–<0 = đỏ; ≤-15 làm trống thời gian; Break = cam."
+        )
 
 elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
     st.subheader("➕ Đăng ký lịch nghỉ")
@@ -2198,6 +2320,23 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
     excluded_keywords = ["đi trễ", "di tre", "không dọn vệ sinh", "khong don ve sinh", "lỗi vi phạm", "loi vi pham", "qua tour", "xuống phòng", "xuong phong", "ra sớm", "ra som", "vào muộn", "vao muon", "đi tua", "di tua", "ngưng nhận", "ngung nhan", "hỗ trợ ca", "ho tro ca"]
     def is_excluded(r): return any(kw in str(r).lower() for kw in excluded_keywords)
 
+    # Nguồn riêng cho "Thống kê chi tiết theo từng ngày": hợp nhất CẢ 2 FILE.
+    daily_all_df = combine_leave_sources_for_daily_stats(df_lich, df_backup)
+    if not daily_all_df.empty:
+        daily_mask = (daily_all_df['Ngày'] >= start_date) & (daily_all_df['Ngày'] <= end_date)
+        daily_filtered_df = daily_all_df[daily_mask].copy()
+        if selected_nv != "- Tất cả nhân viên -":
+            daily_filtered_df = daily_filtered_df[
+                daily_filtered_df['Tên nhân viên'].astype(str).str.strip().str.casefold() == selected_nv.strip().casefold()
+            ]
+    else:
+        daily_filtered_df = daily_all_df.copy()
+
+    daily_thuc_nghi = (
+        daily_filtered_df[~daily_filtered_df['Lý do nghỉ'].apply(is_excluded)].copy()
+        if not daily_filtered_df.empty else pd.DataFrame(columns=daily_all_df.columns)
+    )
+
     if filtered_df.empty:
         df_thuc_nghi = phat_sinh_df = khong_phep_df = co_phep_df = pd.DataFrame(columns=df_lich.columns)
         tong_phat = 0.0
@@ -2229,11 +2368,12 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         cols_to_hide = ['Phạt vi phạm']
 
     st.markdown("### 📅 Thống kê chi tiết theo từng ngày")
-    if not df_thuc_nghi.empty:
+    st.caption("Phần này hợp nhất dữ liệu từ file chính và Google Sheet dự phòng, sau đó loại trùng trước khi thống kê.")
+    if not daily_thuc_nghi.empty:
         daily_stats = []
         daily_limit_flags = []
-        for d in sorted(filtered_df['Ngày'].dropna().unique()):
-            day_df = filtered_df[filtered_df['Ngày'] == d]
+        for d in sorted(daily_filtered_df['Ngày'].dropna().unique()):
+            day_df = daily_filtered_df[daily_filtered_df['Ngày'] == d]
             day_thuc_nghi = day_df[~day_df['Lý do nghỉ'].apply(is_excluded)]
             d_loai = day_thuc_nghi['Lý do nghỉ'].astype(str).str.strip().str.lower()
 
@@ -2252,7 +2392,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                 "❌ KHÔNG phép": count_khong_phep
             }
             if st.session_state.current_role == "admin":
-                stat_row["💰 Tổng tiền phạt"] = f"{day_df['Phạt vi phạm'].sum():,.0f} đ".replace(",", ".")
+                stat_row["💰 Tổng tiền phạt"] = f"{pd.to_numeric(day_df['Phạt vi phạm'], errors='coerce').fillna(0).sum():,.0f} đ".replace(",", ".")
 
             daily_stats.append(stat_row)
             daily_limit_flags.append({
@@ -2280,8 +2420,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         )
         st.caption("Ô nền đỏ = đã chạm hạn mức nghỉ của ngày đó (ngày thường tối đa 5 người, cuối tuần tối đa 3; Nghỉ phát sinh tối đa 2 người và không áp dụng cuối tuần).")
     else:
-        st.info("Không có dữ liệu báo nghỉ trong khoảng thời gian đã chọn.")
-
+        st.info("Không có dữ liệu báo nghỉ trong khoảng thời gian đã chọn ở cả hai nguồn.")
 
     st.markdown("---")
 

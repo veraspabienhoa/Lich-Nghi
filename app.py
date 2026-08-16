@@ -961,7 +961,8 @@ def _unexcused_ordinal_and_bonus(df_sources, ngay):
 
 def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, updated_by, df_main_source=None):
     """
-    Ghi lịch vào Sheet1 đúng A:J, last row.
+    Chỉ ghi lịch vào Google Sheet dự phòng (SHEET_DU_PHONG_ID), Sheet1, đúng A:J ở last row.
+    KHÔNG ghi lịch đăng ký mới sang file chính (SHEET_CHINH_ID).
     Trước khi ghi sẽ đọc LIVE Sheet1 để:
     - chặn trùng cùng nhân viên + ngày + loại nghỉ;
     - tính thứ tự riêng cho Nghỉ không phép / Đi trễ không phép / Về sớm không phép và tiền phạt lũy tiến.
@@ -1018,19 +1019,11 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         target_row = _next_data_row_a_to_j(sheet_dp)
         gspread_update_range(sheet_dp, f"A{target_row}:J{target_row}", [row_values], value_input_option='USER_ENTERED')
 
-        # Nơi thứ hai: chỉ ghi nếu file chính mở được như Google Sheet.
-        try:
-            sheet_chinh_lich = client.open_by_key(SHEET_CHINH_ID).worksheet("LichNghi")
-            main_row = _next_data_row_a_to_j(sheet_chinh_lich)
-            gspread_update_range(sheet_chinh_lich, f"A{main_row}:J{main_row}", [row_values], value_input_option='USER_ENTERED')
-        except Exception:
-            pass
-
         st.cache_data.clear()
         if ordinal_note:
             extra = max(0, save_penalty - float(phat_vi_pham or 0))
             return True, f"{ordinal_note}. Phạt lũy tiến cộng thêm {extra:,.0f} VNĐ; tổng phạt {save_penalty:,.0f} VNĐ."
-        return True, "Đã ghi nhận lịch nghỉ thành công!"
+        return True, "Đã ghi nhận lịch nghỉ thành công vào Google Sheet dự phòng!"
     except Exception as e:
         return False, f"Lỗi ghi dữ liệu: {e}"
 

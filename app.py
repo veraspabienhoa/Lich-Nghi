@@ -15,6 +15,8 @@ import hashlib
 import secrets
 import hmac
 import json
+import zipfile
+import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -45,6 +47,128 @@ def password_matches(input_password, stored_password):
 
 def is_locked_value(value):
     return str(value).strip().casefold() in {"1", "true", "yes", "y", "khóa", "khoa", "locked", "x"}
+
+# --- DANH SÁCH NGÂN HÀNG VIỆT NAM (VietQR, tự làm mới mỗi 24 giờ) ---
+VIETQR_BANKS_API = "https://api.vietqr.io/v2/banks"
+
+# Danh sách dự phòng khi API bên ngoài tạm thời không truy cập được.
+FALLBACK_VN_BANKS = [
+    ("Vietcombank", "Ngân hàng TMCP Ngoại thương Việt Nam"),
+    ("VietinBank", "Ngân hàng TMCP Công thương Việt Nam"),
+    ("BIDV", "Ngân hàng TMCP Đầu tư và Phát triển Việt Nam"),
+    ("Agribank", "Ngân hàng Nông nghiệp và Phát triển Nông thôn Việt Nam"),
+    ("MBBank", "Ngân hàng TMCP Quân đội"),
+    ("Techcombank", "Ngân hàng TMCP Kỹ thương Việt Nam"),
+    ("ACB", "Ngân hàng TMCP Á Châu"),
+    ("VPBank", "Ngân hàng TMCP Việt Nam Thịnh Vượng"),
+    ("TPBank", "Ngân hàng TMCP Tiên Phong"),
+    ("Sacombank", "Ngân hàng TMCP Sài Gòn Thương Tín"),
+    ("HDBank", "Ngân hàng TMCP Phát triển Thành phố Hồ Chí Minh"),
+    ("VIB", "Ngân hàng TMCP Quốc tế Việt Nam"),
+    ("SHB", "Ngân hàng TMCP Sài Gòn - Hà Nội"),
+    ("Eximbank", "Ngân hàng TMCP Xuất Nhập khẩu Việt Nam"),
+    ("MSB", "Ngân hàng TMCP Hàng Hải Việt Nam"),
+    ("OCB", "Ngân hàng TMCP Phương Đông"),
+    ("PVcomBank", "Ngân hàng TMCP Đại Chúng Việt Nam"),
+    ("LPBank", "Ngân hàng TMCP Lộc Phát Việt Nam"),
+    ("SeABank", "Ngân hàng TMCP Đông Nam Á"),
+    ("ABBANK", "Ngân hàng TMCP An Bình"),
+    ("BacABank", "Ngân hàng TMCP Bắc Á"),
+    ("NamABank", "Ngân hàng TMCP Nam Á"),
+    ("NCB", "Ngân hàng TMCP Quốc Dân"),
+    ("VietABank", "Ngân hàng TMCP Việt Á"),
+    ("VietBank", "Ngân hàng TMCP Việt Nam Thương Tín"),
+    ("BaoVietBank", "Ngân hàng TMCP Bảo Việt"),
+    ("KienLongBank", "Ngân hàng TMCP Kiên Long"),
+    ("PGBank", "Ngân hàng TMCP Thịnh vượng và Phát triển"),
+    ("SaigonBank", "Ngân hàng TMCP Sài Gòn Công Thương"),
+    ("SCB", "Ngân hàng TMCP Sài Gòn"),
+    ("COOPBANK", "Ngân hàng Hợp tác xã Việt Nam"),
+    ("ShinhanBank", "Ngân hàng TNHH MTV Shinhan Việt Nam"),
+    ("Woori", "Ngân hàng TNHH MTV Woori Việt Nam"),
+    ("HSBC", "Ngân hàng TNHH MTV HSBC (Việt Nam)"),
+    ("StandardChartered", "Ngân hàng TNHH MTV Standard Chartered Bank Việt Nam"),
+    ("PublicBank", "Ngân hàng TNHH MTV Public Việt Nam"),
+    ("CIMB", "Ngân hàng TNHH MTV CIMB Việt Nam"),
+    ("HongLeong", "Ngân hàng TNHH MTV Hong Leong Việt Nam"),
+    ("MBV", "Ngân hàng TNHH MTV Việt Nam Hiện Đại"),
+    ("Vikki", "Ngân hàng TNHH MTV Số Vikki"),
+    ("GPBank", "Ngân hàng Thương mại TNHH MTV Dầu Khí Toàn Cầu"),
+    ("CBBank", "Ngân hàng Thương mại TNHH MTV Xây dựng Việt Nam"),
+    ("VRB", "Ngân hàng Liên doanh Việt - Nga"),
+    ("IndovinaBank", "Ngân hàng TNHH Indovina"),
+    ("KBank", "Ngân hàng Đại chúng TNHH Kasikornbank"),
+    ("VBSP", "Ngân hàng Chính sách Xã hội"),
+]
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_vietnam_banks():
+    """Lấy danh sách ngân hàng từ VietQR; trả về list dict gồm label/value."""
+    try:
+        r = requests.get(VIETQR_BANKS_API, timeout=12)
+        r.raise_for_status()
+        payload = r.json()
+        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        banks = []
+        seen = set()
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            full_name = str(item.get("name", "")).replace("\n", " ").strip()
+            short_name = str(item.get("shortName", item.get("short_name", ""))).strip()
+            code = str(item.get("code", "")).strip()
+            if not full_name:
+                continue
+            # Chỉ giữ ngân hàng / chi nhánh ngân hàng / ngân hàng số, loại ví & công ty tài chính.
+            name_fold = remove_vietnamese_accents(full_name).casefold()
+            if not ("ngan hang" in name_fold or "bank" in name_fold):
+                continue
+            unique_key = (remove_vietnamese_accents(full_name).casefold(), short_name.casefold())
+            if unique_key in seen:
+                continue
+            seen.add(unique_key)
+            short_display = short_name or code
+            label = f"{short_display} — {full_name}" if short_display else full_name
+            banks.append({"label": label, "value": full_name, "short": short_display})
+        if banks:
+            return sorted(banks, key=lambda x: remove_vietnamese_accents(x["label"]).casefold())
+    except Exception:
+        pass
+
+    return [
+        {"label": f"{short} — {name}", "value": name, "short": short}
+        for short, name in FALLBACK_VN_BANKS
+    ]
+
+def bank_selectbox(label, key, current_value=""):
+    """Dropdown ngân hàng có ô gõ tìm kiếm tích hợp của Streamlit."""
+    banks = load_vietnam_banks()
+    current = str(current_value or "").strip()
+
+    # Nếu dữ liệu cũ chưa khớp tên mới từ API, vẫn giữ làm lựa chọn đầu tiên.
+    if current and not any(normalize_login_name(x["value"]) == normalize_login_name(current) for x in banks):
+        banks = [{"label": f"{current} (đang lưu)", "value": current, "short": ""}] + banks
+
+    placeholder = "-- Chọn ngân hàng --"
+    labels = [placeholder] + [x["label"] for x in banks]
+    label_to_value = {x["label"]: x["value"] for x in banks}
+    index = 0
+    if current:
+        for i, item in enumerate(banks, start=1):
+            if normalize_login_name(item["value"]) == normalize_login_name(current) or normalize_login_name(item.get("short", "")) == normalize_login_name(current):
+                index = i
+                break
+
+    selected = st.selectbox(
+        label,
+        labels,
+        index=index,
+        key=key,
+        filter_mode="contains",
+        placeholder="Gõ tên hoặc tên viết tắt ngân hàng để tìm...",
+        help="Mở danh sách rồi gõ tên ngân hàng hoặc tên viết tắt, ví dụ: VCB, Vietcombank, ACB, MB..."
+    )
+    return "" if selected == placeholder else label_to_value.get(selected, selected)
 
 def employee_registration_window(today=None):
     """Nhân viên được thao tác từ hôm nay đến hết tháng kế tiếp."""
@@ -672,14 +796,23 @@ def load_loai_nghi_from_gsheet():
     return pd.DataFrame()
 
 # --- GHI VÀ XÓA LỊCH ---
+def _next_data_row_a_to_j(sheet):
+    """Tìm dòng kế tiếp sau last row thực tế trong vùng A:J."""
+    values = sheet.get('A:J')
+    last_non_empty = 0
+    for idx, row in enumerate(values, start=1):
+        if any(str(v).strip() != "" for v in row[:10]):
+            last_non_empty = idx
+    return max(2, last_non_empty + 1)
+
 def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, role):
     """
-    Ghi lịch vào CẢ HAI nơi:
-    1) Google Sheet dự phòng - Sheet1.
-    2) File chính nếu ID SHEET_CHINH_ID là Google Sheet có worksheet LichNghi.
+    Ghi lịch vào Google Sheet dự phòng, worksheet đầu tiên (Sheet1), đúng vùng A:J.
+    Dữ liệu luôn được ghi vào dòng ngay sau last row thực tế, không dùng append_row
+    để tránh Google Sheets tự suy luận sai table range/cột bắt đầu.
 
-    Không còn nuốt lỗi nơi thứ hai. Nếu nơi thứ hai lỗi, hàm cố gắng rollback
-    dòng vừa thêm ở Sheet dự phòng và trả về False để giao diện không báo lưu đủ.
+    Sau đó hệ thống thử ghi thêm vào worksheet LichNghi của SHEET_CHINH_ID nếu ID đó
+    là Google Sheet. Việc nơi thứ hai không hỗ trợ ghi không làm mất dòng đã lưu ở Sheet1.
     """
     try:
         client = get_gspread_client()
@@ -689,43 +822,63 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         ngay_cn = get_vn_today().strftime('%d/%m/%Y')
         gio_cn = datetime.now(VN_TZ).strftime('%H:%M:%S')
         row_values = [
-            str(ngay), str(nv), str(loai_nghi).replace("🔴 ", ""), str(chi_tiet),
+            str(ngay),
+            str(nv),
+            str(loai_nghi).replace("🔴 ", ""),
+            str(chi_tiet),
             float(so_ngay) if so_ngay is not None else 0.0,
-            float(so_ngay_cong_don), float(phat_vi_pham),
-            str(ngay_cn), str(gio_cn), str(role)
+            float(so_ngay_cong_don),
+            float(phat_vi_pham),
+            str(ngay_cn),
+            str(gio_cn),
+            str(role),
         ]
 
-        # Nơi 1: Sheet dự phòng / Sheet1
+        # Nơi bắt buộc: Google Sheet dự phòng / Sheet1.
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        if len(sheet_dp.get_all_values()) == 0:
-            sheet_dp.append_row([
-                "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-                "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
-                "Giờ cập nhật", "Người cập nhật"
-            ])
-        backup_row_idx = len(sheet_dp.get_all_values()) + 1
-        sheet_dp.append_row(row_values, value_input_option='USER_ENTERED')
+        header = [
+            "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+            "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
+            "Giờ cập nhật", "Người cập nhật"
+        ]
 
-        # Nơi 2: Sheet LichNghi của file chính.
-        # Nếu ID này là file Excel/XLSB thuần trên Drive thì Google Sheets API
-        # không thể append trực tiếp; lúc đó trả lỗi rõ ràng thay vì báo thành công giả.
+        # Nếu A1:J1 chưa có header chuẩn thì chỉ bổ sung các ô header đang trống;
+        # không chèn cột và không làm lệch dữ liệu cũ.
+        current_header = sheet_dp.get('A1:J1')
+        current_header = current_header[0] if current_header else []
+        if not any(str(v).strip() for v in current_header):
+            gspread_update_range(sheet_dp, 'A1:J1', [header], value_input_option='USER_ENTERED')
+
+        target_row = _next_data_row_a_to_j(sheet_dp)
+        target_range = f"A{target_row}:J{target_row}"
+        gspread_update_range(
+            sheet_dp,
+            target_range,
+            [row_values],
+            value_input_option='USER_ENTERED'
+        )
+
+        # Nơi thứ hai: chỉ ghi nếu SHEET_CHINH_ID thực sự là Google Sheet.
+        main_note = ""
         try:
             sheet_chinh_lich = client.open_by_key(SHEET_CHINH_ID).worksheet("LichNghi")
-            sheet_chinh_lich.append_row(row_values, value_input_option='USER_ENTERED')
-        except Exception as main_err:
-            try:
-                sheet_dp.delete_rows(backup_row_idx)
-            except Exception:
-                pass
-            return False, (
-                "Không thể ghi đồng thời vào file chính / sheet LichNghi. "
-                "Dòng ở Sheet dự phòng đã được rollback. Chi tiết: " + str(main_err)
+            main_row = _next_data_row_a_to_j(sheet_chinh_lich)
+            gspread_update_range(
+                sheet_chinh_lich,
+                f"A{main_row}:J{main_row}",
+                [row_values],
+                value_input_option='USER_ENTERED'
             )
+            main_note = " Đồng thời đã ghi vào sheet LichNghi của file chính."
+        except Exception:
+            # File chính hiện có thể là XLSB/XLSM trên Drive nên gspread không ghi trực tiếp được.
+            main_note = ""
 
         st.cache_data.clear()
-        return True, "Đã ghi lịch nghỉ thành công vào CẢ HAI nơi."
+        return True, f"Đã lưu lịch nghỉ tại Sheet1, dòng {target_row}, vùng A{target_row}:J{target_row}." + main_note
     except Exception as e:
         return False, f"Lỗi ghi dữ liệu: {e}"
+
 
 def delete_backup_row(row_index_1_based):
     try:
@@ -827,15 +980,54 @@ def delete_schedule_records(original_rows):
 
 # --- HÀM TẢI FILE TỪ DRIVE ---
 def download_file_from_google_drive(id, destination):
-    URL = "https://docs.google.com/uc?export=download"
+    """Tải file nhị phân từ Google Drive, hỗ trợ trang confirm của file lớn."""
     session = requests.Session()
-    response = session.get(URL, params={'id': id}, stream=True)
-    token = next((v for k, v in response.cookies.items() if k.startswith('download_warning')), None)
-    if token:
-        response = session.get(URL, params={'id': id, 'confirm': token}, stream=True)
-    with open(destination, "wb") as f:
-        for chunk in response.iter_content(32768):
-            if chunk: f.write(chunk)
+    errors = []
+
+    # Endpoint usercontent thường ổn định hơn với file Excel nhị phân công khai.
+    urls = [
+        f"https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t",
+        f"https://drive.google.com/uc?export=download&id={id}&confirm=t",
+    ]
+
+    for url in urls:
+        try:
+            response = session.get(url, stream=True, timeout=60, allow_redirects=True)
+            response.raise_for_status()
+
+            # Một số file lớn vẫn trả trang confirm; thử lấy token từ HTML/cookie.
+            ctype = str(response.headers.get('Content-Type', '')).lower()
+            if 'text/html' in ctype:
+                html = response.text
+                token = next((v for k, v in response.cookies.items() if k.startswith('download_warning')), None)
+                if not token:
+                    m = re.search(r'confirm=([0-9A-Za-z_-]+)', html)
+                    token = m.group(1) if m else None
+                if token:
+                    response = session.get(
+                        "https://drive.google.com/uc",
+                        params={'export': 'download', 'id': id, 'confirm': token},
+                        stream=True, timeout=60, allow_redirects=True
+                    )
+                    response.raise_for_status()
+
+            with open(destination, "wb") as f:
+                for chunk in response.iter_content(1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+            if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                return destination
+        except Exception as e:
+            errors.append(str(e))
+            try:
+                if os.path.exists(destination):
+                    os.remove(destination)
+            except Exception:
+                pass
+
+    raise RuntimeError("Không tải được file Google Drive: " + " | ".join(errors[-2:]))
+
 
 def _excel_col_letter(idx):
     n = idx + 1
@@ -848,20 +1040,27 @@ def _excel_col_letter(idx):
 
 @st.cache_data(ttl=15, show_spinner=False)
 def load_bang_tour_input():
-    """Đọc sheet Input từ file Bảng Tour trên Google Drive, ưu tiên XLSB rồi XLSX."""
-    temp_file = f"temp_bangtour_{os.getpid()}.bin"
+    """Đọc sheet Input từ file Bảng Tour dạng .XLSM trên Google Drive."""
+    temp_file = f"temp_bangtour_{os.getpid()}_{int(time.time())}.xlsm"
     try:
         download_file_from_google_drive(BANG_TOUR_FILE_ID, temp_file)
-        raw = None
-        last_error = None
-        for engine in ("pyxlsb", "openpyxl"):
+
+        # XLSM là gói ZIP. Nếu không phải ZIP thì gần như chắc chắn Google Drive
+        # đã trả HTML (đăng nhập/xác nhận quyền truy cập), không phải file Excel.
+        if not zipfile.is_zipfile(temp_file):
+            preview = ""
             try:
-                raw = pd.read_excel(temp_file, sheet_name="Input", header=None, engine=engine)
-                break
-            except Exception as e:
-                last_error = e
-        if raw is None:
-            return pd.DataFrame(), f"Không đọc được sheet Input: {last_error}"
+                preview = open(temp_file, 'r', encoding='utf-8', errors='ignore').read(180)
+            except Exception:
+                pass
+            hint = " Google Drive đang trả trang HTML thay vì file XLSM." if '<html' in preview.lower() else ""
+            return pd.DataFrame(), (
+                "File tải về không phải XLSM hợp lệ." + hint +
+                " Hãy đặt quyền file thành 'Bất kỳ ai có đường liên kết' hoặc cấp quyền cho service account."
+            )
+
+        # File đã xác nhận là .xlsm nên dùng openpyxl trực tiếp; không dùng pyxlsb.
+        raw = pd.read_excel(temp_file, sheet_name="Input", header=None, engine="openpyxl")
         if raw.empty:
             return pd.DataFrame(), "Sheet Input đang trống."
 
@@ -887,12 +1086,13 @@ def load_bang_tour_input():
 
         df = raw.iloc[header_idx + 1:].copy()
         df.columns = headers
-        # Bỏ các dòng hoàn toàn rỗng nhưng giữ nguyên thứ tự tour.
         df = df.dropna(how="all").reset_index(drop=True)
         df.attrs["excel_header_row"] = header_idx + 1
         return df, ""
+    except ValueError as e:
+        return pd.DataFrame(), f"Không đọc được sheet Input trong file XLSM: {e}"
     except Exception as e:
-        return pd.DataFrame(), f"Lỗi tải Bảng Tour: {e}"
+        return pd.DataFrame(), f"Lỗi tải/đọc Bảng Tour XLSM: {e}"
     finally:
         try:
             if os.path.exists(temp_file):
@@ -1326,7 +1526,7 @@ if selected_page == "👤 Hồ sơ cá nhân" and st.session_state.current_role 
         with c2:
             in_address = st.text_input("Địa chỉ", value=curr_address)
             in_bank_account = st.text_input("Số tài khoản ngân hàng", value=curr_bank_account)
-            in_bank_name = st.text_input("Tên ngân hàng", value=curr_bank_name)
+            in_bank_name = bank_selectbox("Tên ngân hàng", key="profile_bank_name", current_value=curr_bank_name)
         if st.form_submit_button("💾 Lưu thay đổi", use_container_width=True):
             db_old_pass = str(cred_row.iloc[0]['Mật khẩu']) if not cred_row.empty else "123456"
             if not password_matches(old_pass, db_old_pass):
@@ -1401,7 +1601,7 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
             new_fn = st.text_input("Họ và tên đầy đủ")
             new_phone = st.text_input("Số điện thoại")
             new_bank_account = st.text_input("Số tài khoản ngân hàng")
-            new_bank_name = st.text_input("Tên ngân hàng")
+            new_bank_name = bank_selectbox("Tên ngân hàng", key="new_employee_bank_name", current_value="")
 
         if st.form_submit_button("Lưu Nhân Viên Mới"):
             if new_usr:
@@ -1461,7 +1661,7 @@ elif selected_page == "✏️ Sửa / Xóa nhân viên" and is_admin_letan:
                     e_email = st.text_input("Email", value=str(usr_data.get('Email', '')))
                     e_address = st.text_input("Địa chỉ", value=str(usr_data.get('Địa chỉ', '')))
                     e_bank_account = st.text_input("Số tài khoản ngân hàng", value=str(usr_data.get('Số tài khoản ngân hàng', '')).replace("'", ""))
-                    e_bank_name = st.text_input("Tên ngân hàng", value=str(usr_data.get('Tên ngân hàng', '')))
+                    e_bank_name = bank_selectbox("Tên ngân hàng", key=f"edit_bank_name_{normalize_login_name(edit_usr)}", current_value=str(usr_data.get('Tên ngân hàng', '')))
                     if st.form_submit_button("💾 Cập nhật dữ liệu", use_container_width=True):
                         ok, msg = update_user_profile(edit_usr, e_pass, e_fn, e_dob, e_phone, e_email, e_address, e_bank_account, e_bank_name)
                         (st.success if ok else st.error)(msg)

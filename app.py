@@ -15,6 +15,8 @@ import hashlib
 import secrets
 import hmac
 import json
+import zipfile
+import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -45,6 +47,128 @@ def password_matches(input_password, stored_password):
 
 def is_locked_value(value):
     return str(value).strip().casefold() in {"1", "true", "yes", "y", "khóa", "khoa", "locked", "x"}
+
+# --- DANH SÁCH NGÂN HÀNG VIỆT NAM (VietQR, tự làm mới mỗi 24 giờ) ---
+VIETQR_BANKS_API = "https://api.vietqr.io/v2/banks"
+
+# Danh sách dự phòng khi API bên ngoài tạm thời không truy cập được.
+FALLBACK_VN_BANKS = [
+    ("Vietcombank", "Ngân hàng TMCP Ngoại thương Việt Nam"),
+    ("VietinBank", "Ngân hàng TMCP Công thương Việt Nam"),
+    ("BIDV", "Ngân hàng TMCP Đầu tư và Phát triển Việt Nam"),
+    ("Agribank", "Ngân hàng Nông nghiệp và Phát triển Nông thôn Việt Nam"),
+    ("MBBank", "Ngân hàng TMCP Quân đội"),
+    ("Techcombank", "Ngân hàng TMCP Kỹ thương Việt Nam"),
+    ("ACB", "Ngân hàng TMCP Á Châu"),
+    ("VPBank", "Ngân hàng TMCP Việt Nam Thịnh Vượng"),
+    ("TPBank", "Ngân hàng TMCP Tiên Phong"),
+    ("Sacombank", "Ngân hàng TMCP Sài Gòn Thương Tín"),
+    ("HDBank", "Ngân hàng TMCP Phát triển Thành phố Hồ Chí Minh"),
+    ("VIB", "Ngân hàng TMCP Quốc tế Việt Nam"),
+    ("SHB", "Ngân hàng TMCP Sài Gòn - Hà Nội"),
+    ("Eximbank", "Ngân hàng TMCP Xuất Nhập khẩu Việt Nam"),
+    ("MSB", "Ngân hàng TMCP Hàng Hải Việt Nam"),
+    ("OCB", "Ngân hàng TMCP Phương Đông"),
+    ("PVcomBank", "Ngân hàng TMCP Đại Chúng Việt Nam"),
+    ("LPBank", "Ngân hàng TMCP Lộc Phát Việt Nam"),
+    ("SeABank", "Ngân hàng TMCP Đông Nam Á"),
+    ("ABBANK", "Ngân hàng TMCP An Bình"),
+    ("BacABank", "Ngân hàng TMCP Bắc Á"),
+    ("NamABank", "Ngân hàng TMCP Nam Á"),
+    ("NCB", "Ngân hàng TMCP Quốc Dân"),
+    ("VietABank", "Ngân hàng TMCP Việt Á"),
+    ("VietBank", "Ngân hàng TMCP Việt Nam Thương Tín"),
+    ("BaoVietBank", "Ngân hàng TMCP Bảo Việt"),
+    ("KienLongBank", "Ngân hàng TMCP Kiên Long"),
+    ("PGBank", "Ngân hàng TMCP Thịnh vượng và Phát triển"),
+    ("SaigonBank", "Ngân hàng TMCP Sài Gòn Công Thương"),
+    ("SCB", "Ngân hàng TMCP Sài Gòn"),
+    ("COOPBANK", "Ngân hàng Hợp tác xã Việt Nam"),
+    ("ShinhanBank", "Ngân hàng TNHH MTV Shinhan Việt Nam"),
+    ("Woori", "Ngân hàng TNHH MTV Woori Việt Nam"),
+    ("HSBC", "Ngân hàng TNHH MTV HSBC (Việt Nam)"),
+    ("StandardChartered", "Ngân hàng TNHH MTV Standard Chartered Bank Việt Nam"),
+    ("PublicBank", "Ngân hàng TNHH MTV Public Việt Nam"),
+    ("CIMB", "Ngân hàng TNHH MTV CIMB Việt Nam"),
+    ("HongLeong", "Ngân hàng TNHH MTV Hong Leong Việt Nam"),
+    ("MBV", "Ngân hàng TNHH MTV Việt Nam Hiện Đại"),
+    ("Vikki", "Ngân hàng TNHH MTV Số Vikki"),
+    ("GPBank", "Ngân hàng Thương mại TNHH MTV Dầu Khí Toàn Cầu"),
+    ("CBBank", "Ngân hàng Thương mại TNHH MTV Xây dựng Việt Nam"),
+    ("VRB", "Ngân hàng Liên doanh Việt - Nga"),
+    ("IndovinaBank", "Ngân hàng TNHH Indovina"),
+    ("KBank", "Ngân hàng Đại chúng TNHH Kasikornbank"),
+    ("VBSP", "Ngân hàng Chính sách Xã hội"),
+]
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_vietnam_banks():
+    """Lấy danh sách ngân hàng từ VietQR; trả về list dict gồm label/value."""
+    try:
+        r = requests.get(VIETQR_BANKS_API, timeout=12)
+        r.raise_for_status()
+        payload = r.json()
+        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        banks = []
+        seen = set()
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            full_name = str(item.get("name", "")).replace("\n", " ").strip()
+            short_name = str(item.get("shortName", item.get("short_name", ""))).strip()
+            code = str(item.get("code", "")).strip()
+            if not full_name:
+                continue
+            # Chỉ giữ ngân hàng / chi nhánh ngân hàng / ngân hàng số, loại ví & công ty tài chính.
+            name_fold = remove_vietnamese_accents(full_name).casefold()
+            if not ("ngan hang" in name_fold or "bank" in name_fold):
+                continue
+            unique_key = (remove_vietnamese_accents(full_name).casefold(), short_name.casefold())
+            if unique_key in seen:
+                continue
+            seen.add(unique_key)
+            short_display = short_name or code
+            label = f"{short_display} — {full_name}" if short_display else full_name
+            banks.append({"label": label, "value": full_name, "short": short_display})
+        if banks:
+            return sorted(banks, key=lambda x: remove_vietnamese_accents(x["label"]).casefold())
+    except Exception:
+        pass
+
+    return [
+        {"label": f"{short} — {name}", "value": name, "short": short}
+        for short, name in FALLBACK_VN_BANKS
+    ]
+
+def bank_selectbox(label, key, current_value=""):
+    """Dropdown ngân hàng có ô gõ tìm kiếm tích hợp của Streamlit."""
+    banks = load_vietnam_banks()
+    current = str(current_value or "").strip()
+
+    # Nếu dữ liệu cũ chưa khớp tên mới từ API, vẫn giữ làm lựa chọn đầu tiên.
+    if current and not any(normalize_login_name(x["value"]) == normalize_login_name(current) for x in banks):
+        banks = [{"label": f"{current} (đang lưu)", "value": current, "short": ""}] + banks
+
+    placeholder = "-- Chọn ngân hàng --"
+    labels = [placeholder] + [x["label"] for x in banks]
+    label_to_value = {x["label"]: x["value"] for x in banks}
+    index = 0
+    if current:
+        for i, item in enumerate(banks, start=1):
+            if normalize_login_name(item["value"]) == normalize_login_name(current) or normalize_login_name(item.get("short", "")) == normalize_login_name(current):
+                index = i
+                break
+
+    selected = st.selectbox(
+        label,
+        labels,
+        index=index,
+        key=key,
+        filter_mode="contains",
+        placeholder="Gõ tên hoặc tên viết tắt ngân hàng để tìm...",
+        help="Mở danh sách rồi gõ tên ngân hàng hoặc tên viết tắt, ví dụ: VCB, Vietcombank, ACB, MB..."
+    )
+    return "" if selected == placeholder else label_to_value.get(selected, selected)
 
 def employee_registration_window(today=None):
     """Nhân viên được thao tác từ hôm nay đến hết tháng kế tiếp."""
@@ -672,14 +796,23 @@ def load_loai_nghi_from_gsheet():
     return pd.DataFrame()
 
 # --- GHI VÀ XÓA LỊCH ---
-def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, role):
-    """
-    Ghi lịch vào CẢ HAI nơi:
-    1) Google Sheet dự phòng - Sheet1.
-    2) File chính nếu ID SHEET_CHINH_ID là Google Sheet có worksheet LichNghi.
+def _next_data_row_a_to_j(sheet):
+    """Tìm dòng kế tiếp sau last row thực tế trong vùng A:J."""
+    values = sheet.get('A:J')
+    last_non_empty = 0
+    for idx, row in enumerate(values, start=1):
+        if any(str(v).strip() != "" for v in row[:10]):
+            last_non_empty = idx
+    return max(2, last_non_empty + 1)
 
-    Không còn nuốt lỗi nơi thứ hai. Nếu nơi thứ hai lỗi, hàm cố gắng rollback
-    dòng vừa thêm ở Sheet dự phòng và trả về False để giao diện không báo lưu đủ.
+def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, updated_by):
+    """
+    Ghi lịch vào Google Sheet dự phòng, worksheet đầu tiên (Sheet1), đúng vùng A:J.
+    Dữ liệu luôn được ghi vào dòng ngay sau last row thực tế, không dùng append_row
+    để tránh Google Sheets tự suy luận sai table range/cột bắt đầu.
+
+    Sau đó hệ thống thử ghi thêm vào worksheet LichNghi của SHEET_CHINH_ID nếu ID đó
+    là Google Sheet. Việc nơi thứ hai không hỗ trợ ghi không làm mất dòng đã lưu ở Sheet1.
     """
     try:
         client = get_gspread_client()
@@ -689,43 +822,63 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         ngay_cn = get_vn_today().strftime('%d/%m/%Y')
         gio_cn = datetime.now(VN_TZ).strftime('%H:%M:%S')
         row_values = [
-            str(ngay), str(nv), str(loai_nghi).replace("🔴 ", ""), str(chi_tiet),
+            str(ngay),
+            str(nv),
+            str(loai_nghi).replace("🔴 ", ""),
+            str(chi_tiet),
             float(so_ngay) if so_ngay is not None else 0.0,
-            float(so_ngay_cong_don), float(phat_vi_pham),
-            str(ngay_cn), str(gio_cn), str(role)
+            float(so_ngay_cong_don),
+            float(phat_vi_pham),
+            str(ngay_cn),
+            str(gio_cn),
+            str(updated_by),
         ]
 
-        # Nơi 1: Sheet dự phòng / Sheet1
+        # Nơi bắt buộc: Google Sheet dự phòng / Sheet1.
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        if len(sheet_dp.get_all_values()) == 0:
-            sheet_dp.append_row([
-                "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-                "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
-                "Giờ cập nhật", "Người cập nhật"
-            ])
-        backup_row_idx = len(sheet_dp.get_all_values()) + 1
-        sheet_dp.append_row(row_values, value_input_option='USER_ENTERED')
+        header = [
+            "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+            "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
+            "Giờ cập nhật", "Người cập nhật"
+        ]
 
-        # Nơi 2: Sheet LichNghi của file chính.
-        # Nếu ID này là file Excel/XLSB thuần trên Drive thì Google Sheets API
-        # không thể append trực tiếp; lúc đó trả lỗi rõ ràng thay vì báo thành công giả.
+        # Nếu A1:J1 chưa có header chuẩn thì chỉ bổ sung các ô header đang trống;
+        # không chèn cột và không làm lệch dữ liệu cũ.
+        current_header = sheet_dp.get('A1:J1')
+        current_header = current_header[0] if current_header else []
+        if not any(str(v).strip() for v in current_header):
+            gspread_update_range(sheet_dp, 'A1:J1', [header], value_input_option='USER_ENTERED')
+
+        target_row = _next_data_row_a_to_j(sheet_dp)
+        target_range = f"A{target_row}:J{target_row}"
+        gspread_update_range(
+            sheet_dp,
+            target_range,
+            [row_values],
+            value_input_option='USER_ENTERED'
+        )
+
+        # Nơi thứ hai: chỉ ghi nếu SHEET_CHINH_ID thực sự là Google Sheet.
+        main_note = ""
         try:
             sheet_chinh_lich = client.open_by_key(SHEET_CHINH_ID).worksheet("LichNghi")
-            sheet_chinh_lich.append_row(row_values, value_input_option='USER_ENTERED')
-        except Exception as main_err:
-            try:
-                sheet_dp.delete_rows(backup_row_idx)
-            except Exception:
-                pass
-            return False, (
-                "Không thể ghi đồng thời vào file chính / sheet LichNghi. "
-                "Dòng ở Sheet dự phòng đã được rollback. Chi tiết: " + str(main_err)
+            main_row = _next_data_row_a_to_j(sheet_chinh_lich)
+            gspread_update_range(
+                sheet_chinh_lich,
+                f"A{main_row}:J{main_row}",
+                [row_values],
+                value_input_option='USER_ENTERED'
             )
+            main_note = " Đồng thời đã ghi vào sheet LichNghi của file chính."
+        except Exception:
+            # File chính hiện có thể là XLSB/XLSM trên Drive nên gspread không ghi trực tiếp được.
+            main_note = ""
 
         st.cache_data.clear()
-        return True, "Đã ghi lịch nghỉ thành công vào CẢ HAI nơi."
+        return True, f"Đã lưu lịch nghỉ tại Sheet1, dòng {target_row}, vùng A{target_row}:J{target_row}." + main_note
     except Exception as e:
         return False, f"Lỗi ghi dữ liệu: {e}"
+
 
 def delete_backup_row(row_index_1_based):
     try:
@@ -827,15 +980,54 @@ def delete_schedule_records(original_rows):
 
 # --- HÀM TẢI FILE TỪ DRIVE ---
 def download_file_from_google_drive(id, destination):
-    URL = "https://docs.google.com/uc?export=download"
+    """Tải file nhị phân từ Google Drive, hỗ trợ trang confirm của file lớn."""
     session = requests.Session()
-    response = session.get(URL, params={'id': id}, stream=True)
-    token = next((v for k, v in response.cookies.items() if k.startswith('download_warning')), None)
-    if token:
-        response = session.get(URL, params={'id': id, 'confirm': token}, stream=True)
-    with open(destination, "wb") as f:
-        for chunk in response.iter_content(32768):
-            if chunk: f.write(chunk)
+    errors = []
+
+    # Endpoint usercontent thường ổn định hơn với file Excel nhị phân công khai.
+    urls = [
+        f"https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t",
+        f"https://drive.google.com/uc?export=download&id={id}&confirm=t",
+    ]
+
+    for url in urls:
+        try:
+            response = session.get(url, stream=True, timeout=60, allow_redirects=True)
+            response.raise_for_status()
+
+            # Một số file lớn vẫn trả trang confirm; thử lấy token từ HTML/cookie.
+            ctype = str(response.headers.get('Content-Type', '')).lower()
+            if 'text/html' in ctype:
+                html = response.text
+                token = next((v for k, v in response.cookies.items() if k.startswith('download_warning')), None)
+                if not token:
+                    m = re.search(r'confirm=([0-9A-Za-z_-]+)', html)
+                    token = m.group(1) if m else None
+                if token:
+                    response = session.get(
+                        "https://drive.google.com/uc",
+                        params={'export': 'download', 'id': id, 'confirm': token},
+                        stream=True, timeout=60, allow_redirects=True
+                    )
+                    response.raise_for_status()
+
+            with open(destination, "wb") as f:
+                for chunk in response.iter_content(1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+            if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                return destination
+        except Exception as e:
+            errors.append(str(e))
+            try:
+                if os.path.exists(destination):
+                    os.remove(destination)
+            except Exception:
+                pass
+
+    raise RuntimeError("Không tải được file Google Drive: " + " | ".join(errors[-2:]))
+
 
 def _excel_col_letter(idx):
     n = idx + 1
@@ -848,20 +1040,27 @@ def _excel_col_letter(idx):
 
 @st.cache_data(ttl=15, show_spinner=False)
 def load_bang_tour_input():
-    """Đọc sheet Input từ file Bảng Tour trên Google Drive, ưu tiên XLSB rồi XLSX."""
-    temp_file = f"temp_bangtour_{os.getpid()}.bin"
+    """Đọc sheet Input từ file Bảng Tour dạng .XLSM trên Google Drive."""
+    temp_file = f"temp_bangtour_{os.getpid()}_{int(time.time())}.xlsm"
     try:
         download_file_from_google_drive(BANG_TOUR_FILE_ID, temp_file)
-        raw = None
-        last_error = None
-        for engine in ("pyxlsb", "openpyxl"):
+
+        # XLSM là gói ZIP. Nếu không phải ZIP thì gần như chắc chắn Google Drive
+        # đã trả HTML (đăng nhập/xác nhận quyền truy cập), không phải file Excel.
+        if not zipfile.is_zipfile(temp_file):
+            preview = ""
             try:
-                raw = pd.read_excel(temp_file, sheet_name="Input", header=None, engine=engine)
-                break
-            except Exception as e:
-                last_error = e
-        if raw is None:
-            return pd.DataFrame(), f"Không đọc được sheet Input: {last_error}"
+                preview = open(temp_file, 'r', encoding='utf-8', errors='ignore').read(180)
+            except Exception:
+                pass
+            hint = " Google Drive đang trả trang HTML thay vì file XLSM." if '<html' in preview.lower() else ""
+            return pd.DataFrame(), (
+                "File tải về không phải XLSM hợp lệ." + hint +
+                " Hãy đặt quyền file thành 'Bất kỳ ai có đường liên kết' hoặc cấp quyền cho service account."
+            )
+
+        # File đã xác nhận là .xlsm nên dùng openpyxl trực tiếp; không dùng pyxlsb.
+        raw = pd.read_excel(temp_file, sheet_name="Input", header=None, engine="openpyxl")
         if raw.empty:
             return pd.DataFrame(), "Sheet Input đang trống."
 
@@ -887,12 +1086,15 @@ def load_bang_tour_input():
 
         df = raw.iloc[header_idx + 1:].copy()
         df.columns = headers
-        # Bỏ các dòng hoàn toàn rỗng nhưng giữ nguyên thứ tự tour.
         df = df.dropna(how="all").reset_index(drop=True)
         df.attrs["excel_header_row"] = header_idx + 1
+        # Lưu vị trí cột gốc Excel để việc đổi thứ tự hiển thị không làm sai rule màu.
+        df.attrs["excel_col_index"] = {headers[i]: i for i in range(len(headers))}
         return df, ""
+    except ValueError as e:
+        return pd.DataFrame(), f"Không đọc được sheet Input trong file XLSM: {e}"
     except Exception as e:
-        return pd.DataFrame(), f"Lỗi tải Bảng Tour: {e}"
+        return pd.DataFrame(), f"Lỗi tải/đọc Bảng Tour XLSM: {e}"
     finally:
         try:
             if os.path.exists(temp_file):
@@ -916,86 +1118,149 @@ def _tour_num(v):
         return None
 
 
+def _find_tour_col(df, wanted):
+    """Tìm tên cột theo kiểu không dấu/không phân biệt hoa thường."""
+    wanted_norm = remove_vietnamese_accents(str(wanted)).casefold().strip()
+    exact = []
+    contains = []
+    for c in df.columns:
+        norm = remove_vietnamese_accents(str(c)).casefold().strip()
+        if norm == wanted_norm:
+            exact.append(c)
+        elif wanted_norm in norm:
+            contains.append(c)
+    return exact[0] if exact else (contains[0] if contains else None)
+
+
+def reorder_bang_tour_columns(df):
+    """
+    Chỉ đổi thứ tự HIỂN THỊ:
+    Tên Nhân Viên -> Trạng Thái -> Thời gian còn lại -> các cột còn lại.
+    Vị trí cột Excel gốc vẫn được giữ trong df.attrs để tô màu đúng.
+    """
+    if df.empty:
+        return df
+
+    name_col = _find_tour_col(df, "Tên nhân viên")
+    status_col = _find_tour_col(df, "Trạng thái")
+    remain_col = _find_tour_col(df, "Thời gian còn lại")
+
+    cols = list(df.columns)
+    moved = [c for c in [status_col, remain_col] if c is not None]
+    base = [c for c in cols if c not in moved]
+
+    if name_col and name_col in base:
+        pos = base.index(name_col) + 1
+        for c in reversed(moved):
+            base.insert(pos, c)
+    else:
+        # Nếu workbook đổi tên cột thì vẫn ưu tiên đưa hai cột này ra đầu.
+        base = moved + base
+
+    out = df.loc[:, base].copy()
+    out.attrs.update(df.attrs)
+    return out
+
+
 def style_bang_tour(df):
     """
-    Chuyển các Conditional Formatting chính trong VBA người dùng gửi sang Pandas Styler.
-    Mapping cột theo Excel: B, D:G, E:F, G, I, K, L, P, Q, R, T...
+    BẢNG TOUR - TÔ CẢ DÒNG GIỐNG Ô "TRẠNG THÁI".
+
+    Nguyên tắc:
+    1) Dữ liệu vẫn được đọc theo vị trí cột Excel gốc để xác định màu của ô Trạng Thái.
+    2) Sau khi xác định màu cuối cùng của ô Trạng Thái, áp dụng CHÍNH MÀU ĐÓ
+       cho toàn bộ các ô trên cùng một dòng.
+    3) Không áp thêm màu riêng cho P/Q/L/T/E:F sau đó, vì như vậy sẽ làm
+       một số ô khác màu với ô Trạng Thái và không đúng yêu cầu "cả dòng giống màu Trạng Thái".
+    4) Việc đổi thứ tự cột hiển thị không ảnh hưởng tới rule vì excel_col_index
+       vẫn giữ vị trí cột gốc của workbook Input.
     """
+    excel_map = df.attrs.get("excel_col_index", {})
+    idx_to_header = {idx: name for name, idx in excel_map.items()}
+
+    status_col = _find_tour_col(df, "Trạng thái")
+
     def row_style(row):
-        styles = [""] * len(row)
-        vals = list(row.values)
-        def get(pos):
-            return vals[pos] if pos < len(vals) else ""
-        def add(pos, css):
-            if 0 <= pos < len(styles):
-                styles[pos] = (styles[pos] + ";" + css).strip(";")
-        def add_range(a, b, css):
-            for pos in range(a, min(b + 1, len(styles))):
-                add(pos, css)
+        def original_value(pos):
+            header = idx_to_header.get(pos)
+            if header is not None and header in row.index:
+                return row[header]
+            # Fallback khi attrs bị mất: ưu tiên tìm theo tên cho cột Trạng Thái.
+            if pos == 6 and status_col is not None and status_col in row.index:
+                return row[status_col]
+            return ""
 
-        b = _tour_text(get(1))       # B Nhân viên / cách dòng
-        g = _tour_text(get(6))       # G Trạng thái
-        i_val = _tour_num(get(8))    # I
-        k_txt = _tour_text(get(10))  # K Còn lại
-        k_num = _tour_num(get(10))
-        l = _tour_text(get(11))      # L Thanh toán / SL tour tùy phiên bản
-        p = _tour_text(get(15))      # P Đi làm
-        q = _tour_text(get(16))      # Q Ca
-        r = _tour_text(get(17))      # R Break
-        t_num = _tour_num(get(19))   # T
+        # Các cột nguồn dùng trong Conditional Formatting của file Excel gốc.
+        b = _tour_text(original_value(1))       # B
+        g = _tour_text(original_value(6))       # G = Trạng Thái gốc
+        k_txt = _tour_text(original_value(10))  # K = Thời gian còn lại / giá trị điều kiện
+        k_num = _tour_num(original_value(10))
+        p = _tour_text(original_value(15))      # P
+        q = _tour_text(original_value(16))      # Q
+        r = _tour_text(original_value(17))      # R
 
-        # Rule trọng tâm D:G theo K (VBA: trắng / đỏ / vàng / xanh).
+        g_norm = remove_vietnamese_accents(g).casefold().strip()
+        b_norm = remove_vietnamese_accents(b).casefold().strip()
+        p_norm = remove_vietnamese_accents(p).casefold().strip()
+        q_norm = remove_vietnamese_accents(q).casefold().strip()
+        r_norm = remove_vietnamese_accents(r).casefold().strip()
+
+        # Mặc định giống nền trắng của ô Trạng Thái khi chưa có rule màu khác.
+        bg = "#FFFFFF"
+        fg = "#000000"
+        weight = "400"
+
+        # Rule theo K trong VBA: trống -> trắng; <=0 -> đỏ; 0<K<10 -> vàng; >=10 -> xanh.
         if k_txt == "":
-            add_range(3, 6, "background-color:#FFFFFF")
+            bg, fg, weight = "#FFFFFF", "#000000", "400"
         elif k_num is not None and k_num <= 0:
-            add_range(3, 6, "background-color:#FF0000;color:#FFFFFF;font-weight:700")
+            bg, fg, weight = "#FF0000", "#FFFFFF", "700"
         elif k_num is not None and 0 < k_num < 10:
-            add_range(3, 6, "background-color:#FFFF00;color:#000000;font-weight:700")
+            bg, fg, weight = "#FFFF00", "#000000", "700"
         elif k_num is not None and k_num >= 10:
-            add_range(3, 6, "background-color:#92D050;color:#000000")
+            bg, fg, weight = "#92D050", "#000000", "700"
 
-        # Trạng thái Dang cho: VBA có hai rule, màu xám là rule được thêm sau.
-        if remove_vietnamese_accents(g).casefold() == "dang cho":
-            add_range(3, 6, "background-color:#D9D9D9")
-            add(6, "background-color:#D9D9D9;font-weight:700")
+        # Các trạng thái có rule trực tiếp lên vùng D:G / cột Trạng Thái.
+        # Khi ô Trạng Thái đổi màu bởi rule này, cả dòng lấy cùng màu.
+        if g_norm == "dang cho":
+            bg, fg, weight = "#D9D9D9", "#000000", "700"
 
-        # Breaktime / cách dòng.
-        if r.casefold() == "breaktime":
-            add_range(3, 6, "background-color:#FCE4D6;color:#000000")
-            add(17, "background-color:#FCE4D6;color:#000000;font-weight:700")
-        if b.casefold() == "cách dòng" or remove_vietnamese_accents(b).casefold() == "cach dong":
-            for pos in range(len(styles)):
-                add(pos, "background-color:#7571C1;color:#7571C1")
+        if r_norm == "breaktime":
+            bg, fg, weight = "#FCE4D6", "#000000", "700"
 
-        # Đi làm / nghỉ phép / vào ca theo VBA.
-        p_norm = remove_vietnamese_accents(p).casefold()
-        q_norm = remove_vietnamese_accents(q).casefold()
+        # Dòng phân cách trong workbook.
+        if b_norm == "cach dong":
+            bg, fg, weight = "#C1BFD5", "#C1BFD5", "400"
+
+        # Các rule đen của ô Trạng Thái trong VBA.
         if p_norm == "di lam":
-            add(15, "background-color:#000000;color:#2F75B5;font-weight:700")
+            bg, fg, weight = "#000000", "#B5C6E7", "700"
         elif p_norm == "nghi phep":
-            add(15, "background-color:#000000;color:#D9D9D9;font-weight:700")
+            bg, fg, weight = "#000000", "#D9D9D9", "700"
+
         if q_norm in {"ca 1", "ca 2", "vao ca"}:
-            add(16, "background-color:#000000;color:#FFFFFF;font-weight:700")
+            bg, fg, weight = "#000000", "#FFFFFF", "700"
 
-        # CHO THANH TOAN ở cột L.
-        if remove_vietnamese_accents(l).casefold() == "cho thanh toan":
-            add(11, "background-color:#FFE699;color:#000000;font-weight:700")
-
-        # T < -30: nền đen, chữ xám sáng.
-        if t_num is not None and t_num < -30:
-            add(19, "background-color:#000000;color:#F2F2F2;font-weight:700")
-
-        # E:F nếu K = Xac nhan; hoặc I < -5.
-        if remove_vietnamese_accents(k_txt).casefold() == "xac nhan":
-            add_range(4, 5, "background-color:#000000;color:#FFFF00;font-weight:700")
-        if i_val is not None and i_val < -5:
-            add_range(4, 5, "background-color:#000000;color:#0070C0;font-weight:700")
-
-        return styles
+        # Một CSS duy nhất được trả về cho TẤT CẢ ô trên dòng.
+        css = (
+            f"background-color:{bg};"
+            f"color:{fg};"
+            f"font-weight:{weight};"
+            "white-space:nowrap;"
+        )
+        return [css] * len(row)
 
     styler = df.style.apply(row_style, axis=1)
     styler = styler.set_table_styles([
-        {"selector": "th", "props": [("background-color", "#f2d9e6"), ("font-weight", "700"), ("text-align", "center")]},
+        {
+            "selector": "th",
+            "props": [
+                ("background-color", "#f2d9e6"),
+                ("font-weight", "700"),
+                ("text-align", "center"),
+                ("white-space", "nowrap"),
+            ],
+        },
         {"selector": "td", "props": [("white-space", "nowrap")]},
     ])
     return styler
@@ -1173,9 +1438,8 @@ if not st.session_state.logged_in:
 is_admin_letan = st.session_state.current_role in ["admin", "letan"]
 
 PAGE_SLUGS = {
-    "📊 Thống kê nghỉ phép": "thong-ke-nghi-phep",
+    "📅 Đăng ký & Thống kê nghỉ phép": "dang-ky-thong-ke-nghi-phep",
     "🧭 Bảng Tour": "bang-tour",
-    "➕ Đăng ký lịch nghỉ": "dang-ky-lich-nghi",
     "✏️ Quản lý lịch nghỉ": "quan-ly-lich-nghi",
     "⏰ Thiết lập ca làm việc": "thiet-lap-ca",
     "👥 Danh sách nhân sự": "danh-sach-nhan-su",
@@ -1190,20 +1454,20 @@ SLUG_TO_PAGE = {v: k for k, v in PAGE_SLUGS.items()}
 
 if st.session_state.current_role == "admin":
     allowed_pages = [
-        "📊 Thống kê nghỉ phép", "🧭 Bảng Tour", "➕ Đăng ký lịch nghỉ", "✏️ Quản lý lịch nghỉ",
+        "📅 Đăng ký & Thống kê nghỉ phép", "🧭 Bảng Tour", "✏️ Quản lý lịch nghỉ",
         "⏰ Thiết lập ca làm việc", "👥 Danh sách nhân sự", "➕ Thêm nhân viên",
         "✏️ Sửa / Xóa nhân viên", "🔒 Khóa đăng nhập", "🔐 Khóa quyền đăng ký",
         "🔄 Đồng bộ dữ liệu"
     ]
 elif st.session_state.current_role == "letan":
     allowed_pages = [
-        "📊 Thống kê nghỉ phép", "🧭 Bảng Tour", "➕ Đăng ký lịch nghỉ", "✏️ Quản lý lịch nghỉ",
+        "📅 Đăng ký & Thống kê nghỉ phép", "🧭 Bảng Tour", "✏️ Quản lý lịch nghỉ",
         "⏰ Thiết lập ca làm việc", "👥 Danh sách nhân sự", "➕ Thêm nhân viên",
         "✏️ Sửa / Xóa nhân viên", "👤 Hồ sơ cá nhân"
     ]
 else:
     allowed_pages = [
-        "📊 Thống kê nghỉ phép", "🧭 Bảng Tour", "➕ Đăng ký lịch nghỉ", "✏️ Quản lý lịch nghỉ",
+        "📅 Đăng ký & Thống kê nghỉ phép", "🧭 Bảng Tour", "✏️ Quản lý lịch nghỉ",
         "👤 Hồ sơ cá nhân"
     ]
 
@@ -1326,7 +1590,7 @@ if selected_page == "👤 Hồ sơ cá nhân" and st.session_state.current_role 
         with c2:
             in_address = st.text_input("Địa chỉ", value=curr_address)
             in_bank_account = st.text_input("Số tài khoản ngân hàng", value=curr_bank_account)
-            in_bank_name = st.text_input("Tên ngân hàng", value=curr_bank_name)
+            in_bank_name = bank_selectbox("Tên ngân hàng", key="profile_bank_name", current_value=curr_bank_name)
         if st.form_submit_button("💾 Lưu thay đổi", use_container_width=True):
             db_old_pass = str(cred_row.iloc[0]['Mật khẩu']) if not cred_row.empty else "123456"
             if not password_matches(old_pass, db_old_pass):
@@ -1401,7 +1665,7 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
             new_fn = st.text_input("Họ và tên đầy đủ")
             new_phone = st.text_input("Số điện thoại")
             new_bank_account = st.text_input("Số tài khoản ngân hàng")
-            new_bank_name = st.text_input("Tên ngân hàng")
+            new_bank_name = bank_selectbox("Tên ngân hàng", key="new_employee_bank_name", current_value="")
 
         if st.form_submit_button("Lưu Nhân Viên Mới"):
             if new_usr:
@@ -1461,7 +1725,7 @@ elif selected_page == "✏️ Sửa / Xóa nhân viên" and is_admin_letan:
                     e_email = st.text_input("Email", value=str(usr_data.get('Email', '')))
                     e_address = st.text_input("Địa chỉ", value=str(usr_data.get('Địa chỉ', '')))
                     e_bank_account = st.text_input("Số tài khoản ngân hàng", value=str(usr_data.get('Số tài khoản ngân hàng', '')).replace("'", ""))
-                    e_bank_name = st.text_input("Tên ngân hàng", value=str(usr_data.get('Tên ngân hàng', '')))
+                    e_bank_name = bank_selectbox("Tên ngân hàng", key=f"edit_bank_name_{normalize_login_name(edit_usr)}", current_value=str(usr_data.get('Tên ngân hàng', '')))
                     if st.form_submit_button("💾 Cập nhật dữ liệu", use_container_width=True):
                         ok, msg = update_user_profile(edit_usr, e_pass, e_fn, e_dob, e_phone, e_email, e_address, e_bank_account, e_bank_name)
                         (st.success if ok else st.error)(msg)
@@ -1562,17 +1826,21 @@ elif selected_page == "🧭 Bảng Tour":
     elif df_tour.empty:
         st.info("Không có dữ liệu trong sheet Input.")
     else:
-        # Auto height nhưng giới hạn hợp lý nếu tour quá dài; chiều ngang cho phép cuộn trên mobile.
-        tour_height = max(260, min(42 + len(df_tour) * 35, 1200))
+        # SAU KHI lấy dữ liệu từ file: sắp lại cột hiển thị trước.
+        # Trạng Thái luôn nằm ngay sau Tên Nhân Viên; Thời gian còn lại ngay sau Trạng Thái.
+        df_tour_display = reorder_bang_tour_columns(df_tour)
+
+        # Sau đó xác định màu cuối của ô Trạng Thái và tô NGUYÊN DÒNG đúng màu đó.
+        tour_height = max(260, min(42 + len(df_tour_display) * 35, 1200))
         st.dataframe(
-            style_bang_tour(df_tour),
+            style_bang_tour(df_tour_display),
             use_container_width=True,
             hide_index=True,
             height=tour_height
         )
-        st.caption("Màu chính: K <= 0 đỏ • 0 < K < 10 vàng • K >= 10 xanh • Breaktime màu cam nhạt • Dang cho màu xám • CHO THANH TOAN màu vàng nhạt.")
+        st.caption("Bảng Tour: Tên Nhân Viên → Trạng Thái → Thời gian còn lại. Mỗi dòng được tô đồng nhất theo màu cuối cùng của ô Trạng Thái.")
 
-elif selected_page == "➕ Đăng ký lịch nghỉ":
+elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
     st.subheader("➕ Đăng ký lịch nghỉ")
     users_s = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
     users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
@@ -1851,7 +2119,7 @@ elif selected_page == "➕ Đăng ký lịch nghỉ":
                                     # GỌI HÀM LƯU LÊN GOOGLE SHEETS
                                     success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
                                         curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, chosen_loai.replace("🔴 ", ""), 
-                                        input_chitiet, val_songay, accumulated_month, val_phat, st.session_state.current_role
+                                        input_chitiet, val_songay, accumulated_month, val_phat, st.session_state.current_user
                                     )
 
                                     # KIỂM TRA NẾU LỖI THÌ BÁO VÀ DỪNG LẠI NGAY
@@ -1866,72 +2134,9 @@ elif selected_page == "➕ Đăng ký lịch nghỉ":
                                     st.cache_data.clear()
 
 
-elif selected_page == "✏️ Quản lý lịch nghỉ":
-    st.subheader("✏️ Quản lý lịch nghỉ")
-    st.markdown("### 🗑️ Xóa / Quản lý lịch nghỉ đã đăng ký")
 
-    df_backup_view = df_backup.copy()
-    if st.session_state.current_role == "nhanvien":
-        df_backup_view = df_backup_view[df_backup_view['Tên nhân viên'] == st.session_state.current_user]
-
-    if df_backup_view.empty: 
-        st.info("Chưa có lịch nghỉ nào được đăng ký.")
-    else:
-        # ẨN CỘT PHẠT VI PHẠM TRONG BẢNG QUẢN LÝ CHO NON-ADMIN NHƯNG ĐÃ QUA ĐỊNH DẠNG SẠCH
-        df_view_display = df_backup_view.copy()
-        if st.session_state.current_role != "admin" and "Phạt vi phạm" in df_view_display.columns:
-            df_view_display = df_view_display.drop(columns=["Phạt vi phạm"])
-
-        df_view_display = format_display_df(df_view_display)
-        st.dataframe(df_view_display, width="stretch", height="content", hide_index=True)
-
-        if st.session_state.current_role == "nhanvien" and system_status["lock_nv"]:
-            st.error("🔒 Tính năng xóa lịch nghỉ hiện đang bị Admin tạm khóa. Vui lòng liên hệ Admin để được hỗ trợ!")
-        else:
-            with st.form("form_delete_backup_row"):
-                col_ly_do_disp = 'Lý do nghỉ' if 'Lý do nghỉ' in df_backup_view.columns else 'Loại nghỉ'
-
-                row_options = []
-                valid_indices = []
-                for i, row in df_backup.iterrows():
-                    if st.session_state.current_role == "nhanvien" and row.get('Tên nhân viên') != st.session_state.current_user:
-                        continue
-                    row_options.append(f"Dòng {i+1}: {row.get('Ngày')} - {row.get('Tên nhân viên')} - {row.get(col_ly_do_disp, '')}")
-                    valid_indices.append((i, str(row.get('Ngày'))))
-
-                selected_row_str = st.selectbox("Chọn dòng lịch nghỉ cần xóa:", row_options, filter_mode="contains")
-
-                if st.form_submit_button("🗑️ Xóa Lịch Nghỉ Đã Chọn") and selected_row_str:
-                    sel_idx = row_options.index(selected_row_str)
-                    real_i, sel_date_str = valid_indices[sel_idx]
-
-                    try:
-                        sel_date = pd.to_datetime(sel_date_str, format='%d/%m/%Y').date()
-                    except:
-                        sel_date = get_vn_today()
-
-                    can_delete = True
-                    today = get_vn_today()
-                    if st.session_state.current_role == "nhanvien":
-                        emp_min_date, emp_max_date = employee_registration_window(today)
-                        if sel_date < emp_min_date or sel_date > emp_max_date:
-                            st.error(f"❌ Nhân viên chỉ được xóa lịch từ hôm nay đến hết {emp_max_date.strftime('%d/%m/%Y')}.")
-                            can_delete = False
-                    elif st.session_state.current_role == "letan" and sel_date < today:
-                        st.error("❌ Lỗi: Tài khoản LỄ TÂN không được xóa lịch trong **QUÁ KHỨ**. Vui lòng liên hệ Admin.")
-                        can_delete = False
-
-                    if can_delete:
-                        success_del, msg_del = delete_backup_row(real_i + 2)
-                        if success_del:
-                            st.success(f"✅ {msg_del}")
-                            st.cache_data.clear()
-                            st.rerun()
-                        else: st.error(f"❌ {msg_del}")
-
-elif selected_page == "📊 Thống kê nghỉ phép":
-    st.subheader("📊 Thống kê nghỉ phép")
     st.markdown("---")
+    st.markdown("## 📊 Thống kê nghỉ phép")
 
     # Bộ lọc thời gian & nhân viên
     col_date, col_name, col_refresh = st.columns([5, 4, 2])
@@ -2298,3 +2503,67 @@ elif selected_page == "📊 Thống kê nghỉ phép":
             st.dataframe(kp_display.style.map(highlight_khong_phep), width="stretch", height="content", hide_index=True)
 
 
+
+
+elif selected_page == "✏️ Quản lý lịch nghỉ":
+    st.subheader("✏️ Quản lý lịch nghỉ")
+    st.markdown("### 🗑️ Xóa / Quản lý lịch nghỉ đã đăng ký")
+
+    df_backup_view = df_backup.copy()
+    if st.session_state.current_role == "nhanvien":
+        df_backup_view = df_backup_view[df_backup_view['Tên nhân viên'] == st.session_state.current_user]
+
+    if df_backup_view.empty: 
+        st.info("Chưa có lịch nghỉ nào được đăng ký.")
+    else:
+        # ẨN CỘT PHẠT VI PHẠM TRONG BẢNG QUẢN LÝ CHO NON-ADMIN NHƯNG ĐÃ QUA ĐỊNH DẠNG SẠCH
+        df_view_display = df_backup_view.copy()
+        if st.session_state.current_role != "admin" and "Phạt vi phạm" in df_view_display.columns:
+            df_view_display = df_view_display.drop(columns=["Phạt vi phạm"])
+
+        df_view_display = format_display_df(df_view_display)
+        st.dataframe(df_view_display, width="stretch", height="content", hide_index=True)
+
+        if st.session_state.current_role == "nhanvien" and system_status["lock_nv"]:
+            st.error("🔒 Tính năng xóa lịch nghỉ hiện đang bị Admin tạm khóa. Vui lòng liên hệ Admin để được hỗ trợ!")
+        else:
+            with st.form("form_delete_backup_row"):
+                col_ly_do_disp = 'Lý do nghỉ' if 'Lý do nghỉ' in df_backup_view.columns else 'Loại nghỉ'
+
+                row_options = []
+                valid_indices = []
+                for i, row in df_backup.iterrows():
+                    if st.session_state.current_role == "nhanvien" and row.get('Tên nhân viên') != st.session_state.current_user:
+                        continue
+                    row_options.append(f"Dòng {i+1}: {row.get('Ngày')} - {row.get('Tên nhân viên')} - {row.get(col_ly_do_disp, '')}")
+                    valid_indices.append((i, str(row.get('Ngày'))))
+
+                selected_row_str = st.selectbox("Chọn dòng lịch nghỉ cần xóa:", row_options, filter_mode="contains")
+
+                if st.form_submit_button("🗑️ Xóa Lịch Nghỉ Đã Chọn") and selected_row_str:
+                    sel_idx = row_options.index(selected_row_str)
+                    real_i, sel_date_str = valid_indices[sel_idx]
+
+                    try:
+                        sel_date = pd.to_datetime(sel_date_str, format='%d/%m/%Y').date()
+                    except:
+                        sel_date = get_vn_today()
+
+                    can_delete = True
+                    today = get_vn_today()
+                    if st.session_state.current_role == "nhanvien":
+                        emp_min_date, emp_max_date = employee_registration_window(today)
+                        if sel_date < emp_min_date or sel_date > emp_max_date:
+                            st.error(f"❌ Nhân viên chỉ được xóa lịch từ hôm nay đến hết {emp_max_date.strftime('%d/%m/%Y')}.")
+                            can_delete = False
+                    elif st.session_state.current_role == "letan" and sel_date < today:
+                        st.error("❌ Lỗi: Tài khoản LỄ TÂN không được xóa lịch trong **QUÁ KHỨ**. Vui lòng liên hệ Admin.")
+                        can_delete = False
+
+                    if can_delete:
+                        success_del, msg_del = delete_backup_row(real_i + 2)
+                        if success_del:
+                            st.success(f"✅ {msg_del}")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else: st.error(f"❌ {msg_del}")

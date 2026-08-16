@@ -1177,6 +1177,72 @@ def _strip_generated_progressive_prefix(detail):
     return re.sub(pattern, '', s, flags=re.IGNORECASE).strip()
 
 
+def _get_existing_progressive_ordinal(original_row, all_leave_data=None):
+    """
+    Lấy đúng thứ tự Người Thứ X của bản ghi hiện hữu để GIỮ NGUYÊN khi sửa
+    mà vẫn cùng ngày + cùng nhóm vi phạm lũy tiến.
+
+    Ưu tiên:
+    1) Đọc trực tiếp "Người Thứ X" đã lưu trong cột Chi tiết.
+    2) Nếu dữ liệu cũ chưa có tiền tố này, suy ra vị trí từ chính bản ghi hiện hữu
+       trong dữ liệu 2 nguồn (không coi thao tác sửa là một lượt vi phạm mới).
+    """
+    import re
+
+    # 1. Bản ghi mới của hệ thống luôn có tiền tố này -> đây là nguồn chính xác nhất.
+    detail = str(original_row.get('Chi tiết', '') or '')
+    m = re.search(r'Người\s+Thứ\s+(\d+)', detail, flags=re.IGNORECASE)
+    if m:
+        try:
+            return max(1, int(m.group(1)))
+        except Exception:
+            pass
+
+    # 2. Tương thích dữ liệu cũ chưa ghi "Người Thứ X".
+    canonical = get_progressive_penalty_reason(original_row.get('Lý do nghỉ', ''))
+    ngay = normalize_schedule_date(original_row.get('Ngày', ''))
+    if not canonical or not ngay or all_leave_data is None or getattr(all_leave_data, 'empty', True):
+        return None
+
+    d = all_leave_data.copy()
+    if 'Ngày' not in d.columns or 'Lý do nghỉ' not in d.columns:
+        return None
+
+    d['_date_keep_ord'] = d['Ngày'].apply(normalize_schedule_date)
+    d['_reason_keep_ord'] = d['Lý do nghỉ'].astype(str).apply(get_progressive_penalty_reason)
+    same = d[(d['_date_keep_ord'] == ngay) & (d['_reason_keep_ord'] == canonical)].copy()
+    if same.empty:
+        return None
+
+    # Cố gắng tìm đúng bản ghi theo source sheet + source row.
+    src_id = str(original_row.get('__source_sheet_id', '') or '').strip()
+    src_row = original_row.get('__source_row', None)
+    if src_id and src_row not in [None, ''] and '__source_sheet_id' in same.columns and '__source_row' in same.columns:
+        try:
+            target_row = int(float(src_row))
+            same['_src_row_num'] = pd.to_numeric(same['__source_row'], errors='coerce')
+            same['_src_sheet_text'] = same['__source_sheet_id'].astype(str).str.strip()
+            # Thứ tự lịch sử theo số dòng trong nguồn; nếu có nhiều nguồn thì giữ thứ tự ổn định
+            # theo thứ tự hiện hữu trong DataFrame hợp nhất.
+            same = same.reset_index(drop=False).rename(columns={'index': '_original_index'})
+            match = same[(same['_src_sheet_text'] == src_id) & (same['_src_row_num'] == target_row)]
+            if not match.empty:
+                matched_original_index = match.iloc[0]['_original_index']
+                # Dùng thứ tự xuất hiện trong tập cùng ngày/cùng loại.
+                positions = list(same['_original_index'])
+                return positions.index(matched_original_index) + 1
+        except Exception:
+            pass
+
+    # Fallback theo khóa lịch nếu source metadata không còn.
+    target_key = schedule_key(original_row)
+    same = same.reset_index(drop=False).rename(columns={'index': '_original_index'})
+    for idx, r in same.iterrows():
+        if schedule_key(r) == target_key:
+            return int(idx) + 1
+    return None
+
+
 def recalculate_schedule_fields(original_row, edited_row, updated_by, all_leave_data=None, source_df=None):
     """
     Tự động tính lại các cột phụ thuộc khi sửa lịch:
@@ -1227,11 +1293,15 @@ def recalculate_schedule_fields(original_row, edited_row, updated_by, all_leave_
         original_reason = str(original_row.get('Lý do nghỉ', '')).replace('🔴 ', '').strip()
         original_canonical = get_progressive_penalty_reason(original_reason)
         original_date = normalize_schedule_date(original_row.get('Ngày', ''))
+
+        # QUY TẮC QUAN TRỌNG KHI SỬA:
+        # Nếu vẫn cùng NGÀY + cùng NHÓM VI PHẠM thì đây vẫn là cùng một người/lượt cũ.
+        # Tuyệt đối không đẩy Người Thứ 1 thành Người Thứ 2/3 chỉ vì bấm Sửa/Lưu lại.
         if original_canonical == progressive_reason and original_date == ngay:
-            import re
-            m = re.search(r'Người\s+Thứ\s+(\d+)', str(original_row.get('Chi tiết', '')), flags=re.IGNORECASE)
-            if m:
-                ordinal = int(m.group(1))
+            ordinal = _get_existing_progressive_ordinal(original_row, all_leave_data)
+
+        # Chỉ cấp thứ tự mới khi thực sự đổi ngày hoặc đổi sang nhóm vi phạm khác,
+        # hoặc dữ liệu lịch sử quá cũ không thể xác định thứ tự cũ.
         if ordinal is None:
             ordinal, _ = _progressive_ordinal_and_bonus(others, ngay, reason)
         extra_penalty = max(0, int(ordinal) - 2) * 100000
@@ -1324,7 +1394,7 @@ def update_schedule_record(original_row, edited_row, updated_by):
         gspread_update_range(target, f'A{row_idx}:J{row_idx}', [new_values], raw=False)
 
         st.cache_data.clear()
-        return True, "Đã cập nhật lịch nghỉ và tự động tính lại các thông tin liên quan."
+        return True, "Đã cập nhật lịch nghỉ. Nếu vẫn cùng ngày và cùng loại vi phạm, hệ thống giữ nguyên Người Thứ X cũ."
     except Exception as e:
         return False, f"Lỗi cập nhật lịch nghỉ: {e}"
 

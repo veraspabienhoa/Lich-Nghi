@@ -1081,31 +1081,240 @@ def _find_schedule_row_index(sheet, original_row):
             return idx
     return None
 
+
+def _parse_leave_number(value, default=0.0, money=False):
+    """Chuẩn hóa số lấy từ sheet LoaiNghi, hỗ trợ dấu chấm/phẩy và ký hiệu tiền."""
+    try:
+        if value is None or pd.isna(value):
+            return float(default)
+        s = str(value).strip()
+        if s.lower() in ["", "-", "nan", "none", "nat"]:
+            return float(default)
+        if money:
+            s = (s.replace('.', '').replace(',', '').replace(' ', '')
+                   .replace('đ', '').replace('Đ', '').replace('VNĐ', '').replace('VND', ''))
+        else:
+            s = s.replace(',', '.')
+        return float(s)
+    except Exception:
+        return float(default)
+
+
+def build_leave_reason_catalog(source_df=None):
+    """
+    Tạo danh mục Lý do nghỉ -> Số ngày tính / Phạt vi phạm từ sheet LoaiNghi.
+    Giữ tên hiển thị sạch, không có tiền tố biểu tượng đỏ.
+    """
+    source = source_df if source_df is not None else globals().get('df_loai_nghi', pd.DataFrame())
+    catalog = {}
+    if source is None or source.empty:
+        return catalog
+
+    for _, row in source.iterrows():
+        vals = row.tolist()
+        name = str(vals[1]).strip() if len(vals) > 1 else ""
+        if not name or name.lower() in ["nan", "none"]:
+            name = str(row.get('Lý do nghỉ', row.get('Loại nghỉ', ''))).strip()
+        name = name.replace('🔴 ', '').strip()
+        if not name or name.lower() in ["nan", "none", "loại nghỉ", "lý do nghỉ"]:
+            continue
+
+        days = _parse_leave_number(vals[4] if len(vals) > 4 else 0, 0.0, money=False)
+        penalty = _parse_leave_number(vals[5] if len(vals) > 5 else 0, 0.0, money=True)
+        catalog[normalize_leave_reason(name)] = {
+            'name': name,
+            'days': float(days),
+            'penalty': float(penalty),
+        }
+    return catalog
+
+
+def get_leave_reason_options(source_df=None, extra_values=None):
+    """Danh sách dropdown Lý do nghỉ, tự lấy từ LoaiNghi và bổ sung giá trị lịch sử đang có."""
+    catalog = build_leave_reason_catalog(source_df)
+    options = [v['name'] for v in catalog.values()]
+    if extra_values is not None:
+        for val in extra_values:
+            clean = str(val).replace('🔴 ', '').strip()
+            if clean and clean.lower() not in ['nan', 'none', 'nat']:
+                if not any(normalize_leave_reason(clean) == normalize_leave_reason(x) for x in options):
+                    options.append(clean)
+    return options
+
+
+def _exclude_original_from_leave_df(df_sources, original_row):
+    """Loại đúng bản ghi đang sửa ra khỏi tập dữ liệu dùng để tính lại."""
+    if df_sources is None or df_sources.empty:
+        return pd.DataFrame(columns=df_sources.columns if hasattr(df_sources, 'columns') else [])
+    d = df_sources.copy()
+
+    source_id = str(original_row.get('__source_sheet_id', '')).strip()
+    source_row = original_row.get('__source_row', '')
+    if source_id and source_row not in ['', None] and '__source_sheet_id' in d.columns and '__source_row' in d.columns:
+        try:
+            target_row = int(float(source_row))
+            row_num = pd.to_numeric(d['__source_row'], errors='coerce')
+            exact_mask = (d['__source_sheet_id'].astype(str).str.strip() == source_id) & (row_num == target_row)
+            if exact_mask.any():
+                return d.loc[~exact_mask].copy()
+        except Exception:
+            pass
+
+    original_key = schedule_key(original_row)
+    keep_mask = d.apply(lambda r: schedule_key(r) != original_key, axis=1)
+    return d.loc[keep_mask].copy()
+
+
+def _strip_generated_progressive_prefix(detail):
+    """Bỏ tiền tố 'Người Thứ ...' do hệ thống từng tự thêm để tránh lặp khi sửa."""
+    import re
+    s = str(detail or '').strip()
+    pattern = (
+        r'^Người\s+Thứ\s+\d+\s+'
+        r'(?:nghỉ\s+không\s+phép|đi\s+trễ\s+không\s+phép|về\s+sớm\s+không\s+phép|ra\s+sớm\s+không\s+phép)'
+        r'\s*(?:\|\s*)?'
+    )
+    return re.sub(pattern, '', s, flags=re.IGNORECASE).strip()
+
+
+def recalculate_schedule_fields(original_row, edited_row, updated_by, all_leave_data=None, source_df=None):
+    """
+    Tự động tính lại các cột phụ thuộc khi sửa lịch:
+    - Số ngày tính: theo LoaiNghi
+    - Số ngày phép cộng dồn: tổng tháng của nhân viên, loại bản ghi cũ rồi cộng giá trị mới
+    - Phạt vi phạm: theo LoaiNghi + phạt lũy tiến nếu thuộc 3 nhóm vi phạm
+    - Ngày/Giờ/Người cập nhật: theo thời điểm và tài khoản đang thao tác
+    """
+    catalog = build_leave_reason_catalog(source_df)
+    result = edited_row.copy()
+
+    ngay = normalize_schedule_date(result.get('Ngày', original_row.get('Ngày', '')))
+    nv = str(result.get('Tên nhân viên', original_row.get('Tên nhân viên', ''))).strip()
+    reason = str(result.get('Lý do nghỉ', original_row.get('Lý do nghỉ', ''))).replace('🔴 ', '').strip()
+    key = normalize_leave_reason(reason)
+    defaults = catalog.get(key)
+
+    if defaults:
+        reason = defaults['name']
+        so_ngay = float(defaults['days'])
+        base_penalty = float(defaults['penalty'])
+    else:
+        # Với dữ liệu lịch sử không còn trong LoaiNghi, giữ giá trị cũ để tránh làm mất dữ liệu.
+        so_ngay = _parse_leave_number(original_row.get('Số ngày tính', result.get('Số ngày tính', 0)), 0.0)
+        base_penalty = _parse_leave_number(original_row.get('Phạt vi phạm', result.get('Phạt vi phạm', 0)), 0.0, money=True)
+
+    others = _exclude_original_from_leave_df(all_leave_data, original_row)
+
+    # Tính số ngày phép cộng dồn trong cùng tháng/năm của đúng nhân viên.
+    dt = pd.to_datetime(ngay, errors='coerce', dayfirst=True)
+    accumulated = float(so_ngay)
+    if pd.notna(dt) and others is not None and not others.empty:
+        d = others.copy()
+        d['_dt_calc'] = pd.to_datetime(d['Ngày'], errors='coerce', dayfirst=True)
+        d['_days_calc'] = pd.to_numeric(d['Số ngày tính'], errors='coerce').fillna(0)
+        same_emp = d['Tên nhân viên'].astype(str).apply(normalize_login_name).eq(normalize_login_name(nv))
+        same_month = d['_dt_calc'].dt.month.eq(dt.month) & d['_dt_calc'].dt.year.eq(dt.year)
+        accumulated = float(d.loc[same_emp & same_month, '_days_calc'].sum()) + float(so_ngay)
+
+    # Phạt lũy tiến cho Nghỉ không phép / Đi trễ không phép / Về sớm không phép.
+    final_penalty = float(base_penalty)
+    detail = _strip_generated_progressive_prefix(result.get('Chi tiết', original_row.get('Chi tiết', '')))
+    progressive_reason = get_progressive_penalty_reason(reason)
+    if progressive_reason:
+        # Nếu chỉ sửa nội dung nhưng vẫn cùng ngày + cùng nhóm vi phạm, giữ đúng
+        # thứ tự Người Thứ đã ghi trước đó. Nếu đổi ngày/đổi loại thì tính lại thứ tự.
+        ordinal = None
+        original_reason = str(original_row.get('Lý do nghỉ', '')).replace('🔴 ', '').strip()
+        original_canonical = get_progressive_penalty_reason(original_reason)
+        original_date = normalize_schedule_date(original_row.get('Ngày', ''))
+        if original_canonical == progressive_reason and original_date == ngay:
+            import re
+            m = re.search(r'Người\s+Thứ\s+(\d+)', str(original_row.get('Chi tiết', '')), flags=re.IGNORECASE)
+            if m:
+                ordinal = int(m.group(1))
+        if ordinal is None:
+            ordinal, _ = _progressive_ordinal_and_bonus(others, ngay, reason)
+        extra_penalty = max(0, int(ordinal) - 2) * 100000
+        final_penalty += float(extra_penalty)
+        ordinal_note = f"Người Thứ {ordinal} {progressive_reason.lower()}"
+        detail = f"{ordinal_note} | {detail}" if detail else ordinal_note
+
+    now_vn = datetime.now(VN_TZ)
+    result['Ngày'] = ngay
+    result['Tên nhân viên'] = nv
+    result['Lý do nghỉ'] = reason
+    result['Chi tiết'] = detail
+    result['Số ngày tính'] = float(so_ngay)
+    result['Số ngày phép cộng dồn'] = float(accumulated)
+    result['Phạt vi phạm'] = float(final_penalty)
+    result['Ngày cập nhật'] = now_vn.strftime('%d/%m/%Y')
+    result['Giờ cập nhật'] = now_vn.strftime('%H:%M:%S')
+    result['Người cập nhật'] = str(updated_by)
+    return result
+
+
+def _load_live_two_leave_sheets(client):
+    """Đọc trực tiếp hai Google Sheet lịch nghỉ để tính/sửa bằng dữ liệu mới nhất."""
+    primary = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+    secondary = client.open_by_key(SHEET_LICH_NGHI_2_ID).get_worksheet(0)
+
+    df_primary = _live_sheet_to_leave_df(primary)
+    if not df_primary.empty:
+        df_primary['__source_sheet_id'] = SHEET_DU_PHONG_ID
+        # Gắn row sheet theo thứ tự A:J đã đọc; dùng key vẫn là lớp dự phòng chính nếu có dòng trống.
+        df_primary['__source_row'] = range(2, len(df_primary) + 2)
+
+    df_secondary = _live_sheet_to_leave_df(secondary)
+    if not df_secondary.empty:
+        df_secondary['__source_sheet_id'] = SHEET_LICH_NGHI_2_ID
+        df_secondary['__source_row'] = range(2, len(df_secondary) + 2)
+
+    return combine_leave_sources_for_daily_stats(df_secondary, df_primary)
+
 def update_schedule_record(original_row, edited_row, updated_by):
-    """Sửa đúng dòng ở Google Sheet nguồn của bản ghi đang hiển thị."""
+    """
+    Sửa đúng dòng ở Google Sheet nguồn của bản ghi đang hiển thị.
+    Các cột Số ngày tính / cộng dồn / phạt / dấu thời gian / người cập nhật
+    luôn được tính lại tự động từ LoaiNghi và dữ liệu live của cả hai Google Sheet.
+    """
     try:
         client = get_gspread_client()
         if not client:
             return False, "Chưa cấu hình quyền kết nối Google Sheets."
 
-        def num(v, fallback=0.0):
-            try:
-                if pd.isna(v) or str(v).strip() == '':
-                    return float(fallback)
-                return float(str(v).replace(',', '').strip())
-            except Exception:
-                return float(fallback)
+        # Đọc LIVE cả hai nguồn để tránh dùng cache khi tính lại hoặc kiểm tra trùng.
+        live_all = _load_live_two_leave_sheets(client)
+        recalculated = recalculate_schedule_fields(
+            original_row,
+            edited_row,
+            updated_by,
+            all_leave_data=live_all,
+            source_df=globals().get('df_loai_nghi', pd.DataFrame()),
+        )
 
-        ngay = normalize_schedule_date(edited_row.get('Ngày', original_row.get('Ngày', '')))
-        nv = str(edited_row.get('Tên nhân viên', original_row.get('Tên nhân viên', ''))).strip()
-        lydo = str(edited_row.get('Lý do nghỉ', original_row.get('Lý do nghỉ', ''))).replace('🔴 ', '').strip()
-        chitiet = str(edited_row.get('Chi tiết', original_row.get('Chi tiết', ''))).strip()
-        songay = num(edited_row.get('Số ngày tính', original_row.get('Số ngày tính', 0)), original_row.get('Số ngày tính', 0))
-        congdon = num(edited_row.get('Số ngày phép cộng dồn', original_row.get('Số ngày phép cộng dồn', 0)), original_row.get('Số ngày phép cộng dồn', 0))
-        phat = num(edited_row.get('Phạt vi phạm', original_row.get('Phạt vi phạm', 0)), original_row.get('Phạt vi phạm', 0))
-        ngay_cn = get_vn_today().strftime('%d/%m/%Y')
-        gio_cn = datetime.now(VN_TZ).strftime('%H:%M:%S')
-        new_values = [ngay, nv, lydo, chitiet, songay, congdon, phat, ngay_cn, gio_cn, str(updated_by)]
+        ngay = normalize_schedule_date(recalculated.get('Ngày', ''))
+        nv = str(recalculated.get('Tên nhân viên', '')).strip()
+        lydo = str(recalculated.get('Lý do nghỉ', '')).replace('🔴 ', '').strip()
+        if not nv or not lydo:
+            return False, "Tên nhân viên và Lý do nghỉ không được để trống."
+
+        # Không cho sửa thành một Ngày + Nhân viên + Loại nghỉ đã tồn tại ở bản ghi khác.
+        others = _exclude_original_from_leave_df(live_all, original_row)
+        if _leave_exists_in_sources(others, ngay, nv, lydo):
+            return False, f"'{nv}' đã có loại nghỉ '{lydo}' trong ngày {ngay}. Không thể tạo lịch trùng khi sửa."
+
+        new_values = [
+            ngay,
+            nv,
+            lydo,
+            str(recalculated.get('Chi tiết', '')).strip(),
+            float(recalculated.get('Số ngày tính', 0) or 0),
+            float(recalculated.get('Số ngày phép cộng dồn', 0) or 0),
+            float(recalculated.get('Phạt vi phạm', 0) or 0),
+            str(recalculated.get('Ngày cập nhật', '')),
+            str(recalculated.get('Giờ cập nhật', '')),
+            str(recalculated.get('Người cập nhật', updated_by)),
+        ]
 
         source_id = str(original_row.get('__source_sheet_id', '')).strip() or SHEET_DU_PHONG_ID
         target = client.open_by_key(source_id).get_worksheet(0)
@@ -1115,7 +1324,7 @@ def update_schedule_record(original_row, edited_row, updated_by):
         gspread_update_range(target, f'A{row_idx}:J{row_idx}', [new_values], raw=False)
 
         st.cache_data.clear()
-        return True, "Đã cập nhật lịch nghỉ đúng Google Sheet nguồn."
+        return True, "Đã cập nhật lịch nghỉ và tự động tính lại các thông tin liên quan."
     except Exception as e:
         return False, f"Lỗi cập nhật lịch nghỉ: {e}"
 
@@ -2821,10 +3030,44 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             # Admin/Lễ tân: checkbox chọn 1 hoặc nhiều dòng và sửa trực tiếp tại bảng.
             raw_detail_full = filtered_df.copy().reset_index(drop=True)
             raw_detail = raw_detail_full.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore').copy()
-            editor_df = raw_detail.copy()
-            editor_df.insert(0, "Chọn", False)
+            if 'Lý do nghỉ' in raw_detail.columns:
+                raw_detail['Lý do nghỉ'] = raw_detail['Lý do nghỉ'].astype(str).str.replace('🔴 ', '', regex=False).str.strip()
 
-            disabled_cols = [c for c in ["Ngày cập nhật", "Giờ cập nhật", "Người cập nhật", "Số ngày phép cộng dồn"] if c in editor_df.columns]
+            # Danh mục Lý do nghỉ dùng trực tiếp trong bảng sửa.
+            reason_options = get_leave_reason_options(
+                globals().get('df_loai_nghi', pd.DataFrame()),
+                raw_detail['Lý do nghỉ'].tolist() if 'Lý do nghỉ' in raw_detail.columns else []
+            )
+
+            # Seed riêng cho data_editor để khi đổi Lý do nghỉ, các cột phụ thuộc được
+            # tự tính và hiển thị lại ngay ở lần rerun kế tiếp.
+            fingerprint_parts = []
+            for _, _r in raw_detail_full.iterrows():
+                fingerprint_parts.append(
+                    f"{_r.get('__source_sheet_id','')}|{_r.get('__source_row','')}|{schedule_key(_r)}|"
+                    f"{_r.get('Ngày cập nhật','')}|{_r.get('Giờ cập nhật','')}"
+                )
+            detail_fp = "||".join(fingerprint_parts)
+            if st.session_state.get('_detail_editor_fingerprint') != detail_fp:
+                seed_df = raw_detail.copy()
+                seed_df.insert(0, "Chọn", False)
+                st.session_state['_detail_editor_seed'] = seed_df
+                st.session_state['_detail_editor_fingerprint'] = detail_fp
+                st.session_state['_detail_editor_version'] = int(st.session_state.get('_detail_editor_version', 0)) + 1
+
+            editor_df = st.session_state.get('_detail_editor_seed', raw_detail.copy()).copy()
+            if 'Chọn' not in editor_df.columns:
+                editor_df.insert(0, "Chọn", False)
+
+            # Các cột này chỉ do hệ thống tính, không cho nhập tay để tránh sai dữ liệu.
+            derived_cols = [
+                "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
+                "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
+            ]
+            disabled_cols = [c for c in derived_cols if c in editor_df.columns]
+
+            editor_version = int(st.session_state.get('_detail_editor_version', 1))
+            editor_key = f"detail_schedule_editor_v{editor_version}"
             detail_editor = st.data_editor(
                 editor_df,
                 width="stretch",
@@ -2833,13 +3076,75 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                 num_rows="fixed",
                 disabled=disabled_cols,
                 column_config={
-                    "Chọn": st.column_config.CheckboxColumn("Chọn", help="Tick 1 hoặc nhiều dòng để sửa/xóa", default=False, width="small"),
+                    "Chọn": st.column_config.CheckboxColumn(
+                        "Chọn", help="Tick 1 hoặc nhiều dòng để sửa/xóa",
+                        default=False, width="small"
+                    ),
                     "Ngày": st.column_config.DateColumn("Ngày", format="DD/MM/YYYY"),
-                    "Số ngày tính": st.column_config.NumberColumn("Số ngày tính", step=0.5),
-                    "Phạt vi phạm": st.column_config.NumberColumn("Phạt vi phạm", step=50000, format="%.0f") if "Phạt vi phạm" in editor_df.columns else None,
+                    "Lý do nghỉ": st.column_config.SelectboxColumn(
+                        "Lý do nghỉ",
+                        options=reason_options,
+                        required=True,
+                        help="Bấm vào ô để chọn Lý do nghỉ. Danh sách được tải tự động từ sheet LoaiNghi."
+                    ),
+                    "Số ngày tính": st.column_config.NumberColumn(
+                        "Số ngày tính", step=0.5, format="%.1f", disabled=True
+                    ) if "Số ngày tính" in editor_df.columns else None,
+                    "Số ngày phép cộng dồn": st.column_config.NumberColumn(
+                        "Số ngày phép cộng dồn", step=0.5, format="%.1f", disabled=True
+                    ) if "Số ngày phép cộng dồn" in editor_df.columns else None,
+                    "Phạt vi phạm": st.column_config.NumberColumn(
+                        "Phạt vi phạm", step=50000, format="%.0f", disabled=True
+                    ) if "Phạt vi phạm" in editor_df.columns else None,
+                    "Ngày cập nhật": st.column_config.TextColumn("Ngày cập nhật", disabled=True),
+                    "Giờ cập nhật": st.column_config.TextColumn("Giờ cập nhật", disabled=True),
+                    "Người cập nhật": st.column_config.TextColumn("Người cập nhật", disabled=True),
                 },
-                key="detail_schedule_editor"
+                key=editor_key
             )
+
+            # Khi Lý do nghỉ / Ngày / Nhân viên thay đổi, tự động tính lại ngay các cột phụ thuộc.
+            editor_event = st.session_state.get(editor_key, {})
+            edited_rows_event = editor_event.get('edited_rows', {}) if isinstance(editor_event, dict) else {}
+            recalc_positions = []
+            for row_pos, changes in edited_rows_event.items():
+                try:
+                    pos_int = int(row_pos)
+                except Exception:
+                    continue
+                if isinstance(changes, dict) and any(
+                    c in changes for c in ["Lý do nghỉ", "Ngày", "Tên nhân viên", "Chi tiết"]
+                ):
+                    recalc_positions.append(pos_int)
+
+            if recalc_positions:
+                recalculated_editor = detail_editor.copy()
+                # Phần Chi tiết danh sách đang dùng đúng hai Google Sheet này.
+                calculation_df = detail_all_df.copy() if 'detail_all_df' in locals() else pd.DataFrame()
+                for pos in sorted(set(recalc_positions)):
+                    if pos < 0 or pos >= len(recalculated_editor) or pos >= len(raw_detail_full):
+                        continue
+                    original_for_calc = raw_detail_full.iloc[pos].copy()
+                    edited_for_calc = recalculated_editor.drop(columns=['Chọn'], errors='ignore').iloc[pos].copy()
+                    calculated = recalculate_schedule_fields(
+                        original_for_calc,
+                        edited_for_calc,
+                        st.session_state.current_user,
+                        all_leave_data=calculation_df,
+                        source_df=globals().get('df_loai_nghi', pd.DataFrame()),
+                    )
+                    for c in [
+                        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+                        "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
+                        "Giờ cập nhật", "Người cập nhật"
+                    ]:
+                        if c in recalculated_editor.columns and c in calculated.index:
+                            recalculated_editor.at[pos, c] = calculated[c]
+
+                # Dùng key mới để data_editor nhận DataFrame đã tính lại, tránh phải bấm lần hai.
+                st.session_state['_detail_editor_seed'] = recalculated_editor
+                st.session_state['_detail_editor_version'] = editor_version + 1
+                st.rerun()
 
             selected_positions = detail_editor.index[detail_editor['Chọn'] == True].tolist()
             st.caption(f"Đã chọn {len(selected_positions)} dòng. Chỉ các dòng được tick mới được lưu thay đổi hoặc xóa.")

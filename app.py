@@ -13,6 +13,7 @@ import time
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import unicodedata
 
 # --- CẤU HÌNH MÚI GIỜ VIỆT NAM ---
 VN_TZ = timezone(timedelta(hours=7))
@@ -23,19 +24,10 @@ def get_vn_today():
 # --- CHUẨN HÓA TIẾNG VIỆT (LOẠI BỎ DẤU CHỮ HOA/THƯỜNG) ĐỂ ĐĂNG NHẬP ---
 def remove_accents(s):
     s = str(s).strip()
-    s = re.sub(r'[àáạảãâầấậẩẫăằắặẳẵ]', 'a', s)
-    s = re.sub(r'[ÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴ]', 'a', s)
-    s = re.sub(r'[èéẹẻẽêềếệểễ]', 'e', s)
-    s = re.sub(r'[ÈÉẸẺẼÊỀẾỆỂỄ]', 'e', s)
-    s = re.sub(r'[òóọỏõôồốộổỗơờớợởỡ]', 'o', s)
-    s = re.sub(r'[ÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠ]', 'o', s)
-    s = re.sub(r'[ìíịỉĩ]', 'i', s)
-    s = re.sub(r'[ÌÍỊỈĨ]', 'i', s)
-    s = re.sub(r'[ùúụủũưừứựửữ]', 'u', s)
-    s = re.sub(r'[ÙÚỤỦŨƯỪỨỰỬỮ]', 'u', s)
-    s = re.sub(r'[ỳýỵỷỹ]', 'y', s)
-    s = re.sub(r'[ỲÝỴỶỸ]', 'y', s)
-    s = re.sub(r'[Đđ]', 'd', s)
+    # Chuyển đổi Unicode chuẩn để xử lý triệt để chữ Tổ Hợp và Dựng Sẵn
+    s = unicodedata.normalize('NFKD', s).encode('ASCII', 'ignore').decode('utf-8')
+    # Xử lý riêng chữ đ/Đ vì nó không phải là dấu
+    s = s.replace('đ', 'd').replace('Đ', 'd')
     return s.lower()
 
 def normalize_name(name):
@@ -135,6 +127,21 @@ st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout
 # --- ĐIỀU HƯỚNG PAGE QUA SESSION STATE ---
 if "selected_page_nav" not in st.session_state:
     st.session_state.selected_page_nav = "📊 Tình Hình Nghỉ Phép"
+
+# --- CHẶN SỰ KIỆN PHÍM TẮT CLEAR CACHE BẰNG JAVASCRIPT ---
+components.html("""
+<script>
+    const parentDoc = window.parent.document;
+    parentDoc.addEventListener('keydown', function(event) {
+        if ((event.key === 'c' || event.key === 'C')) {
+            const tag = event.target.tagName.toLowerCase();
+            if (tag !== 'input' && tag !== 'textarea') {
+                event.stopPropagation();
+            }
+        }
+    }, true);
+</script>
+""", height=0, width=0)
 
 # --- ÉP CSS GIAO DIỆN CỐ ĐỊNH ---
 st.markdown("""
@@ -270,6 +277,7 @@ def admin_sync_gsheet_to_excel(df_gsheet, df_excel_goc):
     df_excel_merged = pd.concat([df_excel_goc.drop(columns=['Merge_Key'], errors='ignore'), new_rows], ignore_index=True)
     return df_excel_merged, True
 
+# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN ---
 @st.cache_data(ttl=30)
 def load_credentials():
     try:
@@ -280,24 +288,28 @@ def load_credentials():
             if len(rows) > 1:
                 data_list = []
                 for idx, row in enumerate(rows[1:], start=2):
-                    ten = str(row[1]).strip() if len(row) > 1 else ""
+                    # Bổ sung các cột rỗng nếu dòng bị cắt ngắn (do ô trống ở cuối dòng)
+                    while len(row) < 15: 
+                        row.append("")
+                        
+                    ten = str(row[1]).strip()
                     if ten:
                         data_list.append({
-                            'STT': row[0] if len(row) > 0 else idx - 1,
+                            'STT': row[0] if row[0].strip() else idx - 1,
                             'Tên nhân viên': ten,
-                            'Mật khẩu': str(row[2]).strip() if len(row) > 2 and str(row[2]).strip() else "123456",
-                            'Phân quyền': str(row[3]).strip().lower() if len(row) > 3 and str(row[3]).strip() else "nhanvien",
-                            'Họ và tên đầy đủ': str(row[4]).strip() if len(row) > 4 else "",
-                            'Ngày sinh': str(row[5]).strip() if len(row) > 5 else "",
-                            'Điện thoại': str(row[6]).strip() if len(row) > 6 else "",
-                            'Email': str(row[7]).strip() if len(row) > 7 else "",
-                            'Địa chỉ': str(row[8]).strip() if len(row) > 8 else "",
-                            'Phát sinh tháng': str(row[9]).strip() if len(row) > 9 else "0",
-                            'Có phép tháng': str(row[10]).strip() if len(row) > 10 else "0",
-                            'Phép năm': str(row[11]).strip() if len(row) > 11 else "0",
-                            'Ca làm việc': str(row[12]).strip() if len(row) > 12 else "",
-                            'Ngày bắt đầu ca': str(row[13]).strip() if len(row) > 13 else "",
-                            'Chu kỳ': str(row[14]).strip() if len(row) > 14 else ""
+                            'Mật khẩu': row[2].strip() if row[2].strip() else "123456",
+                            'Phân quyền': row[3].strip().lower() if row[3].strip() else "nhanvien",
+                            'Họ và tên đầy đủ': row[4].strip(),
+                            'Ngày sinh': row[5].strip(),
+                            'Điện thoại': row[6].strip(),
+                            'Email': row[7].strip(),
+                            'Địa chỉ': row[8].strip(),
+                            'Phát sinh tháng': row[9].strip() if row[9].strip() else "0",
+                            'Có phép tháng': row[10].strip() if row[10].strip() else "0",
+                            'Phép năm': row[11].strip() if row[11].strip() else "0",
+                            'Ca làm việc': row[12].strip(),
+                            'Ngày bắt đầu ca': row[13].strip(),
+                            'Chu kỳ': row[14].strip()
                         })
                 return pd.DataFrame(data_list)
     except Exception: pass
@@ -643,7 +655,7 @@ else:
 # --- GIAO DIỆN HEADER CHÍNH BÊN PHẢI (KÈM NÚT ĐIỀU HƯỚNG) ---
 st.write("")
 col_nav1, col_nav2, col_nav3, col_title, col_logout = st.columns([0.5, 0.5, 0.5, 6, 2.5]) 
-curr_idx = menu_list.index(selected_page) if selected_page in menu_list else 0
+curr_idx = menu_options.index(selected_page) if selected_page in menu_options else 0
 
 with col_nav1:
     st.markdown("<div class='nav-btn'>", unsafe_allow_html=True)
@@ -1317,7 +1329,6 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                 
                 # Check số phát sinh >= 2
                 ps_over = int(row['⚠️ PHÁT SINH']) >= 2
-                # Check tổng nghỉ (không tính đặc biệt)
                 # Tính lại bằng df_lich gốc cho chính xác
                 day_df_raw = df_lich[df_lich['Ngày'] == dt_obj.date()]
                 non_special = day_df_raw[~day_df_raw['Lý do nghỉ'].str.lower().str.contains('|'.join(special_leave_kws), na=False)]

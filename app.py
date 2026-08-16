@@ -251,11 +251,36 @@ st.markdown("""
             font-size: 16px !important;
         }
         
-        .block-container { padding-top: 1.2rem; padding-bottom: 1rem; max-width: 1500px; }
-        div[data-testid="stVerticalBlock"] > div { gap: 0.3rem !important; }
-        button { margin-top: 5px !important; min-height: 42px; }
+        .block-container { padding-top: 0.85rem; padding-bottom: 0.75rem; max-width: 1500px; }
+        div[data-testid="stVerticalBlock"] > div { gap: 0.12rem !important; }
+        div.stButton, div[data-testid="stDownloadButton"], div[data-testid="stFormSubmitButton"] { margin: 0 !important; padding: 0 !important; }
+        button { margin-top: 1px !important; min-height: 40px; padding-top: 0.32rem !important; padding-bottom: 0.32rem !important; transition: background-color .16s ease, color .16s ease, border-color .16s ease, transform .12s ease !important; }
+        div.stButton > button:hover,
+        div[data-testid="stDownloadButton"] > button:hover,
+        div[data-testid="stFormSubmitButton"] > button:hover {
+            background-color: #c27ba0 !important;
+            color: #ffffff !important;
+            border-color: #a85f86 !important;
+            transform: translateY(-1px);
+        }
         input, textarea { font-size: 16px !important; }
         [data-testid="stDataFrame"], [data-testid="stDataEditor"] { width: 100% !important; }
+
+        /* Tô nền các vị trí tiêu đề */
+        h1, h2, h3 {
+            background: #f7e8ef !important;
+            border-left: 5px solid #c27ba0 !important;
+            border-radius: 7px !important;
+            padding: 0.38rem 0.65rem !important;
+            margin-top: 0.28rem !important;
+            margin-bottom: 0.4rem !important;
+        }
+        .custom-main-title {
+            background: #f7e8ef !important;
+            border-left: 5px solid #c27ba0 !important;
+            border-radius: 7px !important;
+            padding: 0.45rem 0.7rem !important;
+        }
 
         @media (max-width: 768px) {
             .block-container {
@@ -266,7 +291,8 @@ st.markdown("""
             .custom-main-title { font-size: 24px !important; line-height: 1.25 !important; margin-bottom: 8px !important; }
             .custom-main-title > div { float: none !important; text-align: left !important; margin-top: 6px !important; }
             p, .stText, [data-testid="stMarkdownContainer"] { font-size: 15px !important; }
-            button { min-height: 44px !important; font-size: 15px !important; }
+            div[data-testid="stVerticalBlock"] > div { gap: 0.08rem !important; }
+            button { min-height: 42px !important; font-size: 15px !important; margin-top: 0 !important; padding-top: 0.25rem !important; padding-bottom: 0.25rem !important; }
             div[data-baseweb="popover"] { max-width: calc(100vw - 12px) !important; }
             [data-testid="stDataFrame"], [data-testid="stDataEditor"] { font-size: 13px !important; }
             [data-testid="stTabs"] button { white-space: nowrap !important; }
@@ -297,7 +323,8 @@ st.markdown("""
 # --- KẾT NỐI GSPREAD ---
 SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"
 SHEET_DU_PHONG_ID = "1Kz0aw-JatptAN9G7YSwZ6rJO09urOPaD-rS-18eZSY0"
-SHEET_CHINH_ID = "1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT" 
+SHEET_CHINH_ID = "1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT"
+BANG_TOUR_FILE_ID = "1yA1Oog_6R-HmDFatcku-x8s-59p2dP9R"
 
 @st.cache_resource
 def get_gspread_client():
@@ -646,37 +673,57 @@ def load_loai_nghi_from_gsheet():
 
 # --- GHI VÀ XÓA LỊCH ---
 def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, role):
+    """
+    Ghi lịch vào CẢ HAI nơi:
+    1) Google Sheet dự phòng - Sheet1.
+    2) File chính nếu ID SHEET_CHINH_ID là Google Sheet có worksheet LichNghi.
+
+    Không còn nuốt lỗi nơi thứ hai. Nếu nơi thứ hai lỗi, hàm cố gắng rollback
+    dòng vừa thêm ở Sheet dự phòng và trả về False để giao diện không báo lưu đủ.
+    """
     try:
         client = get_gspread_client()
-        if not client: return False, "Chưa cấu hình quyền kết nối Google Sheets."
-        
+        if not client:
+            return False, "Chưa cấu hình quyền kết nối Google Sheets."
+
         ngay_cn = get_vn_today().strftime('%d/%m/%Y')
         gio_cn = datetime.now(VN_TZ).strftime('%H:%M:%S')
-        
+        row_values = [
+            str(ngay), str(nv), str(loai_nghi).replace("🔴 ", ""), str(chi_tiet),
+            float(so_ngay) if so_ngay is not None else 0.0,
+            float(so_ngay_cong_don), float(phat_vi_pham),
+            str(ngay_cn), str(gio_cn), str(role)
+        ]
+
+        # Nơi 1: Sheet dự phòng / Sheet1
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
         if len(sheet_dp.get_all_values()) == 0:
-            sheet_dp.append_row(["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"])
-        
-        sheet_dp.append_row([
-            str(ngay), str(nv), str(loai_nghi).replace("🔴 ", ""), str(chi_tiet),
-            float(so_ngay) if so_ngay is not None else 0.0, 
-            float(so_ngay_cong_don), float(phat_vi_pham), 
-            str(ngay_cn), str(gio_cn), str(role)
-        ])
+            sheet_dp.append_row([
+                "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+                "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
+                "Giờ cập nhật", "Người cập nhật"
+            ])
+        backup_row_idx = len(sheet_dp.get_all_values()) + 1
+        sheet_dp.append_row(row_values, value_input_option='USER_ENTERED')
 
+        # Nơi 2: Sheet LichNghi của file chính.
+        # Nếu ID này là file Excel/XLSB thuần trên Drive thì Google Sheets API
+        # không thể append trực tiếp; lúc đó trả lỗi rõ ràng thay vì báo thành công giả.
         try:
             sheet_chinh_lich = client.open_by_key(SHEET_CHINH_ID).worksheet("LichNghi")
-            sheet_chinh_lich.append_row([
-                str(ngay), str(nv), str(loai_nghi).replace("🔴 ", ""), str(chi_tiet),
-                float(so_ngay) if so_ngay is not None else 0.0, 
-                float(so_ngay_cong_don), float(phat_vi_pham), 
-                str(ngay_cn), str(gio_cn), str(role)
-            ])
-        except Exception:
-            pass
+            sheet_chinh_lich.append_row(row_values, value_input_option='USER_ENTERED')
+        except Exception as main_err:
+            try:
+                sheet_dp.delete_rows(backup_row_idx)
+            except Exception:
+                pass
+            return False, (
+                "Không thể ghi đồng thời vào file chính / sheet LichNghi. "
+                "Dòng ở Sheet dự phòng đã được rollback. Chi tiết: " + str(main_err)
+            )
 
         st.cache_data.clear()
-        return True, "Đã ghi nhận lịch nghỉ thành công!"
+        return True, "Đã ghi lịch nghỉ thành công vào CẢ HAI nơi."
     except Exception as e:
         return False, f"Lỗi ghi dữ liệu: {e}"
 
@@ -790,6 +837,170 @@ def download_file_from_google_drive(id, destination):
         for chunk in response.iter_content(32768):
             if chunk: f.write(chunk)
 
+def _excel_col_letter(idx):
+    n = idx + 1
+    out = ""
+    while n:
+        n, rem = divmod(n - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def load_bang_tour_input():
+    """Đọc sheet Input từ file Bảng Tour trên Google Drive, ưu tiên XLSB rồi XLSX."""
+    temp_file = f"temp_bangtour_{os.getpid()}.bin"
+    try:
+        download_file_from_google_drive(BANG_TOUR_FILE_ID, temp_file)
+        raw = None
+        last_error = None
+        for engine in ("pyxlsb", "openpyxl"):
+            try:
+                raw = pd.read_excel(temp_file, sheet_name="Input", header=None, engine=engine)
+                break
+            except Exception as e:
+                last_error = e
+        if raw is None:
+            return pd.DataFrame(), f"Không đọc được sheet Input: {last_error}"
+        if raw.empty:
+            return pd.DataFrame(), "Sheet Input đang trống."
+
+        # Hệ thống Tour Vera dùng dòng 20 làm header và dữ liệu từ dòng 21.
+        header_idx = 19 if len(raw) > 19 else 0
+        # VBA người dùng gửi có rule đến cột X -> giữ tối đa A:X.
+        max_cols = min(24, raw.shape[1])
+        raw = raw.iloc[:, :max_cols]
+        header_vals = raw.iloc[header_idx].tolist()
+
+        headers = []
+        seen = {}
+        for i, v in enumerate(header_vals):
+            txt = "" if pd.isna(v) else str(v).strip()
+            if not txt or txt.lower() == "nan":
+                txt = _excel_col_letter(i)
+            if txt in seen:
+                seen[txt] += 1
+                txt = f"{txt} ({_excel_col_letter(i)})"
+            else:
+                seen[txt] = 1
+            headers.append(txt)
+
+        df = raw.iloc[header_idx + 1:].copy()
+        df.columns = headers
+        # Bỏ các dòng hoàn toàn rỗng nhưng giữ nguyên thứ tự tour.
+        df = df.dropna(how="all").reset_index(drop=True)
+        df.attrs["excel_header_row"] = header_idx + 1
+        return df, ""
+    except Exception as e:
+        return pd.DataFrame(), f"Lỗi tải Bảng Tour: {e}"
+    finally:
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+        except Exception:
+            pass
+
+
+def _tour_text(v):
+    if pd.isna(v):
+        return ""
+    return str(v).strip()
+
+
+def _tour_num(v):
+    try:
+        if pd.isna(v) or str(v).strip() == "":
+            return None
+        return float(str(v).replace(",", "").strip())
+    except Exception:
+        return None
+
+
+def style_bang_tour(df):
+    """
+    Chuyển các Conditional Formatting chính trong VBA người dùng gửi sang Pandas Styler.
+    Mapping cột theo Excel: B, D:G, E:F, G, I, K, L, P, Q, R, T...
+    """
+    def row_style(row):
+        styles = [""] * len(row)
+        vals = list(row.values)
+        def get(pos):
+            return vals[pos] if pos < len(vals) else ""
+        def add(pos, css):
+            if 0 <= pos < len(styles):
+                styles[pos] = (styles[pos] + ";" + css).strip(";")
+        def add_range(a, b, css):
+            for pos in range(a, min(b + 1, len(styles))):
+                add(pos, css)
+
+        b = _tour_text(get(1))       # B Nhân viên / cách dòng
+        g = _tour_text(get(6))       # G Trạng thái
+        i_val = _tour_num(get(8))    # I
+        k_txt = _tour_text(get(10))  # K Còn lại
+        k_num = _tour_num(get(10))
+        l = _tour_text(get(11))      # L Thanh toán / SL tour tùy phiên bản
+        p = _tour_text(get(15))      # P Đi làm
+        q = _tour_text(get(16))      # Q Ca
+        r = _tour_text(get(17))      # R Break
+        t_num = _tour_num(get(19))   # T
+
+        # Rule trọng tâm D:G theo K (VBA: trắng / đỏ / vàng / xanh).
+        if k_txt == "":
+            add_range(3, 6, "background-color:#FFFFFF")
+        elif k_num is not None and k_num <= 0:
+            add_range(3, 6, "background-color:#FF0000;color:#FFFFFF;font-weight:700")
+        elif k_num is not None and 0 < k_num < 10:
+            add_range(3, 6, "background-color:#FFFF00;color:#000000;font-weight:700")
+        elif k_num is not None and k_num >= 10:
+            add_range(3, 6, "background-color:#92D050;color:#000000")
+
+        # Trạng thái Dang cho: VBA có hai rule, màu xám là rule được thêm sau.
+        if remove_vietnamese_accents(g).casefold() == "dang cho":
+            add_range(3, 6, "background-color:#D9D9D9")
+            add(6, "background-color:#D9D9D9;font-weight:700")
+
+        # Breaktime / cách dòng.
+        if r.casefold() == "breaktime":
+            add_range(3, 6, "background-color:#FCE4D6;color:#000000")
+            add(17, "background-color:#FCE4D6;color:#000000;font-weight:700")
+        if b.casefold() == "cách dòng" or remove_vietnamese_accents(b).casefold() == "cach dong":
+            for pos in range(len(styles)):
+                add(pos, "background-color:#7571C1;color:#7571C1")
+
+        # Đi làm / nghỉ phép / vào ca theo VBA.
+        p_norm = remove_vietnamese_accents(p).casefold()
+        q_norm = remove_vietnamese_accents(q).casefold()
+        if p_norm == "di lam":
+            add(15, "background-color:#000000;color:#2F75B5;font-weight:700")
+        elif p_norm == "nghi phep":
+            add(15, "background-color:#000000;color:#D9D9D9;font-weight:700")
+        if q_norm in {"ca 1", "ca 2", "vao ca"}:
+            add(16, "background-color:#000000;color:#FFFFFF;font-weight:700")
+
+        # CHO THANH TOAN ở cột L.
+        if remove_vietnamese_accents(l).casefold() == "cho thanh toan":
+            add(11, "background-color:#FFE699;color:#000000;font-weight:700")
+
+        # T < -30: nền đen, chữ xám sáng.
+        if t_num is not None and t_num < -30:
+            add(19, "background-color:#000000;color:#F2F2F2;font-weight:700")
+
+        # E:F nếu K = Xac nhan; hoặc I < -5.
+        if remove_vietnamese_accents(k_txt).casefold() == "xac nhan":
+            add_range(4, 5, "background-color:#000000;color:#FFFF00;font-weight:700")
+        if i_val is not None and i_val < -5:
+            add_range(4, 5, "background-color:#000000;color:#0070C0;font-weight:700")
+
+        return styles
+
+    styler = df.style.apply(row_style, axis=1)
+    styler = styler.set_table_styles([
+        {"selector": "th", "props": [("background-color", "#f2d9e6"), ("font-weight", "700"), ("text-align", "center")]},
+        {"selector": "td", "props": [("white-space", "nowrap")]},
+    ])
+    return styler
+
+
 @st.cache_data(ttl=60)
 def load_lich_nghi(url):
     try:
@@ -895,6 +1106,15 @@ if not st.session_state.logged_in:
 
 if not st.session_state.logged_in:
     st.title("🔐 Đăng Nhập Hệ Thống")
+    # Trên điện thoại đưa nút Đăng nhập sang phải. Khối CSS này chỉ tồn tại ở màn hình login.
+    st.markdown("""
+    <style>
+    @media (max-width: 768px) {
+        div[data-testid="stFormSubmitButton"] { display:flex !important; justify-content:flex-end !important; }
+        div[data-testid="stFormSubmitButton"] > button { width:auto !important; min-width:145px !important; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
     with st.form("login_form"):
         username_input = st.text_input("Tên đăng nhập", autocomplete="username").strip()
         password_input = st.text_input("Mật khẩu", type="password", autocomplete="current-password")
@@ -954,6 +1174,7 @@ is_admin_letan = st.session_state.current_role in ["admin", "letan"]
 
 PAGE_SLUGS = {
     "📊 Thống kê nghỉ phép": "thong-ke-nghi-phep",
+    "🧭 Bảng Tour": "bang-tour",
     "➕ Đăng ký lịch nghỉ": "dang-ky-lich-nghi",
     "✏️ Quản lý lịch nghỉ": "quan-ly-lich-nghi",
     "⏰ Thiết lập ca làm việc": "thiet-lap-ca",
@@ -969,20 +1190,20 @@ SLUG_TO_PAGE = {v: k for k, v in PAGE_SLUGS.items()}
 
 if st.session_state.current_role == "admin":
     allowed_pages = [
-        "📊 Thống kê nghỉ phép", "➕ Đăng ký lịch nghỉ", "✏️ Quản lý lịch nghỉ",
+        "📊 Thống kê nghỉ phép", "🧭 Bảng Tour", "➕ Đăng ký lịch nghỉ", "✏️ Quản lý lịch nghỉ",
         "⏰ Thiết lập ca làm việc", "👥 Danh sách nhân sự", "➕ Thêm nhân viên",
         "✏️ Sửa / Xóa nhân viên", "🔒 Khóa đăng nhập", "🔐 Khóa quyền đăng ký",
         "🔄 Đồng bộ dữ liệu"
     ]
 elif st.session_state.current_role == "letan":
     allowed_pages = [
-        "📊 Thống kê nghỉ phép", "➕ Đăng ký lịch nghỉ", "✏️ Quản lý lịch nghỉ",
+        "📊 Thống kê nghỉ phép", "🧭 Bảng Tour", "➕ Đăng ký lịch nghỉ", "✏️ Quản lý lịch nghỉ",
         "⏰ Thiết lập ca làm việc", "👥 Danh sách nhân sự", "➕ Thêm nhân viên",
         "✏️ Sửa / Xóa nhân viên", "👤 Hồ sơ cá nhân"
     ]
 else:
     allowed_pages = [
-        "📊 Thống kê nghỉ phép", "➕ Đăng ký lịch nghỉ", "✏️ Quản lý lịch nghỉ",
+        "📊 Thống kê nghỉ phép", "🧭 Bảng Tour", "➕ Đăng ký lịch nghỉ", "✏️ Quản lý lịch nghỉ",
         "👤 Hồ sơ cá nhân"
     ]
 
@@ -1022,19 +1243,8 @@ else:
 st.write("")
 col_title, col_logout = st.columns([8, 2])
 with col_title:
-    admin_view_online = ""
-    if st.session_state.current_role == "admin" and online_users_list:
-        admin_view_online = f"<br><span style='font-size: 13px; font-weight: normal; color: #666;'>👤 Chi tiết: {', '.join(online_users_list)}</span>"
-    st.markdown(f"""
-        <div class='custom-main-title'>
-            WELCOME TO VERA SPA
-            <div style="float: right; text-align: right; margin-top: 8px;">
-                <span style="font-size: 16px; font-family: Arial; font-weight: normal; color: #28a745;">
-                    🟢 Đang trực tuyến: {online_users_count}
-                </span>
-                {admin_view_online}
-            </div>
-        </div>
+    st.markdown("""
+        <div class='custom-main-title'>WELCOME TO VERA SPA</div>
     """, unsafe_allow_html=True)
 with col_logout:
     if st.button("🚪 Đăng xuất", use_container_width=True):
@@ -1334,6 +1544,34 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and st.session_state.curre
             else:
                 st.info("Excel gốc đã có đủ dữ liệu, không có dòng mới.")
 
+elif selected_page == "🧭 Bảng Tour":
+    st.subheader("🧭 Bảng Tour")
+    st.caption("Dữ liệu lấy từ Google Drive → sheet Input. Màu được mô phỏng theo Conditional Formatting trong file VBA bạn cung cấp.")
+
+    c_refresh, c_info = st.columns([2, 8])
+    with c_refresh:
+        if st.button("🔄 Làm mới Bảng Tour", use_container_width=True):
+            load_bang_tour_input.clear()
+            st.rerun()
+    with c_info:
+        st.caption("Dữ liệu được cache tối đa 15 giây để giảm tải file Drive.")
+
+    df_tour, tour_err = load_bang_tour_input()
+    if tour_err:
+        st.error(tour_err)
+    elif df_tour.empty:
+        st.info("Không có dữ liệu trong sheet Input.")
+    else:
+        # Auto height nhưng giới hạn hợp lý nếu tour quá dài; chiều ngang cho phép cuộn trên mobile.
+        tour_height = max(260, min(42 + len(df_tour) * 35, 1200))
+        st.dataframe(
+            style_bang_tour(df_tour),
+            use_container_width=True,
+            hide_index=True,
+            height=tour_height
+        )
+        st.caption("Màu chính: K <= 0 đỏ • 0 < K < 10 vàng • K >= 10 xanh • Breaktime màu cam nhạt • Dang cho màu xám • CHO THANH TOAN màu vàng nhạt.")
+
 elif selected_page == "➕ Đăng ký lịch nghỉ":
     st.subheader("➕ Đăng ký lịch nghỉ")
     users_s = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
@@ -1439,9 +1677,23 @@ elif selected_page == "➕ Đăng ký lịch nghỉ":
                     chk_d = start_date + timedelta(days=i)
                     chk_is_we = chk_d.weekday() >= 5
                     if norm_loai_temp == "nghỉ phát sinh":
+                        # Cảnh báo NGAY khi vừa chọn Nghỉ phát sinh, chưa cần bấm Lưu.
+                        current_hour = datetime.now(VN_TZ).hour
+                        if current_hour < 9 or current_hour >= 17:
+                            early_warning = "❌ Khung giờ đăng ký 'Nghỉ phát sinh' chỉ cho phép từ 09:00 đến 17:00!"
+                            break
+                        if chk_is_we:
+                            early_warning = f"❌ Ngày {chk_d.strftime('%d/%m/%Y')} là cuối tuần, không được phép 'Nghỉ phát sinh'!"
+                            break
                         c_ps = len(df_lich[(df_lich['Ngày'] == chk_d) & (df_lich['Lý do nghỉ'].astype(str).str.strip().str.lower() == "nghỉ phát sinh")]) if not df_lich.empty else 0
                         if c_ps >= 2:
                             early_warning = f"❌ Ngày {chk_d.strftime('%d/%m/%Y')} đã đạt giới hạn 2 người 'Nghỉ phát sinh'!"
+                            break
+                        # Đồng thời kiểm tra hạn mức tổng số người nghỉ trong ngày.
+                        m_ppl = 5 if not chk_is_we else 3
+                        c_nghi = len(df_lich[(df_lich['Ngày'] == chk_d) & (df_lich['Số ngày tính'] > 0)]) if not df_lich.empty else 0
+                        if c_nghi >= m_ppl:
+                            early_warning = f"❌ Ngày {chk_d.strftime('%d/%m/%Y')} đã đủ hạn mức {m_ppl} người nghỉ trong ngày!"
                             break
                     else:
                         m_ppl = 5 if not chk_is_we else 3

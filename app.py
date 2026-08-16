@@ -432,21 +432,43 @@ st.markdown("""
         input, textarea { font-size: 16px !important; }
         [data-testid="stDataFrame"], [data-testid="stDataEditor"] { width: 100% !important; }
 
-        /* Hiệu ứng hover cho toàn bộ dropdown/select/multiselect */
-        div[data-baseweb="select"] > div {
+        /* Hiệu ứng hover cho TOÀN BỘ dropdown/select/multiselect */
+        div[data-baseweb="select"],
+        [data-testid="stSelectbox"],
+        [data-testid="stMultiSelect"] {
+            transition: transform .14s ease !important;
+        }
+        div[data-baseweb="select"] > div,
+        [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+        [data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
             transition: background-color .16s ease, border-color .16s ease, box-shadow .16s ease !important;
         }
-        div[data-baseweb="select"]:hover > div {
+        div[data-baseweb="select"]:hover > div,
+        [data-testid="stSelectbox"]:hover div[data-baseweb="select"] > div,
+        [data-testid="stMultiSelect"]:hover div[data-baseweb="select"] > div {
             background-color: #f7e8ef !important;
             border-color: #c27ba0 !important;
-            box-shadow: 0 0 0 1px #c27ba0 inset !important;
+            box-shadow: 0 0 0 1px #c27ba0 inset, 0 2px 8px rgba(194, 123, 160, .18) !important;
         }
-        div[data-baseweb="popover"] [role="option"] {
-            transition: background-color .14s ease, color .14s ease !important;
+        div[data-baseweb="select"]:hover svg,
+        [data-testid="stSelectbox"]:hover svg,
+        [data-testid="stMultiSelect"]:hover svg {
+            fill: #a85f86 !important;
+            color: #a85f86 !important;
         }
-        div[data-baseweb="popover"] [role="option"]:hover {
+        div[data-baseweb="popover"] [role="option"],
+        div[data-baseweb="menu"] [role="option"],
+        ul[role="listbox"] li,
+        ul[role="listbox"] [role="option"] {
+            transition: background-color .14s ease, color .14s ease, padding-left .14s ease !important;
+        }
+        div[data-baseweb="popover"] [role="option"]:hover,
+        div[data-baseweb="menu"] [role="option"]:hover,
+        ul[role="listbox"] li:hover,
+        ul[role="listbox"] [role="option"]:hover {
             background-color: #f3dce8 !important;
             color: #7d3159 !important;
+            padding-left: 14px !important;
         }
 
         /* Tô nền các vị trí tiêu đề */
@@ -2087,15 +2109,12 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and st.session_state.curre
 
 elif selected_page == "🧭 Bảng Tour":
     st.subheader("🧭 Bảng Tour")
-    st.caption("Dữ liệu lấy từ Google Drive → sheet Input. Màu hiển thị áp dụng theo quy tắc vận hành mới của Vera.")
 
-    c_refresh, c_info = st.columns([2, 8])
+    c_refresh, _ = st.columns([2, 8])
     with c_refresh:
         if st.button("🔄 Làm mới Bảng Tour", use_container_width=True):
             load_bang_tour_input.clear()
             st.rerun()
-    with c_info:
-        st.caption("Dữ liệu được cache tối đa 15 giây để giảm tải file Drive.")
 
     df_tour, tour_err = load_bang_tour_input()
     if tour_err:

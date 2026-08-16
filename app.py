@@ -1335,7 +1335,16 @@ def prepare_bang_tour_display(df):
         # Dùng nullable integer để cột vẫn là kiểu số nhưng các giá trị bị xóa hiển thị thành ô trống.
         out[remain_col] = pd.to_numeric(out[remain_col], errors="coerce").astype("Int64")
 
-    # Giữ chữ None nếu workbook thực sự có chuỗi "None" để CSS có thể làm nó chìm vào nền web.
+    # ẨN CÁC CHUỖI "None" / "NaN" / "NaT" TRÊN BẢNG TOUR.
+    # Giá trị thiếu thật sự (NaN / pd.NA) vẫn giữ nguyên dtype và sẽ được Styler render thành ô trống.
+    def clean_literal_empty_tour_value(v):
+        if isinstance(v, str) and v.strip().casefold() in {"none", "nan", "nat", "<na>"}:
+            return ""
+        return v
+
+    for c in out.columns:
+        out[c] = out[c].apply(clean_literal_empty_tour_value)
+
     out.attrs.update(df.attrs)
     return out
 
@@ -1464,20 +1473,14 @@ def style_bang_tour(df):
         )
         return [css] * len(row)
 
-    styler = df.style.apply(row_style, axis=1)
-
-    # Làm chữ literal None / NaN thành màu trắng như nền web để không gây rối mắt.
-    def hide_none_text(val):
-        if pd.isna(val) or str(val).strip().casefold() in {"none", "nan"}:
-            return "color:#FFFFFF !important;"
-        return ""
-    styler = styler.map(hide_none_text)
+    styler = df.style.apply(row_style, axis=1).format(na_rep="")
 
     styler = styler.set_table_styles([
         {
             "selector": "th",
             "props": [
-                ("background-color", "#f2d9e6"),
+                ("background-color", "#D9D9D9"),
+                ("color", "#000000"),
                 ("font-weight", "700"),
                 ("text-align", "center"),
                 ("white-space", "nowrap"),
@@ -2108,7 +2111,22 @@ elif selected_page == "🧭 Bảng Tour":
                 return ["background-color:#92D050;color:#000000;font-weight:700;"] * len(row)
             return [""] * len(row)
 
-        tour_stats_styled = tour_stats_df.style.apply(style_tour_stats_row, axis=1)
+        tour_stats_styled = (
+            tour_stats_df.style
+            .apply(style_tour_stats_row, axis=1)
+            .set_table_styles([
+                {
+                    "selector": "th",
+                    "props": [
+                        ("background-color", "#D9D9D9"),
+                        ("color", "#000000"),
+                        ("font-weight", "700"),
+                        ("text-align", "center"),
+                        ("white-space", "nowrap"),
+                    ],
+                }
+            ])
+        )
         st.dataframe(
             tour_stats_styled,
             use_container_width=True,

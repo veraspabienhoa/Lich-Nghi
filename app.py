@@ -166,10 +166,6 @@ st.markdown("""
         
         .block-container { padding-top: 1.5rem; padding-bottom: 1rem; }
         
-        @media (max-width: 768px) {
-            .block-container { padding-top: 1rem !important; padding-left: 0.5rem !important; padding-right: 0.5rem !important; }
-        }
-        
         div[data-testid="stVerticalBlock"] > div { gap: 0.2rem !important; }
         button { margin-top: 5px !important; }
         
@@ -180,11 +176,6 @@ st.markdown("""
             max-height: 85vh !important; 
         }
         
-        .custom-main-title {
-            font-family: 'Roboto', sans-serif !important;
-            font-size: 35px; font-weight: bold; margin-bottom: 5px; color: #333 !important;
-        }
-        
         [data-testid="stExpander"] details summary p {
             font-size: 1.3rem !important;
             font-weight: 700 !important;
@@ -192,9 +183,61 @@ st.markdown("""
             text-transform: uppercase;
         }
         
-        /* Chỉnh nút Back, Next, Home */
-        .nav-btn button {
-            background-color: #f0f2f6; border: 1px solid #ccc; font-weight: bold; width: 100%;
+        /* ========================================================= */
+        /* TỐI ƯU HÓA HIỂN THỊ TRÊN MÀN HÌNH ĐIỆN THOẠI               */
+        /* ========================================================= */
+        @media (max-width: 768px) {
+            .block-container { 
+                padding-top: 1rem !important; 
+                padding-left: 0.5rem !important; 
+                padding-right: 0.5rem !important; 
+            }
+            
+            /* Tái cấu trúc Header (Giúp title và status gọn gàng, bỏ </div>) */
+            .header-container {
+                flex-direction: column !important;
+                align-items: center !important;
+                text-align: center !important;
+                gap: 5px;
+            }
+            .header-title {
+                font-size: 24px !important;
+                margin-bottom: 5px !important;
+            }
+            .header-status {
+                text-align: center !important;
+            }
+            
+            /* Tiêu đề mục Đăng Ký thu nhỏ lại tránh chiếm diện tích */
+            [data-testid="stExpander"] details summary p {
+                font-size: 1.0rem !important;
+            }
+
+            /* ÉP CÁC NÚT ĐIỀU HƯỚNG VÀ CỘT NẰM NGANG TRÊN MOBILE */
+            div[data-testid="stHorizontalBlock"] {
+                flex-direction: row !important;
+                flex-wrap: wrap !important;
+                justify-content: center;
+                gap: 4px;
+            }
+            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                flex: 1 1 auto !important;
+                min-width: 15% !important; /* Đủ nhỏ để 3 nút 🏠⬅️➡️ nằm ngang */
+                width: auto !important;
+                padding: 0 2px !important;
+            }
+            
+            /* Thu gọn khoảng cách các nút */
+            button {
+                padding-left: 0.5rem !important;
+                padding-right: 0.5rem !important;
+            }
+            
+            /* Căn giữa thẻ thống kê metric */
+            div[data-testid="stMetric"] {
+                text-align: center;
+                padding: 5px !important;
+            }
         }
     </style>
 """, unsafe_allow_html=True)
@@ -212,7 +255,6 @@ def get_gspread_client():
         creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
         return gspread.authorize(creds)
     except Exception as e:
-        # IN RÕ LỖI ĐỂ KIỂM TRA SECRETS TRONG TRƯỜNG HỢP CHƯA CẤU HÌNH
         st.sidebar.error(f"🔴 LỖI KẾT NỐI API: Vui lòng kiểm tra lại file Secrets. Chi tiết: {e}")
         return None
 
@@ -662,55 +704,55 @@ if is_admin_letan:
 else:
     selected_page = st.session_state.selected_page_nav
 
-# --- GIAO DIỆN HEADER CHÍNH BÊN PHẢI ---
-st.write("")
-col_nav1, col_nav2, col_nav3, col_title, col_logout = st.columns([0.5, 0.5, 0.5, 6, 2.5]) 
+
+# ==========================================
+# --- GIAO DIỆN HEADER (TỐI ƯU HTML FLEXBOX TRÁNH VỠ GIAO DIỆN) ---
+# ==========================================
+admin_view_online = ""
+if st.session_state.current_role == "admin" and online_users_list:
+    admin_view_online = f"<br><span style='font-size: 13px; font-weight: normal; color: #666;'>👤 Chi tiết: {', '.join(online_users_list)}</span>"
+    
+st.markdown(f"""
+    <div class="header-container" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #eee; padding-bottom: 10px; margin-bottom: 15px;">
+        <h1 class="header-title" style="font-family: 'Roboto', sans-serif; font-size: 30px; font-weight: bold; color: #333; margin: 0;">
+            WELCOME TO VERA SPA
+        </h1>
+        <div class="header-status" style="text-align: right; font-size: 15px; color: #28a745; font-weight: bold;">
+            🟢 Đang trực tuyến: {online_users_count}
+            {admin_view_online}
+        </div>
+    </div>
+""", unsafe_allow_html=True)
+
+
+# ==========================================
+# --- THANH ĐIỀU HƯỚNG & QUẢN LÝ TÀI KHOẢN NẰM NGANG ---
+# ==========================================
 curr_idx = menu_options.index(selected_page) if selected_page in menu_options else 0
 
+# Chia cột theo tỷ lệ chuẩn để các nút tự động nằm cùng 1 hàng kể cả trên mobile nhờ CSS
+col_nav1, col_nav2, col_nav3, col_space, col_acc1, col_acc2 = st.columns([0.8, 0.8, 0.8, 2.6, 2.5, 2.5]) 
+
 with col_nav1:
-    st.markdown("<div class='nav-btn'>", unsafe_allow_html=True)
-    if st.button("🏠"): 
+    if st.button("🏠", use_container_width=True): 
         st.session_state.selected_page_nav = menu_options[0]
         st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
 with col_nav2:
-    st.markdown("<div class='nav-btn'>", unsafe_allow_html=True)
-    if st.button("⬅️"): 
+    if st.button("⬅️", use_container_width=True): 
         st.session_state.selected_page_nav = menu_options[max(0, curr_idx-1)]
         st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
 with col_nav3:
-    st.markdown("<div class='nav-btn'>", unsafe_allow_html=True)
-    if st.button("➡️"): 
+    if st.button("➡️", use_container_width=True): 
         st.session_state.selected_page_nav = menu_options[min(len(menu_options)-1, curr_idx+1)]
         st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with col_title:
-    admin_view_online = ""
-    if st.session_state.current_role == "admin" and online_users_list:
-        admin_view_online = f"<br><span style='font-size: 13px; font-weight: normal; color: #666;'>👤 Chi tiết: {', '.join(online_users_list)}</span>"
         
-    st.markdown(f"""
-        <div class='custom-main-title'>
-            WELCOME TO VERA SPA
-            <div style="float: right; text-align: right; margin-top: 8px;">
-                <span style="font-size: 16px; font-family: Arial; font-weight: normal; color: #28a745;">
-                    🟢 Đang trực tuyến: {online_users_count}
-                </span>
-                {admin_view_online}
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+with col_acc1:
+    btn_manage_account = st.button("🛠 Hồ sơ", use_container_width=True)
+with col_acc2:
+    if st.button("🚪 Đăng xuất", use_container_width=True):
+        st.session_state.logged_in = False
+        st.rerun()
 
-with col_logout:
-    c_btn1, c_btn2 = st.columns(2)
-    with c_btn1:
-        btn_manage_account = st.button("🛠 Hồ sơ Cá Nhân", use_container_width=True)
-    with c_btn2:
-        if st.button("🚪 Đăng xuất", use_container_width=True):
-            st.session_state.logged_in = False
-            st.rerun()
 
 # --- MODAL HỒ SƠ CÁ NHÂN ---
 if 'show_modal' not in st.session_state:
@@ -910,7 +952,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
             if st.session_state.current_role == "nhanvien" and is_locked:
                 st.error("🔒 Tính năng đăng ký lịch nghỉ của bạn hiện đang bị Admin tạm khóa. Vui lòng liên hệ Admin hoặc Lễ Tân để được hỗ trợ!")
             else:
-                st.info("💡 Bạn có thể thêm nhiều dòng để đăng ký cho nhiều ngày/nhiều nhân viên cùng một lúc. Bấm vào ô trống bên dưới để chọn.")
+                st.info("💡 Bạn có thể thêm nhiều dòng để đăng ký cho nhiều ngày/nhiều nhân viên cùng một lúc. Bấm vào dấu + hoặc ô trống bên dưới để nhập.")
                 
                 if is_admin_letan:
                     empty_df_input = pd.DataFrame({

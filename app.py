@@ -103,16 +103,8 @@ def get_active_users():
     return {}
 
 @st.cache_resource
-@st.cache_resource
 def get_system_status():
-    # Khai báo đầy đủ các key mặc định để tránh lỗi KeyError
-    return {
-        "lock_nv": False, 
-        "lock_login": False,
-        "locked_users_login": [], 
-        "locked_users_dk": []
-    }
-    return {"locked_users_login": [], "locked_users_dk": []}
+    return {"lock_nv": False, "lock_login": False, "locked_users_login": [], "locked_users_dk": []}
 
 active_users = get_active_users()
 system_status = get_system_status()
@@ -220,6 +212,8 @@ def get_gspread_client():
         creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
         return gspread.authorize(creds)
     except Exception as e:
+        # IN RÕ LỖI ĐỂ KIỂM TRA SECRETS TRONG TRƯỜNG HỢP CHƯA CẤU HÌNH
+        st.sidebar.error(f"🔴 LỖI KẾT NỐI API: Vui lòng kiểm tra lại file Secrets. Chi tiết: {e}")
         return None
 
 # --- ĐỒNG BỘ EXCEL SANG GOOGLE SHEETS ---
@@ -290,7 +284,6 @@ def admin_sync_gsheet_to_excel(df_gsheet, df_excel_goc):
     df_excel_merged = pd.concat([df_excel_goc.drop(columns=['Merge_Key'], errors='ignore'), new_rows], ignore_index=True)
     return df_excel_merged, True
 
-# --- HÀM TẢI MẬT KHẨU VÀ PHÂN QUYỀN ---
 @st.cache_data(ttl=30)
 def load_credentials():
     try:
@@ -538,9 +531,9 @@ with st.spinner("Đang tải dữ liệu hệ thống..."):
 df_loai_nghi = df_loai_nghi_gsheet if not df_loai_nghi_gsheet.empty else df_loai_nghi_excel
 
 if df_lich.empty or df_nv_excel.empty:
-    st.warning("Hệ thống chưa tìm thấy dữ liệu. Đang thử tải lại...")
+    st.warning("Hệ thống chưa tìm thấy dữ liệu. Có thể do chưa kết nối được Google Sheets.")
 
-# --- XỬ LÝ NÚT NHỚ MẬT KHẨU BẰNG COOKIES ---
+# --- XỬ LÝ NÚT NHỚ MẬT KHẨU ---
 cookies = st.query_params.get("saved_usr", "")
 if cookies and "username_input" not in st.session_state:
     st.session_state["username_input"] = cookies
@@ -562,11 +555,9 @@ if not st.session_state.logged_in:
             usr_norm = remove_accents(username_input)
             pwd_norm = password_input.strip()
             
-            if remember_me:
-                st.query_params["saved_usr"] = username_input
+            if remember_me: st.query_params["saved_usr"] = username_input
             else:
-                if "saved_usr" in st.query_params:
-                    del st.query_params["saved_usr"]
+                if "saved_usr" in st.query_params: del st.query_params["saved_usr"]
                     
             if usr_norm == "admin" and pwd_norm == "32531235":
                 st.session_state.logged_in = True
@@ -583,7 +574,6 @@ if not st.session_state.logged_in:
                         role = str(row.get('Phân quyền', 'nhanvien')).strip().lower()
                         real_name = str(row['Tên nhân viên']).strip()
                         
-                        # CHẶN ĐĂNG NHẬP (CÁ NHÂN & TOÀN CỤC)
                         if role in ['nhanvien', 'letan']:
                             if system_status.get("lock_login", False) or real_name in system_status.get("locked_users_login", []):
                                 st.error("❌ Đăng nhập của bạn đang bị khóa tạm thời bởi Admin!")
@@ -631,21 +621,19 @@ if is_admin_letan:
         
         all_nv_letan = df_credentials[df_credentials['Phân quyền'].isin(['nhanvien', 'letan'])]['Tên nhân viên'].tolist()
         
-        # 1. KHÓA ĐĂNG NHẬP
         locked_login = st.sidebar.multiselect("Khóa Đăng Nhập (Chọn riêng lẻ):", all_nv_letan, default=system_status.get("locked_users_login", []))
         if locked_login != system_status.get("locked_users_login", []):
             system_status["locked_users_login"] = locked_login
             st.rerun()
         
-        system_status["lock_login"] = st.sidebar.checkbox("Khóa Toàn Bộ Đăng Nhập", value=system_status.get("lock_login", False))
+        system_status["lock_login"] = st.sidebar.checkbox("Khóa Toàn Bộ Đăng Nhập (Lễ Tân/NV)", value=system_status.get("lock_login", False))
         
-        # 2. KHÓA ĐĂNG KÝ
         locked_dk = st.sidebar.multiselect("Khóa Đăng Ký (Chọn riêng lẻ):", all_nv_letan, default=system_status.get("locked_users_dk", []))
         if locked_dk != system_status.get("locked_users_dk", []):
             system_status["locked_users_dk"] = locked_dk
             st.rerun()
             
-        if system_status["lock_nv"]:
+        if system_status.get("lock_nv", False):
             st.sidebar.warning("🔴 Đang KHÓA Toàn Bộ Quyền Đăng Ký (Nhân Viên)")
             if st.sidebar.button("🔓 Mở lại Toàn Bộ Quyền ĐK", use_container_width=True):
                 system_status["lock_nv"] = False
@@ -674,7 +662,7 @@ if is_admin_letan:
 else:
     selected_page = st.session_state.selected_page_nav
 
-# --- GIAO DIỆN HEADER CHÍNH BÊN PHẢI (KÈM NÚT ĐIỀU HƯỚNG) ---
+# --- GIAO DIỆN HEADER CHÍNH BÊN PHẢI ---
 st.write("")
 col_nav1, col_nav2, col_nav3, col_title, col_logout = st.columns([0.5, 0.5, 0.5, 6, 2.5]) 
 curr_idx = menu_options.index(selected_page) if selected_page in menu_options else 0
@@ -772,13 +760,12 @@ if st.session_state.show_modal:
 
 
 # ==========================================
-# PAGE 1: ⏰ THIẾT LẬP CA LÀM VIỆC (CHỈ ADMIN/LỄ TÂN)
+# PAGE 1: ⏰ THIẾT LẬP CA LÀM VIỆC
 # ==========================================
 if selected_page == "⏰ Thiết Lập Ca Làm Việc" and is_admin_letan:
     st.subheader("Cấu Hình Phân Ca Nhân Viên")
     st.info("Chỉnh sửa trực tiếp trên bảng dưới đây để phân ca đồng loạt cho toàn bộ nhân viên.")
     
-    # SỬA LỖI EMPTY DF
     df_credentials_safe = df_credentials.fillna("")
     df_shifts = df_credentials_safe[['Tên nhân viên', 'Ca làm việc', 'Ngày bắt đầu ca', 'Chu kỳ']].copy()
     calc_height = max(len(df_shifts) * 36 + 42, 200)
@@ -788,17 +775,9 @@ if selected_page == "⏰ Thiết Lập Ca Làm Việc" and is_admin_letan:
         height=calc_height,
         column_config={
             "Tên nhân viên": st.column_config.TextColumn("Tên nhân viên", disabled=True),
-            "Ca làm việc": st.column_config.SelectboxColumn(
-                "Ca làm việc",
-                options=["Ca 1 (10:00 - 23:00)", "Ca 2 (13:00 - 00:00)", "Cố định Ca 1 (Không đổi)", "Cố định Ca 2 (Không đổi)"],
-                width="large"
-            ),
+            "Ca làm việc": st.column_config.SelectboxColumn("Ca làm việc", options=["Ca 1 (10:00 - 23:00)", "Ca 2 (13:00 - 00:00)", "Cố định Ca 1 (Không đổi)", "Cố định Ca 2 (Không đổi)"], width="large"),
             "Ngày bắt đầu ca": st.column_config.TextColumn("Ngày bắt đầu (DD/MM/YYYY)"),
-            "Chu kỳ": st.column_config.SelectboxColumn(
-                "Chu kỳ luân phiên",
-                options=["Luân phiên (14 ngày)", "Theo chu kỳ Tháng", "Cố định (Không đổi)"],
-                width="medium"
-            )
+            "Chu kỳ": st.column_config.SelectboxColumn("Chu kỳ luân phiên", options=["Luân phiên (14 ngày)", "Theo chu kỳ Tháng", "Cố định (Không đổi)"], width="medium")
         },
         hide_index=True,
         use_container_width=True
@@ -896,6 +875,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
     
     # Lấy list loại nghỉ chuẩn cho Editable Table
     list_loai_nghi_edit = []
+    loai_nghi_dict = {}
     if not df_loai_nghi.empty:
         for idx, row in df_loai_nghi.iterrows():
             row_vals = row.tolist()
@@ -906,8 +886,16 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                     if st.session_state.current_role.lower() not in dk_role: continue
                 if "không phép" in l_name.lower(): l_name = f"🔴 {l_name}"
                 list_loai_nghi_edit.append(l_name)
+                
+                try: s_ngay = float(str(row_vals[4]).replace(',', '').strip()) if len(row_vals) > 4 and str(row_vals[4]).strip() else 0.0
+                except: s_ngay = 0.0
+                try: p_val = float(str(row_vals[5] if len(row_vals)>5 else "0").replace('.', '').replace(',', '').replace(' ', '').replace('đ', '').replace('VNĐ', '').replace('VND', ''))
+                except: p_val = 0.0
+                loai_nghi_dict[l_name.lower().replace("🔴 ", "")] = [s_ngay, p_val]
+                
     if not list_loai_nghi_edit:
         list_loai_nghi_edit = ["Nghỉ phép", "🔴 Nghỉ không phép", "Nghỉ phát sinh", "🔴 Đi trễ không phép"]
+        loai_nghi_dict = {l.lower().replace("🔴 ", ""): [0.0, 0.0] for l in list_loai_nghi_edit}
 
     with st.expander("📝 ĐĂNG KÝ - THAY ĐỔI LỊCH NGHỈ HÀNG LOẠT", expanded=False):
         tabs = st.tabs(["➕ Nhập lịch nghỉ nhiều ngày/nhiều người", "✏️ Quản lý / Xóa lịch đã đăng ký"])
@@ -922,7 +910,7 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
             if st.session_state.current_role == "nhanvien" and is_locked:
                 st.error("🔒 Tính năng đăng ký lịch nghỉ của bạn hiện đang bị Admin tạm khóa. Vui lòng liên hệ Admin hoặc Lễ Tân để được hỗ trợ!")
             else:
-                st.info("💡 Bạn có thể thêm nhiều dòng để đăng ký cho nhiều ngày/nhiều nhân viên cùng một lúc. Bấm vào ô bất kỳ trong bảng để chọn.")
+                st.info("💡 Bạn có thể thêm nhiều dòng để đăng ký cho nhiều ngày/nhiều nhân viên cùng một lúc. Bấm vào ô trống bên dưới để chọn.")
                 
                 if is_admin_letan:
                     empty_df_input = pd.DataFrame({
@@ -941,9 +929,9 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                             "Ngày": st.column_config.DateColumn("Ngày (Bắt buộc)", default=get_vn_today()),
                             "Tên nhân viên": st.column_config.SelectboxColumn("Nhân viên (Bắt buộc)", options=all_users),
                             "Lý do nghỉ": st.column_config.SelectboxColumn("Lý do nghỉ (Bắt buộc)", options=list_loai_nghi_edit),
-                            "Chi tiết / Ghi chú": st.column_config.TextColumn("Ghi chú (Bắt buộc nếu Vi phạm/Khác)"),
-                            "Số ngày tính": st.column_config.NumberColumn("Số ngày tính", default=0.0, step=0.5),
-                            "Mức phạt (VNĐ)": st.column_config.NumberColumn("Mức phạt (VNĐ)", default=0.0, step=50000.0)
+                            "Chi tiết / Ghi chú": st.column_config.TextColumn("Ghi chú (Bắt buộc nếu Khác/Lỗi)"),
+                            "Số ngày tính": st.column_config.NumberColumn("Số ngày tính (Để 0 tự tính)", default=0.0, step=0.5),
+                            "Mức phạt (VNĐ)": st.column_config.NumberColumn("Mức phạt (Để 0 tự tính)", default=0.0, step=50000.0)
                         },
                         hide_index=True,
                         use_container_width=True
@@ -962,8 +950,8 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                         column_config={
                             "Ngày": st.column_config.DateColumn("Ngày (Bắt buộc)", default=get_vn_today()),
                             "Lý do nghỉ": st.column_config.SelectboxColumn("Lý do nghỉ (Bắt buộc)", options=list_loai_nghi_edit),
-                            "Chi tiết / Ghi chú": st.column_config.TextColumn("Ghi chú (Bắt buộc nếu Khác)"),
-                            "Số ngày tính": st.column_config.NumberColumn("Số ngày tính", default=0.0, step=0.5)
+                            "Chi tiết / Ghi chú": st.column_config.TextColumn("Ghi chú (Bắt buộc nếu Khác/Lỗi)"),
+                            "Số ngày tính": st.column_config.NumberColumn("Số ngày tính (Để 0 tự tính)", default=0.0, step=0.5)
                         },
                         hide_index=True,
                         use_container_width=True
@@ -990,14 +978,13 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                             r_ngay = row['Ngày']
                             r_nv = row['Tên nhân viên'] if is_admin_letan else curr_user
                             r_loai = row['Lý do nghỉ']
-                            r_chitiet = row['Chi tiết / Ghi chú'] if pd.notna(row['Chi tiết / Ghi chú']) else ""
-                            r_songay = float(row['Số ngày tính']) if pd.notna(row['Số ngày tính']) else 0.0
+                            r_chitiet = row['Chi tiết / Ghi chú'] if pd.notna(row.get('Chi tiết / Ghi chú', "")) else ""
+                            r_songay = float(row.get('Số ngày tính', 0.0)) if pd.notna(row.get('Số ngày tính', 0.0)) else 0.0
                             r_phat = float(row.get('Mức phạt (VNĐ)', 0.0)) if pd.notna(row.get('Mức phạt (VNĐ)', 0.0)) else 0.0
                             
-                            if pd.isna(r_ngay) or not r_loai or not r_nv:
-                                continue # Bỏ qua dòng trống hoàn toàn
+                            if pd.isna(r_ngay) or not r_loai or pd.isna(r_nv) or not r_nv:
+                                continue 
                             
-                            # Kiểm tra Giới hạn Ngày đăng ký
                             if st.session_state.current_role == "nhanvien":
                                 if r_ngay < today:
                                     errors.append(f"Dòng {idx+1}: NV không được đăng ký lịch trong quá khứ.")
@@ -1010,9 +997,15 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                 continue
                                 
                             norm_loai = r_loai.strip().lower().replace("🔴 ", "")
+                            default_songay = loai_nghi_dict.get(norm_loai, [0.0, 0.0])[0]
+                            default_phat = loai_nghi_dict.get(norm_loai, [0.0, 0.0])[1]
+                            
                             is_loi_vp = "lỗi vi phạm khác" in norm_loai
                             is_ldk = "nghỉ lý do khác" in norm_loai
                             is_spl = any(kw in norm_loai for kw in special_leave_kws)
+                            
+                            if r_songay == 0.0 and not is_loi_vp: r_songay = default_songay
+                            if r_phat == 0.0 and not is_loi_vp: r_phat = default_phat
                             
                             if is_loi_vp:
                                 r_songay = 0.0
@@ -1082,13 +1075,11 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                         errors.append(f"Dòng {idx+1}: Ngày {r_ngay.strftime('%d/%m/%Y')} đã max {max_ppl} người nghỉ!")
                                         continue
                             
-                            # Check duplicates
                             existing_td = user_hist[user_hist['Ngày'] == r_ngay]['Lý do nghỉ'].astype(str).str.strip().str.lower().tolist()
                             if norm_loai in existing_td and not confirm_multiple:
                                 errors.append(f"Dòng {idx+1}: Trùng lịch '{r_loai}' của NV {r_nv} vào ngày {r_ngay.strftime('%d/%m/%Y')}. (Tick Xác nhận nếu đúng).")
                                 continue
 
-                            # Hợp lệ -> Tính cộng dồn
                             accumulated_month = user_hist[(user_hist['Ngày_DT'].dt.month == curr_m) & (user_hist['Ngày_DT'].dt.year == curr_y)]['Số ngày tính'].sum() + r_songay
                             
                             success_rows.append({
@@ -1157,7 +1148,6 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                     df_view_display = df_view_display.drop(columns=["Phạt vi phạm"])
                 df_view_display = format_display_df(df_view_display)
                 
-                # --- XÓA QUA DATAFRAME CHO ADMIN/LETAN ---
                 if is_admin_lt:
                     st.info("💡 Có thể chọn nhiều dòng trong bảng dưới đây để Xóa hàng loạt.")
                     df_editable = df_view_display.copy()
@@ -1185,7 +1175,6 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                                     st.rerun()
                                 else: st.error("❌ Không thể xóa (Không tìm thấy trên Google Sheets).")
                 else:
-                    # GIAO DIỆN XÓA CHO NHÂN VIÊN
                     st.dataframe(df_view_display, use_container_width=True, hide_index=True)
                     
                     if system_status.get("lock_nv", False) or (curr_user in system_status.get("locked_users_dk", [])):
@@ -1221,7 +1210,6 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
 
     st.markdown("---")
 
-    # Bộ lọc thời gian & nhân viên
     col_date, col_name, col_refresh = st.columns([5, 4, 2])
 
     with col_date:
@@ -1271,12 +1259,10 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
             st.cache_data.clear()
             st.rerun()
 
-    # Lọc dữ liệu
     mask_date = (df_lich['Ngày'] >= start_date) & (df_lich['Ngày'] <= end_date)
     filtered_df = df_lich[mask_date].copy()
     if selected_nv != "- Tất cả nhân viên -": filtered_df = filtered_df[filtered_df['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
 
-    # --- THỐNG KÊ ---
     excluded_keywords = ["đi trễ", "di tre", "không dọn vệ sinh", "khong don ve sinh", "lỗi vi phạm", "loi vi pham", "qua tour", "xuống phòng", "xuong phong", "ra sớm", "ra som", "vào muộn", "vao muon", "đi tua", "di tua", "ngưng nhận", "ngung nhan", "hỗ trợ ca", "ho tro ca"]
     def is_excluded(r): return any(kw in str(r).lower() for kw in excluded_keywords)
 
@@ -1378,7 +1364,6 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                 st.download_button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", data=to_excel(df_for_excel), file_name=f"LichNghi_{start_date.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
             else: st.button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", disabled=True, use_container_width=True)
 
-    # --- KHU VỰC ADMIN - GỬI EMAIL BÁO CÁO ---
     if st.session_state.current_role == "admin" and not filtered_df.empty:
         with st.expander("📧 GỬI BÁO CÁO QUA EMAIL CHO NHÂN VIÊN"):
             st.info("Hệ thống tự động tách dữ liệu của từng nhân viên và gửi đến đúng Email của họ. Bạn có thể chọn nhiều người.")
@@ -1413,17 +1398,15 @@ elif selected_page == "📊 Tình Hình Nghỉ Phép":
                         if error_messages:
                             for err in error_messages: st.error(err)
 
-    # --- HIỂN THỊ CÁC TAB CHI TIẾT ---
     def highlight_khong_phep(val):
-        if isinstance(val, str) and "không phép" in val.lower():
-            return 'color: red; font-weight: bold;'
+        if isinstance(val, str) and "không phép" in val.lower(): return 'color: red; font-weight: bold;'
         return ''
 
     tab1, tab2, tab3, tab4 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ PHÁT SINH", "Danh sách Nghỉ KHÔNG phép"])
     
     with tab1: 
         if st.session_state.current_role in ["admin", "letan"] and not export_df.empty:
-            st.info("💡 Bạn có thể chọn nhiều dòng dưới đây để Xóa hàng loạt trực tiếp.")
+            st.info("💡 Có thể chọn nhiều dòng dưới đây để Xóa hàng loạt.")
             df_edit_tab = export_df.copy()
             df_edit_tab.insert(0, "Chọn", False)
             e_df = st.data_editor(df_edit_tab, hide_index=True, use_container_width=True, height=min((len(df_edit_tab)+1)*35+40, 800), column_config={"Chọn": st.column_config.CheckboxColumn("Chọn Xóa", default=False)})

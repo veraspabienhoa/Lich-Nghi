@@ -528,6 +528,7 @@ st.markdown("""
 # --- KẾT NỐI GSPREAD ---
 SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"
 SHEET_DU_PHONG_ID = "1Kz0aw-JatptAN9G7YSwZ6rJO09urOPaD-rS-18eZSY0"
+SHEET_LICH_NGHI_2_ID = "1bLxn-L5gXui8pCL1b9TxshCNcykM7jg0J49Dkr5b4DI"
 SHEET_CHINH_ID = "1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT"
 BANG_TOUR_FILE_ID = "1yA1Oog_6R-HmDFatcku-x8s-59p2dP9R"
 
@@ -855,6 +856,35 @@ def load_backup_sheet_data():
         pass
     return pd.DataFrame(columns=["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"])
 
+@st.cache_data(ttl=10)
+def load_secondary_leave_sheet_data():
+    """Đọc Sheet1 của Google Sheet thứ hai, chuẩn hóa về đúng A:J của lịch nghỉ."""
+    expected = [
+        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+        "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
+    ]
+    try:
+        client = get_gspread_client()
+        if not client:
+            return pd.DataFrame(columns=expected)
+        sheet = client.open_by_key(SHEET_LICH_NGHI_2_ID).get_worksheet(0)
+        values = sheet.get('A:J')
+        if not values or len(values) < 2:
+            return pd.DataFrame(columns=expected)
+
+        rows = []
+        for sheet_row, row in enumerate(values[1:], start=2):
+            r = list(row[:10]) + [""] * max(0, 10 - len(row))
+            if not any(str(v).strip() for v in r):
+                continue
+            item = dict(zip(expected, r[:10]))
+            item['__source_sheet_id'] = SHEET_LICH_NGHI_2_ID
+            item['__source_row'] = sheet_row
+            rows.append(item)
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
+    except Exception:
+        return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
+
 @st.cache_data(ttl=60)
 def load_loai_nghi_from_gsheet():
     try:
@@ -1052,14 +1082,16 @@ def _find_schedule_row_index(sheet, original_row):
     return None
 
 def update_schedule_record(original_row, edited_row, updated_by):
-    """Sửa 1 lịch ở Sheet dự phòng và cố gắng đồng bộ sang Sheet chính."""
+    """Sửa đúng dòng ở Google Sheet nguồn của bản ghi đang hiển thị."""
     try:
         client = get_gspread_client()
-        if not client: return False, "Chưa cấu hình quyền kết nối Google Sheets."
+        if not client:
+            return False, "Chưa cấu hình quyền kết nối Google Sheets."
 
         def num(v, fallback=0.0):
             try:
-                if pd.isna(v) or str(v).strip() == '': return float(fallback)
+                if pd.isna(v) or str(v).strip() == '':
+                    return float(fallback)
                 return float(str(v).replace(',', '').strip())
             except Exception:
                 return float(fallback)
@@ -1075,55 +1107,48 @@ def update_schedule_record(original_row, edited_row, updated_by):
         gio_cn = datetime.now(VN_TZ).strftime('%H:%M:%S')
         new_values = [ngay, nv, lydo, chitiet, songay, congdon, phat, ngay_cn, gio_cn, str(updated_by)]
 
-        backup = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        row_idx = _find_schedule_row_index(backup, original_row)
+        source_id = str(original_row.get('__source_sheet_id', '')).strip() or SHEET_DU_PHONG_ID
+        target = client.open_by_key(source_id).get_worksheet(0)
+        row_idx = _find_schedule_row_index(target, original_row)
         if not row_idx:
-            return False, "Không tìm thấy dòng tương ứng trong Google Sheet dự phòng."
-        gspread_update_range(backup, f'A{row_idx}:J{row_idx}', [new_values], raw=False)
-
-        sync_warning = ''
-        try:
-            main = client.open_by_key(SHEET_CHINH_ID).worksheet('LichNghi')
-            main_idx = _find_schedule_row_index(main, original_row)
-            if main_idx:
-                gspread_update_range(main, f'A{main_idx}:J{main_idx}', [new_values], raw=False)
-        except Exception as e:
-            sync_warning = f" (Cảnh báo đồng bộ Sheet chính: {e})"
+            return False, "Không tìm thấy dòng tương ứng trong Google Sheet nguồn."
+        gspread_update_range(target, f'A{row_idx}:J{row_idx}', [new_values], raw=False)
 
         st.cache_data.clear()
-        return True, "Đã cập nhật lịch nghỉ." + sync_warning
+        return True, "Đã cập nhật lịch nghỉ đúng Google Sheet nguồn."
     except Exception as e:
         return False, f"Lỗi cập nhật lịch nghỉ: {e}"
 
+
 def delete_schedule_records(original_rows):
-    """Xóa một hoặc nhiều lịch theo checkbox; xóa từ dưới lên để không lệch số dòng."""
+    """Xóa nhiều lịch đúng Google Sheet nguồn; xóa từ dưới lên theo từng file."""
     try:
         client = get_gspread_client()
-        if not client: return False, "Chưa cấu hình quyền kết nối Google Sheets."
-        backup = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        backup_indices = []
-        for row in original_rows:
-            idx = _find_schedule_row_index(backup, row)
-            if idx: backup_indices.append(idx)
-        for idx in sorted(set(backup_indices), reverse=True):
-            backup.delete_rows(idx)
+        if not client:
+            return False, "Chưa cấu hình quyền kết nối Google Sheets."
 
-        sync_warning = ''
-        try:
-            main = client.open_by_key(SHEET_CHINH_ID).worksheet('LichNghi')
-            main_indices = []
-            for row in original_rows:
-                idx = _find_schedule_row_index(main, row)
-                if idx: main_indices.append(idx)
-            for idx in sorted(set(main_indices), reverse=True):
-                main.delete_rows(idx)
-        except Exception as e:
-            sync_warning = f" (Cảnh báo đồng bộ Sheet chính: {e})"
+        grouped = {}
+        for row in original_rows:
+            source_id = str(row.get('__source_sheet_id', '')).strip() or SHEET_DU_PHONG_ID
+            grouped.setdefault(source_id, []).append(row)
+
+        deleted = 0
+        for source_id, rows in grouped.items():
+            target = client.open_by_key(source_id).get_worksheet(0)
+            indices = []
+            for row in rows:
+                idx = _find_schedule_row_index(target, row)
+                if idx:
+                    indices.append(idx)
+            for idx in sorted(set(indices), reverse=True):
+                target.delete_rows(idx)
+                deleted += 1
 
         st.cache_data.clear()
-        return True, f"Đã xóa {len(set(backup_indices))} dòng lịch nghỉ." + sync_warning
+        return True, f"Đã xóa {deleted} dòng lịch nghỉ từ đúng Google Sheet nguồn."
     except Exception as e:
         return False, f"Lỗi xóa lịch nghỉ: {e}"
+
 
 # --- HÀM TẢI FILE TỪ DRIVE ---
 def download_file_from_google_drive(id, destination):
@@ -1513,22 +1538,20 @@ def style_bang_tour(df):
     return styler
 
 
-def combine_leave_sources_for_daily_stats(df_main, df_backup_source):
+def combine_leave_sources_for_daily_stats(*sources):
     """
-    Hợp nhất dữ liệu nghỉ từ 2 nguồn cho riêng phần thống kê chi tiết theo ngày:
-    - File chính (df_lich)
-    - Google Sheet dự phòng (df_backup)
-
-    Loại trùng theo Ngày + Tên nhân viên + Lý do nghỉ. Nếu cùng bản ghi có ở cả hai
-    nguồn thì ưu tiên bản Google Sheet dự phòng vì đây là nơi nhập liệu trực tiếp mới nhất.
+    Hợp nhất một hoặc nhiều nguồn lịch nghỉ. Loại trùng theo:
+    Ngày + Tên nhân viên + Lý do nghỉ. Nguồn truyền vào SAU sẽ được ưu tiên
+    khi cùng một bản ghi xuất hiện ở nhiều nguồn.
     """
     expected = [
         'Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 'Số ngày tính',
         'Số ngày phép cộng dồn', 'Phạt vi phạm', 'Ngày cập nhật',
         'Giờ cập nhật', 'Người cập nhật'
     ]
+    meta_cols = ['__source_sheet_id', '__source_row']
     prepared = []
-    for source in [df_main, df_backup_source]:
+    for source in sources:
         if source is None or source.empty:
             continue
         d = source.copy()
@@ -1537,17 +1560,20 @@ def combine_leave_sources_for_daily_stats(df_main, df_backup_source):
         for col in expected:
             if col not in d.columns:
                 d[col] = ""
-        d = d[expected].copy()
+        for col in meta_cols:
+            if col not in d.columns:
+                d[col] = ""
+        d = d[expected + meta_cols].copy()
         d['Ngày'] = pd.to_datetime(d['Ngày'], errors='coerce', dayfirst=True).dt.date
         d = d.dropna(subset=['Ngày'])
         d['Số ngày tính'] = pd.to_numeric(d['Số ngày tính'], errors='coerce').fillna(0)
+        d['Số ngày phép cộng dồn'] = pd.to_numeric(d['Số ngày phép cộng dồn'], errors='coerce').fillna(0)
         d['Phạt vi phạm'] = pd.to_numeric(d['Phạt vi phạm'], errors='coerce').fillna(0)
         prepared.append(d)
 
     if not prepared:
-        return pd.DataFrame(columns=expected)
+        return pd.DataFrame(columns=expected + meta_cols)
 
-    # Thứ tự main -> backup, keep='last' => backup thắng khi trùng key.
     combined = pd.concat(prepared, ignore_index=True)
     combined['_key'] = (
         combined['Ngày'].astype(str) + '|' +
@@ -1626,6 +1652,7 @@ def to_excel(df):
 ensure_credential_control_columns()
 df_credentials = load_credentials() 
 df_backup = load_backup_sheet_data()
+df_leave_secondary = load_secondary_leave_sheet_data()
 df_loai_nghi_gsheet = load_loai_nghi_from_gsheet()
 GDRIVE_LINK = "https://drive.google.com/file/d/1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT/view?usp=sharing"
 
@@ -2308,7 +2335,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         if early_warning: st.error(early_warning)
 
         # Kiểm tra lịch đã có từ CẢ HAI nguồn để chặn đăng ký trùng ngay trên giao diện.
-        registration_all_df = combine_leave_sources_for_daily_stats(df_lich, df_backup)
+        registration_all_df = combine_leave_sources_for_daily_stats(df_lich, df_leave_secondary, df_backup)
         existing_today = []
         if not registration_all_df.empty and chosen_nv != "-- Chọn nhân viên --":
             ex_df = registration_all_df[
@@ -2454,7 +2481,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                                     else: val_songay = 0.0
 
                                     # Không cho cùng một nhân viên đăng ký cùng một Loại nghỉ hai lần trong cùng ngày.
-                                    latest_registration_df = combine_leave_sources_for_daily_stats(df_lich, df_backup)
+                                    latest_registration_df = combine_leave_sources_for_daily_stats(df_lich, df_leave_secondary, df_backup)
                                     if _leave_exists_in_sources(latest_registration_df, curr_date_iter, chosen_nv, chosen_loai):
                                         st.error(
                                             f"❌ {chosen_nv} đã có '{chosen_loai.replace('🔴 ', '')}' ngày "
@@ -2567,17 +2594,27 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             st.cache_data.clear()
             st.rerun()
 
-    # Lọc dữ liệu
-    mask_date = (df_lich['Ngày'] >= start_date) & (df_lich['Ngày'] <= end_date)
-    filtered_df = df_lich[mask_date].copy()
-    if selected_nv != "- Tất cả nhân viên -": filtered_df = filtered_df[filtered_df['Tên nhân viên'].astype(str).str.strip().str.lower() == selected_nv.lower()]
+    # Lọc dữ liệu: phần thống kê/Chi tiết danh sách dùng ĐÚNG 2 Google Sheet:
+    # 1) SHEET_DU_PHONG_ID (nơi nhập liệu hiện tại)
+    # 2) SHEET_LICH_NGHI_2_ID
+    # Nếu trùng Ngày + Tên nhân viên + Lý do nghỉ thì ưu tiên Sheet dự phòng.
+    detail_all_df = combine_leave_sources_for_daily_stats(df_leave_secondary, df_backup)
+    if not detail_all_df.empty:
+        mask_date = (detail_all_df['Ngày'] >= start_date) & (detail_all_df['Ngày'] <= end_date)
+        filtered_df = detail_all_df[mask_date].copy()
+        if selected_nv != "- Tất cả nhân viên -":
+            filtered_df = filtered_df[
+                filtered_df['Tên nhân viên'].astype(str).str.strip().str.casefold() == selected_nv.strip().casefold()
+            ]
+    else:
+        filtered_df = detail_all_df.copy()
 
     # --- THỐNG KÊ ---
     excluded_keywords = ["đi trễ", "di tre", "không dọn vệ sinh", "khong don ve sinh", "lỗi vi phạm", "loi vi pham", "qua tour", "xuống phòng", "xuong phong", "ra sớm", "ra som", "vào muộn", "vao muon", "đi tua", "di tua", "ngưng nhận", "ngung nhan", "hỗ trợ ca", "ho tro ca"]
     def is_excluded(r): return any(kw in str(r).lower() for kw in excluded_keywords)
 
     # Nguồn riêng cho "Thống kê chi tiết theo từng ngày": hợp nhất CẢ 2 FILE.
-    daily_all_df = combine_leave_sources_for_daily_stats(df_lich, df_backup)
+    daily_all_df = combine_leave_sources_for_daily_stats(df_leave_secondary, df_backup)
     if not daily_all_df.empty:
         daily_mask = (daily_all_df['Ngày'] >= start_date) & (daily_all_df['Ngày'] <= end_date)
         daily_filtered_df = daily_all_df[daily_mask].copy()
@@ -2594,11 +2631,11 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
     )
 
     if filtered_df.empty:
-        df_thuc_nghi = phat_sinh_df = khong_phep_df = co_phep_df = pd.DataFrame(columns=df_lich.columns)
+        df_thuc_nghi = phat_sinh_df = khong_phep_df = co_phep_df = pd.DataFrame(columns=filtered_df.columns if hasattr(filtered_df, 'columns') else [])
         tong_phat = 0.0
     else:
         df_thuc_nghi = filtered_df[~filtered_df['Lý do nghỉ'].apply(is_excluded)].copy()
-        if df_thuc_nghi.empty: phat_sinh_df = khong_phep_df = co_phep_df = pd.DataFrame(columns=df_lich.columns)
+        if df_thuc_nghi.empty: phat_sinh_df = khong_phep_df = co_phep_df = pd.DataFrame(columns=filtered_df.columns)
         else:
             ly_do_lower = df_thuc_nghi['Lý do nghỉ'].astype(str).str.strip().str.lower()
             phat_sinh_df = df_thuc_nghi[ly_do_lower == 'nghỉ phát sinh']
@@ -2624,7 +2661,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         cols_to_hide = ['Phạt vi phạm']
 
     st.markdown("### 📅 Thống kê chi tiết theo từng ngày")
-    st.caption("Phần này hợp nhất dữ liệu từ file chính và Google Sheet dự phòng, sau đó loại trùng trước khi thống kê.")
+    st.caption("Phần này hợp nhất dữ liệu từ 2 Google Sheet lịch nghỉ và loại trùng trước khi thống kê.")
     if not daily_thuc_nghi.empty:
         daily_stats = []
         daily_limit_flags = []
@@ -2680,7 +2717,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
 
     st.markdown("---")
 
-    export_df = format_display_df(filtered_df.drop(columns=cols_to_hide, errors='ignore'))
+    export_df = format_display_df(filtered_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
     df_for_excel = export_df.copy()
     if st.session_state.current_role == "admin" and not df_for_excel.empty:
         tong_cong_row = pd.Series(index=df_for_excel.columns, dtype=object)
@@ -2782,7 +2819,8 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             st.info("Trống.")
         elif st.session_state.current_role in ["admin", "letan"]:
             # Admin/Lễ tân: checkbox chọn 1 hoặc nhiều dòng và sửa trực tiếp tại bảng.
-            raw_detail = filtered_df.drop(columns=cols_to_hide, errors='ignore').copy().reset_index(drop=True)
+            raw_detail_full = filtered_df.copy().reset_index(drop=True)
+            raw_detail = raw_detail_full.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore').copy()
             editor_df = raw_detail.copy()
             editor_df.insert(0, "Chọn", False)
 
@@ -2816,7 +2854,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                         messages = []
                         today_edit = get_vn_today()
                         for pos in selected_positions:
-                            original = raw_detail.iloc[pos].copy()
+                            original = raw_detail_full.iloc[pos].copy()
                             edited = detail_editor.drop(columns=['Chọn']).iloc[pos].copy()
 
                             # Lễ tân không được sửa lịch quá khứ; Admin được phép.
@@ -2848,7 +2886,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                     if not selected_positions:
                         st.warning("Vui lòng tick ít nhất 1 dòng cần xóa.")
                     else:
-                        originals = [raw_detail.iloc[pos].copy() for pos in selected_positions]
+                        originals = [raw_detail_full.iloc[pos].copy() for pos in selected_positions]
                         today_del = get_vn_today()
                         if st.session_state.current_role == 'letan':
                             has_past = False
@@ -2880,21 +2918,21 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         if co_phep_df.empty:
             st.info("Trống.")
         else:
-            co_display = format_display_df(co_phep_df.drop(columns=cols_to_hide, errors='ignore'))
+            co_display = format_display_df(co_phep_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
             st.dataframe(co_display.style.map(highlight_khong_phep), width="stretch", height="content", hide_index=True)
 
     with tab3:
         if phat_sinh_df.empty:
             st.info("Trống.")
         else:
-            ps_display = format_display_df(phat_sinh_df.drop(columns=cols_to_hide, errors='ignore'))
+            ps_display = format_display_df(phat_sinh_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
             st.dataframe(ps_display.style.map(highlight_khong_phep), width="stretch", height="content", hide_index=True)
 
     with tab4:
         if khong_phep_df.empty:
             st.success("Không có ai!")
         else:
-            kp_display = format_display_df(khong_phep_df.drop(columns=cols_to_hide, errors='ignore'))
+            kp_display = format_display_df(khong_phep_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
             st.dataframe(kp_display.style.map(highlight_khong_phep), width="stretch", height="content", hide_index=True)
 
 

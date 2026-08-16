@@ -103,7 +103,15 @@ def get_active_users():
     return {}
 
 @st.cache_resource
+@st.cache_resource
 def get_system_status():
+    # Khai báo đầy đủ các key mặc định để tránh lỗi KeyError
+    return {
+        "lock_nv": False, 
+        "lock_login": False,
+        "locked_users_login": [], 
+        "locked_users_dk": []
+    }
     return {"locked_users_login": [], "locked_users_dk": []}
 
 active_users = get_active_users()

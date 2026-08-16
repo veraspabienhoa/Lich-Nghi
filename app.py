@@ -48,6 +48,29 @@ def password_matches(input_password, stored_password):
 def is_locked_value(value):
     return str(value).strip().casefold() in {"1", "true", "yes", "y", "khóa", "khoa", "locked", "x"}
 
+def normalize_leave_reason(value):
+    """Chuẩn hóa loại nghỉ để so sánh trùng dữ liệu ổn định."""
+    text = str(value).replace("🔴", "").strip()
+    return " ".join(text.split()).casefold()
+
+def is_nghi_khong_phep_reason(value):
+    """Chỉ nhận đúng loại 'Nghỉ không phép', không tính các lỗi như Đi trễ không phép."""
+    return normalize_login_name(str(value).replace("🔴", "").strip()) == normalize_login_name("Nghỉ không phép")
+
+def _fallback_admin_remember_token():
+    """Token bền vững cho tài khoản admin dự phòng; không lưu mật khẩu trong trình duyệt."""
+    try:
+        secret = str(st.secrets.get("vera_persistent_login_secret", "VERA-SPA-PERSISTENT-LOGIN-2026"))
+    except Exception:
+        secret = "VERA-SPA-PERSISTENT-LOGIN-2026"
+    digest = hmac.new(secret.encode("utf-8"), b"fallback-admin", hashlib.sha256).hexdigest()
+    return "vera_admin_" + digest
+
+def _is_valid_fallback_admin_token(token):
+    if not token:
+        return False
+    return hmac.compare_digest(str(token), _fallback_admin_remember_token())
+
 # --- DANH SÁCH NGÂN HÀNG VIỆT NAM (VietQR, tự làm mới mỗi 24 giờ) ---
 VIETQR_BANKS_API = "https://api.vietqr.io/v2/banks"
 
@@ -319,6 +342,9 @@ components.html("""
             // Token mới sau khi đăng nhập -> lưu trong localStorage (không lưu mật khẩu).
             if (tokenInUrl) {
                 parentWin.localStorage.setItem(STORAGE_KEY, tokenInUrl);
+                // Không để bearer token nằm lâu trên thanh địa chỉ sau khi đã lưu cục bộ.
+                url.searchParams.delete('remember_token');
+                parentWin.history.replaceState({}, '', url.toString());
             } else if (savedToken) {
                 // Lần mở app sau: đưa token trở lại URL để server xác thực.
                 url.searchParams.set('remember_token', savedToken);
@@ -389,6 +415,23 @@ st.markdown("""
         }
         input, textarea { font-size: 16px !important; }
         [data-testid="stDataFrame"], [data-testid="stDataEditor"] { width: 100% !important; }
+
+        /* Hiệu ứng hover cho toàn bộ dropdown/select/multiselect */
+        div[data-baseweb="select"] > div {
+            transition: background-color .16s ease, border-color .16s ease, box-shadow .16s ease !important;
+        }
+        div[data-baseweb="select"]:hover > div {
+            background-color: #f7e8ef !important;
+            border-color: #c27ba0 !important;
+            box-shadow: 0 0 0 1px #c27ba0 inset !important;
+        }
+        div[data-baseweb="popover"] [role="option"] {
+            transition: background-color .14s ease, color .14s ease !important;
+        }
+        div[data-baseweb="popover"] [role="option"]:hover {
+            background-color: #f3dce8 !important;
+            color: #7d3159 !important;
+        }
 
         /* Tô nền các vị trí tiêu đề */
         h1, h2, h3 {
@@ -635,8 +678,8 @@ def set_accounts_login_lock(usernames, locked=True):
     except Exception as e:
         return False, f"Lỗi cập nhật khóa đăng nhập: {e}"
 
-def create_remember_token(username, days=30):
-    """Lưu HASH token ở Google Sheet; trình duyệt chỉ giữ token, không giữ mật khẩu."""
+def create_remember_token(username, days=None):
+    """Lưu HASH token ở Google Sheet và duy trì cho tới khi người dùng chủ động Đăng xuất."""
     try:
         client = get_gspread_client()
         if not client: return None
@@ -647,9 +690,9 @@ def create_remember_token(username, days=30):
             if len(row) > 1 and normalize_login_name(row[1]) == target:
                 token = secrets.token_urlsafe(32)
                 token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
-                expiry = datetime.now(VN_TZ) + timedelta(days=days)
                 sheet.update_cell(r_idx, 19, token_hash)
-                sheet.update_cell(r_idx, 20, expiry.isoformat())
+                # Không đặt ngày hết hạn: token chỉ bị xóa khi Đăng xuất hoặc tài khoản bị khóa.
+                sheet.update_cell(r_idx, 20, '')
                 st.cache_data.clear()
                 return token
     except Exception:
@@ -673,23 +716,15 @@ def revoke_remember_token(username):
         pass
 
 def validate_remember_token(token, credentials_df):
+    """Token hợp lệ cho tới khi bị thu hồi/khóa; không tự hết hạn theo thời gian."""
     if not token or credentials_df.empty:
         return None
     token_hash = hashlib.sha256(str(token).encode('utf-8')).hexdigest()
-    now = datetime.now(VN_TZ)
     for _, row in credentials_df.iterrows():
         saved_hash = str(row.get('Remember Token Hash', '')).strip()
         if not saved_hash or not hmac.compare_digest(token_hash, saved_hash):
             continue
         if is_locked_value(row.get('Khóa đăng nhập', '')):
-            return None
-        try:
-            exp = datetime.fromisoformat(str(row.get('Remember Token Expiry', '')).strip())
-            if exp.tzinfo is None:
-                exp = exp.replace(tzinfo=VN_TZ)
-            if exp < now:
-                return None
-        except Exception:
             return None
         return row
     return None
@@ -805,14 +840,75 @@ def _next_data_row_a_to_j(sheet):
             last_non_empty = idx
     return max(2, last_non_empty + 1)
 
-def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, updated_by):
-    """
-    Ghi lịch vào Google Sheet dự phòng, worksheet đầu tiên (Sheet1), đúng vùng A:J.
-    Dữ liệu luôn được ghi vào dòng ngay sau last row thực tế, không dùng append_row
-    để tránh Google Sheets tự suy luận sai table range/cột bắt đầu.
+def _live_sheet_to_leave_df(sheet):
+    """Đọc trực tiếp A:J để kiểm tra trùng/thứ tự ngay trước khi ghi."""
+    try:
+        values = sheet.get('A:J')
+        if not values or len(values) < 2:
+            return pd.DataFrame(columns=[
+                "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+                "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
+            ])
+        header = [str(x).strip() for x in values[0][:10]]
+        expected = [
+            "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+            "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
+        ]
+        if len(header) < 10 or not header[0]:
+            header = expected
+        rows = []
+        for row in values[1:]:
+            r = list(row[:10]) + [""] * max(0, 10 - len(row))
+            if any(str(v).strip() for v in r):
+                rows.append(r[:10])
+        df = pd.DataFrame(rows, columns=header[:10]) if rows else pd.DataFrame(columns=header[:10])
+        if 'Loại nghỉ' in df.columns and 'Lý do nghỉ' not in df.columns:
+            df = df.rename(columns={'Loại nghỉ': 'Lý do nghỉ'})
+        for c in expected:
+            if c not in df.columns:
+                df[c] = ""
+        return df[expected].copy()
+    except Exception:
+        return pd.DataFrame()
 
-    Sau đó hệ thống thử ghi thêm vào worksheet LichNghi của SHEET_CHINH_ID nếu ID đó
-    là Google Sheet. Việc nơi thứ hai không hỗ trợ ghi không làm mất dòng đã lưu ở Sheet1.
+
+def _leave_exists_in_sources(df_sources, ngay, nv, loai_nghi):
+    if df_sources is None or df_sources.empty:
+        return False
+    target_date = pd.to_datetime(ngay, errors='coerce', dayfirst=True)
+    if pd.isna(target_date):
+        return False
+    target_date = target_date.date()
+    d = df_sources.copy()
+    d['Ngày_cmp'] = pd.to_datetime(d['Ngày'], errors='coerce', dayfirst=True).dt.date
+    name_cmp = d['Tên nhân viên'].astype(str).apply(normalize_login_name)
+    reason_cmp = d['Lý do nghỉ'].astype(str).apply(normalize_leave_reason)
+    return bool(((d['Ngày_cmp'] == target_date) &
+                 (name_cmp == normalize_login_name(nv)) &
+                 (reason_cmp == normalize_leave_reason(loai_nghi))).any())
+
+
+def _unexcused_ordinal_and_bonus(df_sources, ngay):
+    """Người 1/2: +0; người 3: +100k; người 4: +200k; ..."""
+    target_date = pd.to_datetime(ngay, errors='coerce', dayfirst=True)
+    if pd.isna(target_date) or df_sources is None or df_sources.empty:
+        ordinal = 1
+    else:
+        target_date = target_date.date()
+        d = df_sources.copy()
+        d['Ngày_cmp'] = pd.to_datetime(d['Ngày'], errors='coerce', dayfirst=True).dt.date
+        mask = (d['Ngày_cmp'] == target_date) & d['Lý do nghỉ'].astype(str).apply(is_nghi_khong_phep_reason)
+        ordinal = int(mask.sum()) + 1
+    bonus = max(0, ordinal - 2) * 100000
+    return ordinal, bonus
+
+
+def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, updated_by, df_main_source=None):
+    """
+    Ghi lịch vào Sheet1 đúng A:J, last row.
+    Trước khi ghi sẽ đọc LIVE Sheet1 để:
+    - chặn trùng cùng nhân viên + ngày + loại nghỉ;
+    - tính thứ tự Nghỉ không phép và tiền phạt lũy tiến.
     """
     try:
         client = get_gspread_client()
@@ -821,64 +917,65 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
 
         ngay_cn = get_vn_today().strftime('%d/%m/%Y')
         gio_cn = datetime.now(VN_TZ).strftime('%H:%M:%S')
-        row_values = [
-            str(ngay),
-            str(nv),
-            str(loai_nghi).replace("🔴 ", ""),
-            str(chi_tiet),
-            float(so_ngay) if so_ngay is not None else 0.0,
-            float(so_ngay_cong_don),
-            float(phat_vi_pham),
-            str(ngay_cn),
-            str(gio_cn),
-            str(updated_by),
-        ]
 
-        # Nơi bắt buộc: Google Sheet dự phòng / Sheet1.
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
         header = [
             "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
             "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
             "Giờ cập nhật", "Người cập nhật"
         ]
-
-        # Nếu A1:J1 chưa có header chuẩn thì chỉ bổ sung các ô header đang trống;
-        # không chèn cột và không làm lệch dữ liệu cũ.
         current_header = sheet_dp.get('A1:J1')
         current_header = current_header[0] if current_header else []
         if not any(str(v).strip() for v in current_header):
             gspread_update_range(sheet_dp, 'A1:J1', [header], value_input_option='USER_ENTERED')
 
-        target_row = _next_data_row_a_to_j(sheet_dp)
-        target_range = f"A{target_row}:J{target_row}"
-        gspread_update_range(
-            sheet_dp,
-            target_range,
-            [row_values],
-            value_input_option='USER_ENTERED'
-        )
+        live_backup = _live_sheet_to_leave_df(sheet_dp)
+        combined_live = combine_leave_sources_for_daily_stats(df_main_source, live_backup)
 
-        # Nơi thứ hai: chỉ ghi nếu SHEET_CHINH_ID thực sự là Google Sheet.
-        main_note = ""
+        # Bảo vệ dữ liệu ở lớp cuối cùng, kể cả khi giao diện đang dùng cache cũ.
+        if _leave_exists_in_sources(combined_live, ngay, nv, loai_nghi):
+            return False, f"Nhân viên '{nv}' đã có loại nghỉ '{str(loai_nghi).replace('🔴 ', '')}' trong ngày {ngay}. Không được đăng ký trùng."
+
+        save_detail = str(chi_tiet).strip()
+        save_penalty = float(phat_vi_pham) if phat_vi_pham is not None else 0.0
+        ordinal_note = ""
+        if is_nghi_khong_phep_reason(loai_nghi):
+            ordinal, extra_penalty = _unexcused_ordinal_and_bonus(combined_live, ngay)
+            ordinal_note = f"Người Thứ {ordinal} nghỉ không phép"
+            save_detail = f"{ordinal_note} | {save_detail}" if save_detail else ordinal_note
+            save_penalty += extra_penalty
+
+        row_values = [
+            str(ngay),
+            str(nv),
+            str(loai_nghi).replace("🔴 ", ""),
+            save_detail,
+            float(so_ngay) if so_ngay is not None else 0.0,
+            float(so_ngay_cong_don),
+            save_penalty,
+            str(ngay_cn),
+            str(gio_cn),
+            str(updated_by),
+        ]
+
+        target_row = _next_data_row_a_to_j(sheet_dp)
+        gspread_update_range(sheet_dp, f"A{target_row}:J{target_row}", [row_values], value_input_option='USER_ENTERED')
+
+        # Nơi thứ hai: chỉ ghi nếu file chính mở được như Google Sheet.
         try:
             sheet_chinh_lich = client.open_by_key(SHEET_CHINH_ID).worksheet("LichNghi")
             main_row = _next_data_row_a_to_j(sheet_chinh_lich)
-            gspread_update_range(
-                sheet_chinh_lich,
-                f"A{main_row}:J{main_row}",
-                [row_values],
-                value_input_option='USER_ENTERED'
-            )
-            main_note = " Đồng thời đã ghi vào sheet LichNghi của file chính."
+            gspread_update_range(sheet_chinh_lich, f"A{main_row}:J{main_row}", [row_values], value_input_option='USER_ENTERED')
         except Exception:
-            # File chính hiện có thể là XLSB/XLSM trên Drive nên gspread không ghi trực tiếp được.
-            main_note = ""
+            pass
 
         st.cache_data.clear()
-        return True, f"Đã lưu lịch nghỉ tại Sheet1, dòng {target_row}, vùng A{target_row}:J{target_row}." + main_note
+        if ordinal_note:
+            extra = max(0, save_penalty - float(phat_vi_pham or 0))
+            return True, f"{ordinal_note}. Phạt lũy tiến cộng thêm {extra:,.0f} VNĐ; tổng phạt {save_penalty:,.0f} VNĐ."
+        return True, "Đã ghi nhận lịch nghỉ thành công!"
     except Exception as e:
         return False, f"Lỗi ghi dữ liệu: {e}"
-
 
 def delete_backup_row(row_index_1_based):
     try:
@@ -1466,16 +1563,21 @@ if "logged_in" not in st.session_state:
 if not st.session_state.logged_in:
     try:
         remembered_token = st.query_params.get('remember_token', '')
-        remembered_row = validate_remember_token(remembered_token, df_credentials) if remembered_token else None
-        if remembered_row is not None:
+        if _is_valid_fallback_admin_token(remembered_token):
             st.session_state.logged_in = True
-            st.session_state.current_user = str(remembered_row['Tên nhân viên']).strip()
-            st.session_state.current_role = str(remembered_row.get('Phân quyền', 'nhanvien')).strip().lower()
-        elif remembered_token:
-            # Token hết hạn/bị khóa/sai -> xóa khỏi trình duyệt.
-            st.query_params['forget_login'] = '1'
-            try: del st.query_params['remember_token']
-            except Exception: pass
+            st.session_state.current_user = "Quản Trị Viên"
+            st.session_state.current_role = "admin"
+        else:
+            remembered_row = validate_remember_token(remembered_token, df_credentials) if remembered_token else None
+            if remembered_row is not None:
+                st.session_state.logged_in = True
+                st.session_state.current_user = str(remembered_row['Tên nhân viên']).strip()
+                st.session_state.current_role = str(remembered_row.get('Phân quyền', 'nhanvien')).strip().lower()
+            elif remembered_token:
+                # Token bị khóa/sai/đã thu hồi -> xóa khỏi trình duyệt.
+                st.query_params['forget_login'] = '1'
+                try: del st.query_params['remember_token']
+                except Exception: pass
     except Exception:
         pass
 
@@ -1493,7 +1595,7 @@ if not st.session_state.logged_in:
     with st.form("login_form"):
         username_input = st.text_input("Tên đăng nhập", autocomplete="username").strip()
         password_input = st.text_input("Mật khẩu", type="password", autocomplete="current-password")
-        remember_login = st.checkbox("Ghi nhớ đăng nhập trên thiết bị này (30 ngày)", value=True)
+        st.caption("🔐 Thiết bị này sẽ duy trì đăng nhập cho tới khi bạn bấm Đăng xuất.")
 
         if st.form_submit_button("Đăng Nhập"):
             input_name_norm = normalize_login_name(username_input)
@@ -1503,9 +1605,8 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.current_user = "Quản Trị Viên"
                 st.session_state.current_role = "admin"
-                # Admin dự phòng không lưu token vì không nằm trong Sheet tài khoản.
-                if not remember_login:
-                    st.query_params['forget_login'] = '1'
+                # Admin dự phòng cũng được duy trì đăng nhập cho tới khi bấm Đăng xuất.
+                st.query_params['remember_token'] = _fallback_admin_remember_token()
                 st.rerun()
             else:
                 user_found = False
@@ -1529,13 +1630,9 @@ if not st.session_state.logged_in:
                 if locked_account:
                     st.error("🔒 Tài khoản này đang bị khóa đăng nhập tạm thời. Vui lòng liên hệ Admin.")
                 elif user_found:
-                    if remember_login:
-                        token = create_remember_token(st.session_state.current_user)
-                        if token:
-                            st.query_params['remember_token'] = token
-                    else:
-                        revoke_remember_token(st.session_state.current_user)
-                        st.query_params['forget_login'] = '1'
+                    token = create_remember_token(st.session_state.current_user)
+                    if token:
+                        st.query_params['remember_token'] = token
                     st.rerun()
                 else:
                     st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
@@ -1950,12 +2047,12 @@ elif selected_page == "🧭 Bảng Tour":
         # Giá trị <= -15 được làm trống trên bảng hiển thị.
         df_tour_display = prepare_bang_tour_display(df_tour)
 
-        tour_height = max(260, min(42 + len(df_tour_display) * 35, 1400))
+        # Auto-fit toàn bộ chiều cao: hiển thị đủ dòng, bỏ thanh cuộn dọc.
         st.dataframe(
             style_bang_tour(df_tour_display),
             use_container_width=True,
             hide_index=True,
-            height=tour_height
+            height="content"
         )
         st.caption(
             "Màu dòng: Nghỉ phép = chữ mờ/nền trắng; Đi làm = chữ đen/nền trắng; "
@@ -2094,12 +2191,28 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
 
         if early_warning: st.error(early_warning)
 
+        # Kiểm tra lịch đã có từ CẢ HAI nguồn để chặn đăng ký trùng ngay trên giao diện.
+        registration_all_df = combine_leave_sources_for_daily_stats(df_lich, df_backup)
         existing_today = []
-        if not df_lich.empty and chosen_nv != "-- Chọn nhân viên --":
-            ex_df = df_lich[(df_lich['Tên nhân viên'] == chosen_nv) & (df_lich['Ngày'] == start_date)]
+        if not registration_all_df.empty and chosen_nv != "-- Chọn nhân viên --":
+            ex_df = registration_all_df[
+                (registration_all_df['Tên nhân viên'].astype(str).apply(normalize_login_name) == normalize_login_name(chosen_nv)) &
+                (registration_all_df['Ngày'] == start_date)
+            ]
             existing_today = ex_df['Lý do nghỉ'].astype(str).str.strip().tolist()
 
         dyn_key_suffix = f"{chosen_loai}_{start_date}_{chosen_nv}"
+
+        # Hiển thị trước thứ tự và mức cộng phạt nếu chọn đúng loại Nghỉ không phép.
+        if is_nghi_khong_phep_reason(chosen_loai):
+            preview_ordinal, preview_extra = _unexcused_ordinal_and_bonus(registration_all_df, start_date)
+            preview_total = float(default_phat) + float(preview_extra)
+            st.warning(
+                f"⚠️ Nghỉ không phép ngày {start_date.strftime('%d/%m/%Y')}: Người Thứ {preview_ordinal}. "
+                f"Phạt theo quy định {float(default_phat):,.0f} VNĐ"
+                + (f" + lũy tiến {preview_extra:,.0f} VNĐ" if preview_extra > 0 else "")
+                + f" = {preview_total:,.0f} VNĐ."
+            )
 
         with st.form("form_nhap_lich_inner"):
             txt_chitiet_label = "Chi tiết vi phạm / Ghi chú (🔴 **Bắt buộc**):" if (is_loi_vi_pham or is_nghi_ly_do_khac) else "Chi tiết vi phạm / Ghi chú (nếu có):"
@@ -2112,12 +2225,19 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             # HIỂN THỊ Ô MỨC PHẠT CHO TẤT CẢ TÀI KHOẢN (ĐÃ MỞ LẠI)
             with col_p2:
                 txt_phat_label = "Mức phạt vi phạm VNĐ (🔴 **Bắt buộc**):" if is_loi_vi_pham else "Mức phạt vi phạm (VNĐ):"
-                val_phat = st.number_input(txt_phat_label, value=float(default_phat), step=50000.0, key=f"num_phat_{dyn_key_suffix}")
+                val_phat = st.number_input(
+                    txt_phat_label,
+                    value=float(default_phat),
+                    step=50000.0,
+                    key=f"num_phat_{dyn_key_suffix}",
+                    disabled=is_nghi_khong_phep_reason(chosen_loai)
+                )
 
             confirm_multiple = True
             if existing_today:
-                if chosen_loai.replace("🔴 ", "") in existing_today:
-                    st.error(f"❌ Nhân viên này đã có Lý do nghỉ: '{chosen_loai}' vào ngày này rồi. KHÔNG THỂ trùng cùng 1 lý do!")
+                normalized_existing = {normalize_leave_reason(x) for x in existing_today}
+                if normalize_leave_reason(chosen_loai) in normalized_existing:
+                    st.error(f"❌ Nhân viên này đã có Lý do nghỉ: '{chosen_loai.replace('🔴 ', '')}' vào ngày này rồi. KHÔNG THỂ trùng cùng 1 loại nghỉ!")
                     confirm_multiple = False
                 else:
                     st.warning(f"⚠️ CẢNH BÁO: Nhân viên '{chosen_nv}' đã có các lịch sau trong ngày {start_date.strftime('%d/%m/%Y')}: {', '.join(existing_today)}")
@@ -2205,13 +2325,24 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                                     can_proceed = False
 
                             if can_proceed:
-                                all_saved = True  # Thêm cờ kiểm tra lưu thành công
+                                all_saved = True
+                                save_success_notes = []
                                 for i in range(num_days_selected):
                                     curr_date_iter = start_date + timedelta(days=i)
                                     is_weekend_iter = curr_date_iter.weekday() >= 5
 
                                     if val_songay is not None: accumulated_month += val_songay
                                     else: val_songay = 0.0
+
+                                    # Không cho cùng một nhân viên đăng ký cùng một Loại nghỉ hai lần trong cùng ngày.
+                                    latest_registration_df = combine_leave_sources_for_daily_stats(df_lich, df_backup)
+                                    if _leave_exists_in_sources(latest_registration_df, curr_date_iter, chosen_nv, chosen_loai):
+                                        st.error(
+                                            f"❌ {chosen_nv} đã có '{chosen_loai.replace('🔴 ', '')}' ngày "
+                                            f"{curr_date_iter.strftime('%d/%m/%Y')}. Không thể đăng ký trùng."
+                                        )
+                                        all_saved = False
+                                        break
 
                                     if not is_nghi_ly_do_khac and val_phat <= 0 and "phép năm" not in norm_loai and not is_loi_vi_pham:
                                         if norm_loai == "nghỉ phát sinh":
@@ -2239,20 +2370,26 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                                                 break
 
                                     # GỌI HÀM LƯU LÊN GOOGLE SHEETS
+                                    penalty_to_save = float(default_phat) if is_nghi_khong_phep_reason(chosen_loai) else float(val_phat)
                                     success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
-                                        curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, chosen_loai.replace("🔴 ", ""), 
-                                        input_chitiet, val_songay, accumulated_month, val_phat, st.session_state.current_user
+                                        curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, chosen_loai.replace("🔴 ", ""),
+                                        input_chitiet, val_songay, accumulated_month, penalty_to_save, st.session_state.current_user,
+                                        df_main_source=df_lich
                                     )
 
-                                    # KIỂM TRA NẾU LỖI THÌ BÁO VÀ DỪNG LẠI NGAY
                                     if not success_bk:
                                         st.error(f"❌ LỖI GOOGLE SHEETS: {msg_bk}")
                                         all_saved = False
                                         break
+                                    if msg_bk:
+                                        save_success_notes.append(msg_bk)
 
                                 # CHỈ IN THÀNH CÔNG NẾU API THỰC SỰ TRẢ VỀ SUCCESS
                                 if all_saved:
                                     st.success(f"✅ Đã ghi nhận lịch nghỉ thành công cho {num_days_selected} ngày!")
+                                    for note in save_success_notes:
+                                        if "Người Thứ" in note:
+                                            st.info(note)
                                     st.cache_data.clear()
 
 

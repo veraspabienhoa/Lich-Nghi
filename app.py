@@ -1057,12 +1057,40 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
     except Exception as e:
         return False, f"Lỗi ghi dữ liệu: {e}"
 
-def delete_backup_row(row_index_1_based):
+def delete_backup_row(row_index_1_based, updated_by=None):
+    """Xóa 1 dòng ở Sheet dự phòng và tự xếp lại Người Thứ X/phạt lũy tiến nếu cần."""
     try:
         client = get_gspread_client()
         sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        actor = str(updated_by or st.session_state.get("current_user", "Hệ thống"))
+
+        # Đọc bản ghi trước khi xóa để biết nhóm nào cần xếp lại.
+        row_values = sheet.get(f'A{row_index_1_based}:J{row_index_1_based}')
+        deleted_row = None
+        affected_groups = set()
+        if row_values and row_values[0]:
+            expected = [
+                "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+                "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
+                "Giờ cập nhật", "Người cập nhật"
+            ]
+            vals = list(row_values[0][:10]) + [""] * max(0, 10 - len(row_values[0]))
+            deleted_row = dict(zip(expected, vals[:10]))
+            deleted_row['__source_sheet_id'] = SHEET_DU_PHONG_ID
+            deleted_row['__source_row'] = int(row_index_1_based)
+            group_key = _progressive_group_key(deleted_row)
+            if group_key:
+                affected_groups.add(group_key)
+
         sheet.delete_rows(row_index_1_based)
+
+        rebalanced = 0
+        if affected_groups:
+            rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor)
+
         st.cache_data.clear()
+        if rebalanced:
+            return True, f"Đã xóa lịch nghỉ và tự xếp lại thứ tự/phạt cho {rebalanced} bản ghi còn lại."
         return True, "Đã xóa lịch nghỉ thành công!"
     except Exception as e:
         return False, f"Lỗi xóa dòng: {e}"
@@ -1341,16 +1369,205 @@ def _load_live_two_leave_sheets(client):
 
     return combine_leave_sources_for_daily_stats(df_secondary, df_primary)
 
+
+def _read_leave_sheet_with_source(sheet, source_id):
+    """Đọc A:J và giữ chính xác số dòng vật lý của Google Sheet để có thể cập nhật lại đúng dòng."""
+    expected = [
+        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+        "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
+        "Giờ cập nhật", "Người cập nhật"
+    ]
+    try:
+        values = sheet.get('A:J')
+        rows = []
+        if not values or len(values) < 2:
+            return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
+        for sheet_row, values_row in enumerate(values[1:], start=2):
+            vals = list(values_row[:10]) + [""] * max(0, 10 - len(values_row))
+            if not any(str(v).strip() for v in vals[:10]):
+                continue
+            item = dict(zip(expected, vals[:10]))
+            item['__source_sheet_id'] = str(source_id)
+            item['__source_row'] = int(sheet_row)
+            rows.append(item)
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
+    except Exception:
+        return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
+
+
+def _extract_progressive_ordinal(detail):
+    """Lấy số X từ tiền tố 'Người Thứ X ...'."""
+    try:
+        m = re.search(r'Người\s+Thứ\s+(\d+)', str(detail or ''), flags=re.IGNORECASE)
+        return max(1, int(m.group(1))) if m else None
+    except Exception:
+        return None
+
+
+def _progressive_group_key(row):
+    """Khóa nhóm phạt lũy tiến = (ngày, loại chuẩn)."""
+    canonical = get_progressive_penalty_reason(row.get('Lý do nghỉ', ''))
+    ngay = normalize_schedule_date(row.get('Ngày', ''))
+    if not canonical or not ngay:
+        return None
+    return (str(ngay), str(canonical))
+
+
+def _existing_base_penalty(row, catalog):
+    """Lấy mức phạt gốc, tách phần lũy tiến khỏi tổng tiền hiện có khi cần."""
+    reason = str(row.get('Lý do nghỉ', '')).replace('🔴 ', '').strip()
+    key = normalize_leave_reason(reason)
+    if key in catalog:
+        return float(catalog[key].get('penalty', 0) or 0)
+
+    canonical = get_progressive_penalty_reason(reason)
+    if canonical:
+        for item in catalog.values():
+            if get_progressive_penalty_reason(item.get('name', '')) == canonical:
+                return float(item.get('penalty', 0) or 0)
+
+    current_total = _parse_leave_number(row.get('Phạt vi phạm', 0), 0.0, money=True)
+    old_ordinal = _extract_progressive_ordinal(row.get('Chi tiết', ''))
+    old_extra = max(0, int(old_ordinal or 1) - 2) * 100000
+    return max(0.0, float(current_total) - float(old_extra))
+
+
+def rebalance_progressive_penalty_groups(client, affected_groups, updated_by):
+    """
+    Xếp lại toàn bộ Người Thứ X và mức phạt lũy tiến của các nhóm bị ảnh hưởng.
+
+    Ví dụ sau khi Người Thứ 1 bị xóa/đổi sang Có phép:
+      cũ 2 -> mới 1
+      cũ 3 -> mới 2 (bỏ +100.000)
+      cũ 4 -> mới 3 (chỉ còn +100.000)
+    và ghi ngược vào đúng Google Sheet/dòng vật lý.
+
+    Nếu cùng một lịch xuất hiện ở cả hai nguồn, lịch đó chỉ chiếm 1 vị trí thứ tự,
+    nhưng mọi bản sao vật lý của nó đều được cập nhật để hai nguồn nhất quán.
+    """
+    clean_groups = set()
+    for item in affected_groups or []:
+        try:
+            ngay, canonical = item
+            if ngay and canonical:
+                clean_groups.add((str(ngay), str(canonical)))
+        except Exception:
+            continue
+    if not clean_groups:
+        return 0
+
+    # Đọc dữ liệu LIVE, giữ row vật lý của cả hai nguồn.
+    sheet_map = {
+        SHEET_DU_PHONG_ID: client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0),
+        SHEET_LICH_NGHI_2_ID: client.open_by_key(SHEET_LICH_NGHI_2_ID).get_worksheet(0),
+    }
+    frames = [
+        _read_leave_sheet_with_source(sheet_map[SHEET_DU_PHONG_ID], SHEET_DU_PHONG_ID),
+        _read_leave_sheet_with_source(sheet_map[SHEET_LICH_NGHI_2_ID], SHEET_LICH_NGHI_2_ID),
+    ]
+    frames = [f for f in frames if f is not None and not f.empty]
+    if not frames:
+        return 0
+    raw_all = pd.concat(frames, ignore_index=True)
+    raw_all['_reb_date'] = raw_all['Ngày'].apply(normalize_schedule_date)
+    raw_all['_reb_reason'] = raw_all['Lý do nghỉ'].astype(str).apply(get_progressive_penalty_reason)
+
+    catalog = build_leave_reason_catalog(globals().get('df_loai_nghi', pd.DataFrame()))
+    now_vn = datetime.now(VN_TZ)
+    actor = str(updated_by or 'Hệ thống')
+    update_date = now_vn.strftime('%d/%m/%Y')
+    update_time = now_vn.strftime('%H:%M:%S')
+    updated_physical_rows = 0
+
+    for ngay, canonical in sorted(clean_groups):
+        group = raw_all[(raw_all['_reb_date'] == ngay) & (raw_all['_reb_reason'] == canonical)].copy()
+        if group.empty:
+            continue
+
+        # Một lịch logic = Ngày + Nhân viên + Lý do. Gom mọi bản sao vật lý của lịch đó.
+        logical = {}
+        for _, r in group.iterrows():
+            key = schedule_key(r)
+            logical.setdefault(key, []).append(r.copy())
+
+        ordered = []
+        for logical_key, physical_rows in logical.items():
+            # Ưu tiên thứ tự Người Thứ X đã lưu; đây là thứ tự lịch sử đáng tin cậy nhất.
+            ordinals = [
+                _extract_progressive_ordinal(r.get('Chi tiết', ''))
+                for r in physical_rows
+            ]
+            ordinals = [x for x in ordinals if x is not None]
+            old_ordinal = min(ordinals) if ordinals else None
+
+            # Representative ưu tiên Sheet dự phòng, rồi theo row vật lý.
+            representative = sorted(
+                physical_rows,
+                key=lambda r: (
+                    0 if str(r.get('__source_sheet_id', '')) == SHEET_DU_PHONG_ID else 1,
+                    int(float(r.get('__source_row', 10**9) or 10**9)),
+                )
+            )[0]
+            fallback_row = int(float(representative.get('__source_row', 10**9) or 10**9))
+            ordered.append((old_ordinal, fallback_row, logical_key, representative, physical_rows))
+
+        # Những bản ghi có Người Thứ cũ được giữ đúng trật tự cũ; dữ liệu rất cũ không có tiền tố xếp sau theo row.
+        ordered.sort(key=lambda x: (x[0] is None, x[0] if x[0] is not None else 10**9, x[1], normalize_login_name(x[3].get('Tên nhân viên', ''))))
+
+        for new_ordinal, (_, _, logical_key, representative, physical_rows) in enumerate(ordered, start=1):
+            base_penalty = _existing_base_penalty(representative, catalog)
+            extra_penalty = max(0, new_ordinal - 2) * 100000
+            new_penalty = float(base_penalty) + float(extra_penalty)
+            prefix = f"Người Thứ {new_ordinal} {canonical.lower()}"
+
+            for physical in physical_rows:
+                source_id = str(physical.get('__source_sheet_id', '')).strip()
+                try:
+                    row_idx = int(float(physical.get('__source_row')))
+                except Exception:
+                    continue
+                target = sheet_map.get(source_id)
+                if target is None:
+                    continue
+
+                user_note = _strip_generated_progressive_prefix(physical.get('Chi tiết', ''))
+                new_detail = f"{prefix} | {user_note}" if user_note else prefix
+
+                # Chỉ thay phần cần thiết; giữ nguyên Số ngày tính và Số ngày phép cộng dồn hiện có.
+                e_val = physical.get('Số ngày tính', '')
+                f_val = physical.get('Số ngày phép cộng dồn', '')
+                values_d_to_j = [[
+                    new_detail,
+                    e_val,
+                    f_val,
+                    new_penalty,
+                    update_date,
+                    update_time,
+                    actor,
+                ]]
+                gspread_update_range(target, f'D{row_idx}:J{row_idx}', values_d_to_j, value_input_option='USER_ENTERED')
+                updated_physical_rows += 1
+
+    if updated_physical_rows:
+        st.cache_data.clear()
+    return updated_physical_rows
+
+
 def update_schedule_record(original_row, edited_row, updated_by):
     """
     Sửa đúng dòng ở Google Sheet nguồn của bản ghi đang hiển thị.
-    Các cột Số ngày tính / cộng dồn / phạt / dấu thời gian / người cập nhật
-    luôn được tính lại tự động từ LoaiNghi và dữ liệu live của cả hai Google Sheet.
+    Sau khi sửa, tự động xếp lại Người Thứ X/phạt lũy tiến của nhóm cũ và nhóm mới.
     """
     try:
         client = get_gspread_client()
         if not client:
             return False, "Chưa cấu hình quyền kết nối Google Sheets."
+
+        # Nhớ nhóm cũ trước khi thay đổi để sau đó có thể co lại thứ tự 2->1, 3->2...
+        affected_groups = set()
+        old_group = _progressive_group_key(original_row)
+        if old_group:
+            affected_groups.add(old_group)
 
         # Đọc LIVE cả hai nguồn để tránh dùng cache khi tính lại hoặc kiểm tra trùng.
         live_all = _load_live_two_leave_sheets(client)
@@ -1393,21 +1610,35 @@ def update_schedule_record(original_row, edited_row, updated_by):
             return False, "Không tìm thấy dòng tương ứng trong Google Sheet nguồn."
         gspread_update_range(target, f'A{row_idx}:J{row_idx}', [new_values], raw=False)
 
+        # Nhóm mới cũng phải được chuẩn hóa. Nếu đổi Không phép -> Có phép thì new_group=None,
+        # nhưng old_group vẫn được xếp lại để Người 2 trở thành Người 1, v.v.
+        new_group = _progressive_group_key(recalculated)
+        if new_group:
+            affected_groups.add(new_group)
+
+        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, updated_by)
+
         st.cache_data.clear()
-        return True, "Đã cập nhật lịch nghỉ. Nếu vẫn cùng ngày và cùng loại vi phạm, hệ thống giữ nguyên Người Thứ X cũ."
+        if rebalanced:
+            return True, f"Đã cập nhật lịch nghỉ và tự xếp lại thứ tự/phạt lũy tiến cho {rebalanced} bản ghi trong nhóm bị ảnh hưởng."
+        return True, "Đã cập nhật lịch nghỉ thành công."
     except Exception as e:
         return False, f"Lỗi cập nhật lịch nghỉ: {e}"
 
-
-def delete_schedule_records(original_rows):
-    """Xóa nhiều lịch đúng Google Sheet nguồn; xóa từ dưới lên theo từng file."""
+def delete_schedule_records(original_rows, updated_by=None):
+    """Xóa nhiều lịch đúng nguồn rồi tự xếp lại thứ tự/phạt của mọi nhóm vi phạm bị ảnh hưởng."""
     try:
         client = get_gspread_client()
         if not client:
             return False, "Chưa cấu hình quyền kết nối Google Sheets."
+        actor = str(updated_by or st.session_state.get("current_user", "Hệ thống"))
 
+        affected_groups = set()
         grouped = {}
         for row in original_rows:
+            group_key = _progressive_group_key(row)
+            if group_key:
+                affected_groups.add(group_key)
             source_id = str(row.get('__source_sheet_id', '')).strip() or SHEET_DU_PHONG_ID
             grouped.setdefault(source_id, []).append(row)
 
@@ -1423,7 +1654,11 @@ def delete_schedule_records(original_rows):
                 target.delete_rows(idx)
                 deleted += 1
 
+        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor) if affected_groups else 0
+
         st.cache_data.clear()
+        if rebalanced:
+            return True, f"Đã xóa {deleted} dòng và tự xếp lại thứ tự/phạt cho {rebalanced} bản ghi còn lại."
         return True, f"Đã xóa {deleted} dòng lịch nghỉ từ đúng Google Sheet nguồn."
     except Exception as e:
         return False, f"Lỗi xóa lịch nghỉ: {e}"
@@ -3273,11 +3508,11 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                             if has_past:
                                 st.error("❌ Lễ tân không được xóa lịch trong quá khứ.")
                             else:
-                                ok, msg = delete_schedule_records(originals)
+                                ok, msg = delete_schedule_records(originals, st.session_state.current_user)
                                 (st.success if ok else st.error)(msg)
                                 if ok: st.rerun()
                         else:
-                            ok, msg = delete_schedule_records(originals)
+                            ok, msg = delete_schedule_records(originals, st.session_state.current_user)
                             (st.success if ok else st.error)(msg)
                             if ok: st.rerun()
         else:
@@ -3369,7 +3604,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
                         can_delete = False
 
                     if can_delete:
-                        success_del, msg_del = delete_backup_row(real_i + 2)
+                        success_del, msg_del = delete_backup_row(real_i + 2, st.session_state.current_user)
                         if success_del:
                             st.success(f"✅ {msg_del}")
                             st.cache_data.clear()

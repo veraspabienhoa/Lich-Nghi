@@ -53,9 +53,25 @@ def normalize_leave_reason(value):
     text = str(value).replace("🔴", "").strip()
     return " ".join(text.split()).casefold()
 
+PROGRESSIVE_PENALTY_REASONS = {
+    normalize_login_name("Nghỉ không phép"): "Nghỉ không phép",
+    normalize_login_name("Đi trễ không phép"): "Đi trễ không phép",
+    normalize_login_name("Về sớm không phép"): "Về sớm không phép",
+    # Chấp nhận tên cũ/biến thể nếu danh mục đang dùng "Ra sớm không phép".
+    normalize_login_name("Ra sớm không phép"): "Về sớm không phép",
+}
+
+def get_progressive_penalty_reason(value):
+    """Trả về tên chuẩn nếu loại nghỉ thuộc 3 nhóm phạt lũy tiến, ngược lại trả về None."""
+    key = normalize_login_name(str(value).replace("🔴", "").strip())
+    return PROGRESSIVE_PENALTY_REASONS.get(key)
+
+def is_progressive_penalty_reason(value):
+    return get_progressive_penalty_reason(value) is not None
+
 def is_nghi_khong_phep_reason(value):
-    """Chỉ nhận đúng loại 'Nghỉ không phép', không tính các lỗi như Đi trễ không phép."""
-    return normalize_login_name(str(value).replace("🔴", "").strip()) == normalize_login_name("Nghỉ không phép")
+    """Giữ tương thích với code cũ: chỉ kiểm tra riêng Nghỉ không phép."""
+    return get_progressive_penalty_reason(value) == "Nghỉ không phép"
 
 def _fallback_admin_remember_token():
     """Token bền vững cho tài khoản admin dự phòng; không lưu mật khẩu trong trình duyệt."""
@@ -888,8 +904,19 @@ def _leave_exists_in_sources(df_sources, ngay, nv, loai_nghi):
                  (reason_cmp == normalize_leave_reason(loai_nghi))).any())
 
 
-def _unexcused_ordinal_and_bonus(df_sources, ngay):
-    """Người 1/2: +0; người 3: +100k; người 4: +200k; ..."""
+def _progressive_ordinal_and_bonus(df_sources, ngay, loai_nghi):
+    """
+    Tính thứ tự RIÊNG cho từng loại vi phạm trong cùng ngày:
+    - Nghỉ không phép
+    - Đi trễ không phép
+    - Về sớm không phép (kể cả biến thể Ra sớm không phép)
+
+    Người 1/2: +0; Người 3: +100.000; Người 4: +200.000; ...
+    """
+    canonical = get_progressive_penalty_reason(loai_nghi)
+    if canonical is None:
+        return 1, 0
+
     target_date = pd.to_datetime(ngay, errors='coerce', dayfirst=True)
     if pd.isna(target_date) or df_sources is None or df_sources.empty:
         ordinal = 1
@@ -897,10 +924,17 @@ def _unexcused_ordinal_and_bonus(df_sources, ngay):
         target_date = target_date.date()
         d = df_sources.copy()
         d['Ngày_cmp'] = pd.to_datetime(d['Ngày'], errors='coerce', dayfirst=True).dt.date
-        mask = (d['Ngày_cmp'] == target_date) & d['Lý do nghỉ'].astype(str).apply(is_nghi_khong_phep_reason)
+        canonical_series = d['Lý do nghỉ'].astype(str).apply(get_progressive_penalty_reason)
+        mask = (d['Ngày_cmp'] == target_date) & canonical_series.eq(canonical)
         ordinal = int(mask.sum()) + 1
+
     bonus = max(0, ordinal - 2) * 100000
     return ordinal, bonus
+
+
+def _unexcused_ordinal_and_bonus(df_sources, ngay):
+    """Alias tương thích code cũ cho riêng Nghỉ không phép."""
+    return _progressive_ordinal_and_bonus(df_sources, ngay, "Nghỉ không phép")
 
 
 def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, updated_by, df_main_source=None):
@@ -908,7 +942,7 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
     Ghi lịch vào Sheet1 đúng A:J, last row.
     Trước khi ghi sẽ đọc LIVE Sheet1 để:
     - chặn trùng cùng nhân viên + ngày + loại nghỉ;
-    - tính thứ tự Nghỉ không phép và tiền phạt lũy tiến.
+    - tính thứ tự riêng cho Nghỉ không phép / Đi trễ không phép / Về sớm không phép và tiền phạt lũy tiến.
     """
     try:
         client = get_gspread_client()
@@ -939,9 +973,10 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         save_detail = str(chi_tiet).strip()
         save_penalty = float(phat_vi_pham) if phat_vi_pham is not None else 0.0
         ordinal_note = ""
-        if is_nghi_khong_phep_reason(loai_nghi):
-            ordinal, extra_penalty = _unexcused_ordinal_and_bonus(combined_live, ngay)
-            ordinal_note = f"Người Thứ {ordinal} nghỉ không phép"
+        progressive_reason = get_progressive_penalty_reason(loai_nghi)
+        if progressive_reason:
+            ordinal, extra_penalty = _progressive_ordinal_and_bonus(combined_live, ngay, loai_nghi)
+            ordinal_note = f"Người Thứ {ordinal} {progressive_reason.lower()}"
             save_detail = f"{ordinal_note} | {save_detail}" if save_detail else ordinal_note
             save_penalty += extra_penalty
 
@@ -1271,11 +1306,24 @@ def prepare_bang_tour_display(df):
     Sau khi lấy dữ liệu từ file:
     - Đưa Trạng Thái ngay sau Tên Nhân Viên.
     - Đưa Thời gian còn lại ngay sau Trạng Thái.
+    - Chuyển DANG CHO -> Đang chờ; DANG THUC HIEN -> Đang thực hiện.
     - Thời gian còn lại hiển thị bằng số nguyên.
     - Nếu Thời gian còn lại <= -15 thì làm trống VALUE trên bảng web.
       (Không ghi ngược/xóa dữ liệu trong file XLSM nguồn.)
     """
     out = reorder_bang_tour_columns(df)
+
+    status_col = _find_tour_col(out, "Trạng thái")
+    if status_col is not None:
+        def fmt_status(v):
+            token = _tour_norm_token(v)
+            if token == "dang cho":
+                return "Đang chờ"
+            if token == "dang thuc hien":
+                return "Đang thực hiện"
+            return "" if pd.isna(v) else str(v).strip()
+        out[status_col] = out[status_col].apply(fmt_status)
+
     remain_col = _find_tour_col(out, "Thời gian còn lại")
     if remain_col is not None:
         def fmt_remaining(v):
@@ -1284,6 +1332,10 @@ def prepare_bang_tour_display(df):
                 return ""
             return int(round(n))
         out[remain_col] = out[remain_col].apply(fmt_remaining)
+        # Dùng nullable integer để cột vẫn là kiểu số nhưng các giá trị bị xóa hiển thị thành ô trống.
+        out[remain_col] = pd.to_numeric(out[remain_col], errors="coerce").astype("Int64")
+
+    # Giữ chữ None nếu workbook thực sự có chuỗi "None" để CSS có thể làm nó chìm vào nền web.
     out.attrs.update(df.attrs)
     return out
 
@@ -1343,11 +1395,11 @@ def calculate_bang_tour_stats(df):
     co_the_len_tour = sap_xong + dang_ranh
 
     rows = [
+        ("Có thể lên tour", co_the_len_tour),
         ("Đang thực hiện", dang_thuc_hien),
         ("Đang chờ", dang_cho),
         ("Sắp xong (≤ 30 phút)", sap_xong),
         ("Đang rảnh", dang_ranh),
-        ("Có thể lên tour", co_the_len_tour),
         ("Đi làm", int(di_lam_mask.sum())),
         ("Nghỉ phép", int(nghi_phep_mask.sum())),
         ("Ca 1", int(ca1_mask.sum())),
@@ -1413,6 +1465,14 @@ def style_bang_tour(df):
         return [css] * len(row)
 
     styler = df.style.apply(row_style, axis=1)
+
+    # Làm chữ literal None / NaN thành màu trắng như nền web để không gây rối mắt.
+    def hide_none_text(val):
+        if pd.isna(val) or str(val).strip().casefold() in {"none", "nan"}:
+            return "color:#FFFFFF !important;"
+        return ""
+    styler = styler.map(hide_none_text)
+
     styler = styler.set_table_styles([
         {
             "selector": "th",
@@ -1425,6 +1485,13 @@ def style_bang_tour(df):
         },
         {"selector": "td", "props": [("white-space", "nowrap")]},
     ])
+
+    status_col = _find_tour_col(df, "Trạng thái")
+    if status_col is not None:
+        styler = styler.set_properties(
+            subset=[status_col],
+            **{"white-space": "nowrap", "min-width": "125px", "width": "125px"}
+        )
     return styler
 
 
@@ -2036,8 +2103,14 @@ elif selected_page == "🧭 Bảng Tour":
         # Bảng thống kê dùng dữ liệu GỐC vừa đọc, trước khi làm trống thời gian <= -15.
         tour_stats_df = calculate_bang_tour_stats(df_tour)
         st.markdown("### 📊 Thống kê Bảng Tour")
+        def style_tour_stats_row(row):
+            if str(row.get("Chỉ số", "")).strip() == "Có thể lên tour":
+                return ["background-color:#92D050;color:#000000;font-weight:700;"] * len(row)
+            return [""] * len(row)
+
+        tour_stats_styled = tour_stats_df.style.apply(style_tour_stats_row, axis=1)
         st.dataframe(
-            tour_stats_df,
+            tour_stats_styled,
             use_container_width=True,
             hide_index=True,
             height="content"
@@ -2048,11 +2121,24 @@ elif selected_page == "🧭 Bảng Tour":
         df_tour_display = prepare_bang_tour_display(df_tour)
 
         # Auto-fit toàn bộ chiều cao: hiển thị đủ dòng, bỏ thanh cuộn dọc.
+        status_col_display = _find_tour_col(df_tour_display, "Trạng thái")
+        remain_col_display = _find_tour_col(df_tour_display, "Thời gian còn lại")
+        tour_column_config = {}
+        if status_col_display is not None:
+            tour_column_config[status_col_display] = st.column_config.TextColumn(
+                status_col_display, width="medium"
+            )
+        if remain_col_display is not None:
+            tour_column_config[remain_col_display] = st.column_config.NumberColumn(
+                remain_col_display, width="small", format="%d"
+            )
+
         st.dataframe(
             style_bang_tour(df_tour_display),
             use_container_width=True,
             hide_index=True,
-            height="content"
+            height="content",
+            column_config=tour_column_config
         )
         st.caption(
             "Màu dòng: Nghỉ phép = chữ mờ/nền trắng; Đi làm = chữ đen/nền trắng; "
@@ -2137,7 +2223,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                         loai_nghi_dict[l_name.lower()] = [s_ngay, p_val]
 
         if not list_loai_nghi:
-            list_loai_nghi = ["Nghỉ phép", "🔴 Nghỉ không phép", "Nghỉ phát sinh", "🔴 Đi trễ không phép"]
+            list_loai_nghi = ["Nghỉ phép", "🔴 Nghỉ không phép", "Nghỉ phát sinh", "🔴 Đi trễ không phép", "🔴 Về sớm không phép"]
             loai_nghi_dict = {l.lower(): [0.0, 0.0] for l in list_loai_nghi}
 
         chosen_loai = st.selectbox("Lý do nghỉ:", ["-- Chọn lý do nghỉ --"] + list_loai_nghi, key="sb_loai_nghi_live", filter_mode="contains")
@@ -2203,12 +2289,15 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
 
         dyn_key_suffix = f"{chosen_loai}_{start_date}_{chosen_nv}"
 
-        # Hiển thị trước thứ tự và mức cộng phạt nếu chọn đúng loại Nghỉ không phép.
-        if is_nghi_khong_phep_reason(chosen_loai):
-            preview_ordinal, preview_extra = _unexcused_ordinal_and_bonus(registration_all_df, start_date)
+        # Hiển thị trước thứ tự và mức cộng phạt cho 3 nhóm vi phạm lũy tiến.
+        progressive_preview_reason = get_progressive_penalty_reason(chosen_loai)
+        if progressive_preview_reason:
+            preview_ordinal, preview_extra = _progressive_ordinal_and_bonus(
+                registration_all_df, start_date, chosen_loai
+            )
             preview_total = float(default_phat) + float(preview_extra)
             st.warning(
-                f"⚠️ Nghỉ không phép ngày {start_date.strftime('%d/%m/%Y')}: Người Thứ {preview_ordinal}. "
+                f"⚠️ {progressive_preview_reason} ngày {start_date.strftime('%d/%m/%Y')}: Người Thứ {preview_ordinal}. "
                 f"Phạt theo quy định {float(default_phat):,.0f} VNĐ"
                 + (f" + lũy tiến {preview_extra:,.0f} VNĐ" if preview_extra > 0 else "")
                 + f" = {preview_total:,.0f} VNĐ."
@@ -2230,7 +2319,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                     value=float(default_phat),
                     step=50000.0,
                     key=f"num_phat_{dyn_key_suffix}",
-                    disabled=is_nghi_khong_phep_reason(chosen_loai)
+                    disabled=is_progressive_penalty_reason(chosen_loai)
                 )
 
             confirm_multiple = True
@@ -2370,7 +2459,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                                                 break
 
                                     # GỌI HÀM LƯU LÊN GOOGLE SHEETS
-                                    penalty_to_save = float(default_phat) if is_nghi_khong_phep_reason(chosen_loai) else float(val_phat)
+                                    penalty_to_save = float(default_phat) if is_progressive_penalty_reason(chosen_loai) else float(val_phat)
                                     success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
                                         curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, chosen_loai.replace("🔴 ", ""),
                                         input_chitiet, val_songay, accumulated_month, penalty_to_save, st.session_state.current_user,

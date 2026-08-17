@@ -7816,9 +7816,31 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                             disabled=(c in {"Tích lũy", "Vi phạm kỳ trước"})
                         )
 
+                # V57: trong phần Mở lại và chỉnh sửa bản lương, tô vàng toàn bộ dòng
+                # có Thực nhận = 0 hoặc nhỏ hơn 0, giống bảng lương tổng hợp hiện tại.
+                # Dùng Pandas Styler để giữ nguyên khả năng chỉnh sửa của st.data_editor.
+                def _highlight_history_non_positive_row(_row):
+                    try:
+                        _net = _money_to_float(_row.get("Số tiền thực nhận", 0))
+                    except Exception:
+                        _net = 0.0
+                    if _net <= 0:
+                        return ["background-color:#FFF2CC !important;"] * len(_row)
+                    return [""] * len(_row)
+
+                hist_editor_styler = hist_editor_df.style.apply(
+                    _highlight_history_non_positive_row, axis=1
+                )
+                try:
+                    hist_editor_styler = apply_table_visual_styler(
+                        hist_editor_styler, "payroll_history", list(hist_editor_df.columns)
+                    )
+                except Exception:
+                    pass
+
                 hist_editor_version = int(st.session_state.get(hist_editor_version_key, 0) or 0)
                 edited_hist = st.data_editor(
-                    hist_editor_df,
+                    hist_editor_styler,
                     key=f"payroll_history_editor_{batch}_{hist_editor_version}",
                     width="stretch", height="content", hide_index=True,
                     row_height=layout_row_height("payroll_history"),

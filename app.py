@@ -4571,14 +4571,16 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
     from openpyxl.worksheet.page import PageMargins
 
     d = recalculate_payroll_net(payroll_df).copy()
+    # V45: File Excel export KHÔNG xuất Email. Cột cuối thay bằng Họ và Tên nhân viên,
+    # lấy từ hồ sơ Sheet1 cột E (đã được nạp vào trường nội bộ "Họ và tên").
     export_cols = [
         "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
         "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
-        "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
+        "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Họ và tên"
     ]
     for c in export_cols:
         if c not in d.columns:
-            d[c] = "" if c in {"Tên Hệ thống","Số tài khoản ngân hàng","Tên ngân hàng","Email"} else 0
+            d[c] = "" if c in {"Tên Hệ thống","Số tài khoản ngân hàng","Tên ngân hàng","Họ và tên"} else 0
 
     wb = Workbook()
     ws = wb.active
@@ -4597,8 +4599,9 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
     ws['B2'] = f"Từ ngày {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}"
     ws['B2'].font = Font(name='Arial', size=11, bold=True)
 
-    # Dùng bộ tiêu đề chuẩn thống nhất với bảng lương trên web.
-    header_labels = PAYROLL_DISPLAY_LABELS
+    # Dùng bộ tiêu đề chuẩn, riêng cột Họ và tên đổi tên hiển thị theo yêu cầu export.
+    header_labels = dict(PAYROLL_DISPLAY_LABELS)
+    header_labels["Họ và tên"] = "Họ và Tên nhân viên"
     for c, h in enumerate(export_cols, start=1):
         display_header = header_labels.get(h, h)
         cell = ws.cell(row=3, column=c, value=display_header)
@@ -4614,6 +4617,7 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
 
     start_row = 4
     money_cols = {"Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker", "Số tiền thực nhận"}
+    non_positive_fill = PatternFill('solid', fgColor='FFF2CC')
     for i, (_, r) in enumerate(d.iterrows(), start=start_row):
         for j, col in enumerate(export_cols, start=1):
             val = r.get(col, '')
@@ -4627,6 +4631,11 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
         # Tài khoản ngân hàng buộc kiểu Text để giữ số 0 đầu.
         bank_col = export_cols.index('Số tài khoản ngân hàng') + 1
         ws.cell(row=i, column=bank_col).number_format = '@'
+
+        # V45: tô vàng TOÀN BỘ dòng khi Thực nhận <= 0 để Admin dễ kiểm tra.
+        if _money_to_float(r.get('Số tiền thực nhận', 0)) <= 0:
+            for j in range(1, last_col + 1):
+                ws.cell(row=i, column=j).fill = non_positive_fill
 
     total_row = start_row + len(d)
     ws.cell(total_row, 2, "TỔNG")
@@ -4671,8 +4680,8 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
         elif col == 'Tên ngân hàng':
             # Không wrap nên cho phép cột rộng hơn để tên ngân hàng nằm trên một dòng.
             width = min(max(max_len + 2, 22), 32)
-        elif col == 'Email':
-            width = min(max(max_len + 2, 16), 25)
+        elif col == 'Họ và tên':
+            width = min(max(max_len + 2, 18), 28)
         else:
             width = min(max(max_len + 2, 6), 19)
         ws.column_dimensions[get_column_letter(j)].width = width

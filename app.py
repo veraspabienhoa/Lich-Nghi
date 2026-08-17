@@ -484,7 +484,7 @@ online_users_count = len(active_users)
 online_users_list = list(active_users.keys())
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Lịch Nghỉ Vera Spa", page_icon="📅", layout="wide", initial_sidebar_state="auto")
+st.set_page_config(page_title="Vera Spa", page_icon="📅", layout="wide", initial_sidebar_state="auto")
 
 # --- JAVASCRIPT: NHỚ ĐĂNG NHẬP + ĐÓNG DROPDOWN KHI BẤM RA NGOÀI ---
 components.html("""
@@ -713,7 +713,7 @@ PAYROLL_STORAGE_WORKSHEET = "BangLuong"
 PAYROLL_CONFIG_WORKSHEET = "CauHinhLuong"
 UI_LAYOUT_WORKSHEET = "CauHinhCot"
 TICHLUY_WORKSHEET = "TichLuy"
-# V39: bảo vệ TichLuy đã hoàn thành + tự đồng bộ nhân viên còn thiếu + STT A2=1,2,3...
+# V40: fix TichLuy khi tính lương + chỉ tính role nhanvien + định dạng tiền có phân cách hàng nghìn
 TICHLUY_TARGET_DEFAULT = 5000000
 TICHLUY_PERIOD_DEFAULT = 500000
 TICHLUY_HEADERS = [
@@ -3546,7 +3546,12 @@ def get_tichluy_charge_map(start_date, end_date, employee_names=None, for_existi
         elif remaining <= 0:
             reason = 'Đã đủ mục tiêu tích lũy.'
         elif start_work is None:
-            reason = 'Chưa có Ngày bắt đầu làm trong sheet TichLuy.'
+            # Dữ liệu TichLuy cũ có nhiều nhân viên đã tồn tại trước khi hệ thống bắt đầu
+            # lưu Ngày bắt đầu làm. Nếu D/E/F cho thấy vẫn còn phải tích lũy thì vẫn thu
+            # theo kỳ; chỉ các nhân viên mới (được thêm từ hệ thống) mới cần áp dụng chính
+            # xác quy tắc kỳ đầu <10 ngày vì các dòng mới luôn có ngày bắt đầu làm.
+            charge = min(float(TICHLUY_PERIOD_DEFAULT), remaining)
+            reason = 'Hồ sơ cũ chưa có Ngày bắt đầu làm; thu theo số Còn lại trong TichLuy.'
         elif end_date < start_work:
             reason = 'Kỳ lương trước ngày bắt đầu làm.'
         else:
@@ -4072,16 +4077,26 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
     creds = creds[~creds['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
         'ten nhan vien', 'ten he thong', 'username', 'user name'
     })].copy()
+
+    # V40: Tính lương chỉ áp dụng cho tài khoản có vai trò chính xác là ``nhanvien``.
+    # Letan / quanly / locker / tapvu / admin không tạo dòng trong bảng lương mới.
+    # Giữ tập khóa của toàn bộ tài khoản để Tip thuộc bộ phận bị loại không bị báo nhầm là
+    # "không khớp tài khoản hệ thống".
+    all_credential_keys = set(creds['Tên nhân viên'].apply(normalize_login_name).tolist())
     if 'Phân quyền' in creds.columns:
-        # Không tạo dòng lương cho Admin hoặc Lễ tân. Vai trò Locker vẫn là nhân viên và vẫn có thể có bảng lương.
         roles = creds['Phân quyền'].astype(str).str.strip().str.lower()
-        creds = creds[~roles.isin(['admin', 'letan', 'quanly'])]
+        creds = creds[roles.eq('nhanvien')].copy()
+    else:
+        # Sheet cũ chưa có cột phân quyền được xem là nhân viên để bảo toàn tương thích.
+        creds = creds.copy()
     creds['__key'] = creds['Tên nhân viên'].apply(normalize_login_name)
     penalty_map = _period_penalty_by_employee(start_date, end_date, leave_primary, leave_secondary)
     employee_overrides = get_payroll_employee_overrides()
-    # Tích lũy tự động lấy từ sheet TichLuy. Bảng lương mới không thu lại một kỳ đã ghi nhận.
+    # Tích lũy tự động lấy từ sheet TichLuy. Nếu kỳ này đã được ghi nhận trước đó,
+    # bảng lương vẫn phải HIỂN THỊ đúng số tiền của kỳ đó. Việc chống cộng trùng được
+    # xử lý ở bước commit/save TichLuy, không được biến số hiển thị thành 0.
     tichluy_map, _tichluy_info = get_tichluy_charge_map(
-        start_date, end_date, creds['Tên nhân viên'].astype(str).tolist(), for_existing_snapshot=False
+        start_date, end_date, creds['Tên nhân viên'].astype(str).tolist(), for_existing_snapshot=True
     )
 
     rows = []
@@ -4109,8 +4124,10 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
         })
     result = pd.DataFrame(rows, columns=PAYROLL_COLUMNS)
     result = recalculate_payroll_net(result)
-    credential_keys = set(creds['__key'].tolist())
-    unmatched = sorted({str(v).strip() for v in tip.loc[~tip['__key'].isin(credential_keys), 'NV tư vấn'].tolist() if str(v).strip()})
+    unmatched = sorted({
+        str(v).strip() for v in tip.loc[~tip['__key'].isin(all_credential_keys), 'NV tư vấn'].tolist()
+        if str(v).strip()
+    })
     return result, unmatched
 
 
@@ -5456,7 +5473,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
     st.subheader("💰 Thống kê lương nhân viên")
     st.caption("Tiền Lương được tính theo đúng quy tắc: cột F bắt đầu bằng 'Tip' → cộng cột G theo tên nhân viên ở cột I.")
 
-    tab_calc, tab_history = st.tabs(["🧮 Tính lương kỳ hiện tại", "🗂 Lịch sử bảng lương đã lưu"])
+    tab_calc, tab_history = st.tabs(["🧮 Tính lương nhân viên", "🗂 Lịch sử bảng lương đã lưu"])
     with tab_calc:
         default_living_db, default_locker_db = get_payroll_default_amounts()
         with st.expander("⚙️ Mức khấu trừ mặc định", expanded=False):
@@ -5488,7 +5505,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 })]
                 if 'Phân quyền' in payroll_emp_choices_df.columns:
                     _pay_roles = payroll_emp_choices_df['Phân quyền'].astype(str).str.strip().str.lower()
-                    payroll_emp_choices_df = payroll_emp_choices_df[~_pay_roles.isin(['admin', 'letan', 'quanly'])]
+                    payroll_emp_choices_df = payroll_emp_choices_df[_pay_roles.eq('nhanvien')].copy()
                 payroll_employee_options = payroll_emp_choices_df['Tên nhân viên'].astype(str).str.strip().drop_duplicates().tolist()
             else:
                 payroll_employee_options = []
@@ -5570,8 +5587,8 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         _override_df, width="stretch", height="content", hide_index=True,
                         column_config={
                             "Tên Hệ thống": st.column_config.TextColumn("Tên Hệ thống"),
-                            "Phí Sinh Hoạt riêng": st.column_config.NumberColumn("Phí Sinh Hoạt riêng", format="%.0f"),
-                            "Hỗ trợ Locker riêng": st.column_config.NumberColumn("Hỗ trợ Locker riêng", format="%.0f"),
+                            "Phí Sinh Hoạt riêng": st.column_config.NumberColumn("Phí Sinh Hoạt riêng", format="%,d"),
+                            "Hỗ trợ Locker riêng": st.column_config.NumberColumn("Hỗ trợ Locker riêng", format="%,d"),
                         }
                     )
 
@@ -5608,7 +5625,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
 
         # Trạng thái trực quan cho quy trình tải dữ liệu & tính lương.
         if "payroll_process_message" not in st.session_state:
-            st.session_state.payroll_process_message = "⏸️ Sẵn sàng tải dữ liệu và tính lương."
+            st.session_state.payroll_process_message = "⏸️ Sẵn sàng tính lương nhân viên."
         if "payroll_process_state" not in st.session_state:
             st.session_state.payroll_process_state = "idle"
 
@@ -5622,9 +5639,9 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             unsafe_allow_html=True
         )
 
-        if st.button("🔄 Tải dữ liệu & Tính lương", use_container_width=True, disabled=bool(period_err)):
+        if st.button("🧮 Tính lương nhân viên", use_container_width=True, disabled=bool(period_err)):
             progress = st.progress(0, text="0% - Bắt đầu xử lý...")
-            status = st.status("🔄 Đang xử lý bảng lương...", expanded=True, state="running")
+            status = st.status("🧮 Đang tính lương nhân viên...", expanded=True, state="running")
             try:
                 st.session_state.payroll_process_state = "running"
                 st.session_state.payroll_process_message = "Đang kiểm tra nguồn dữ liệu..."
@@ -5714,7 +5731,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             if unmatched:
                 st.warning("Có tên ở dữ liệu Tip nhưng không khớp tài khoản hệ thống: " + ", ".join(map(str, unmatched)))
 
-            # Bảng nhập điều chỉnh: không tạo lương cho Lễ tân; bỏ Học phí/Hỗ trợ dạy nghề.
+            # Bảng nhập điều chỉnh: chỉ có tài khoản role nhanvien; bỏ Học phí/Hỗ trợ dạy nghề.
             # Chi phí sinh hoạt và Locker đã được đổ mặc định cho tất cả, ngoại lệ sửa trực tiếp tại đây.
             editor_cols = [
                 "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
@@ -5725,13 +5742,13 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             col_cfg = {
                 "TT": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["TT"], format="%d", disabled=True, width=layout_width("payroll_current", "TT", "small")),
                 "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS["Tên Hệ thống"], disabled=True, width=layout_width("payroll_current", "Tên Hệ thống", "small")),
-                "Tiền Lương": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền Lương"], format="%.0f", disabled=True, width=layout_width("payroll_current", "Tiền Lương", "small")),
-                "Tiền phạt trong tháng": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền phạt trong tháng"], format="%.0f", disabled=True, width=layout_width("payroll_current", "Tiền phạt trong tháng", "small")),
-                "Tích lũy": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tích lũy"], format="%.0f", disabled=True, width=layout_width("payroll_current", "Tích lũy", "small")),
+                "Tiền Lương": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền Lương"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền Lương", "small")),
+                "Tiền phạt trong tháng": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền phạt trong tháng"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền phạt trong tháng", "small")),
+                "Tích lũy": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tích lũy"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tích lũy", "small")),
             }
             for c in [x for x in PAYROLL_ADJUSTMENT_COLUMNS if x != "Tích lũy"]:
                 col_cfg[c] = st.column_config.NumberColumn(
-                    PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%.0f", width=layout_width("payroll_current", c, "small")
+                    PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%,d", width=layout_width("payroll_current", c, "small")
                 )
             edited = st.data_editor(
                 editor_df, key="payroll_adjustment_editor", width="stretch", height="content", hide_index=True,
@@ -6038,7 +6055,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 hist_col_cfg = {
                     "TT": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS.get("TT", "TT"), format="%d", disabled=True, width=layout_width("payroll_history", "TT", "small")),
                     "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Tên Hệ thống", "Tên Hệ thống"), disabled=True, width=layout_width("payroll_history", "Tên Hệ thống", "small")),
-                    "Số tiền thực nhận": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS.get("Số tiền thực nhận", "Thực nhận"), format="%.0f", disabled=True, width=layout_width("payroll_history", "Số tiền thực nhận", "small")),
+                    "Số tiền thực nhận": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS.get("Số tiền thực nhận", "Thực nhận"), format="%,d", disabled=True, width=layout_width("payroll_history", "Số tiền thực nhận", "small")),
                     "Số tài khoản ngân hàng": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Số tài khoản ngân hàng", "Tài khoản ngân hàng"), disabled=True, width=layout_width("payroll_history", "Số tài khoản ngân hàng", "small")),
                     "Tên ngân hàng": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Tên ngân hàng", "Tên ngân hàng"), disabled=True, width=layout_width("payroll_history", "Tên ngân hàng", "small")),
                     "Email": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Email", "Email"), disabled=True, width=layout_width("payroll_history", "Email", "small")),
@@ -6049,7 +6066,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 ]:
                     if c in hist_editor_df.columns:
                         hist_col_cfg[c] = st.column_config.NumberColumn(
-                            PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%.0f", width=layout_width("payroll_history", c, "small"),
+                            PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%,d", width=layout_width("payroll_history", c, "small"),
                             disabled=(c == "Tích lũy")
                         )
 

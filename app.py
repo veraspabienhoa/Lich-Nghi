@@ -713,7 +713,7 @@ PAYROLL_STORAGE_WORKSHEET = "BangLuong"
 PAYROLL_CONFIG_WORKSHEET = "CauHinhLuong"
 UI_LAYOUT_WORKSHEET = "CauHinhCot"
 TICHLUY_WORKSHEET = "TichLuy"
-# V36: tiêu đề bảng tự wrap text khi chiều rộng cột nhỏ.
+# V37: cấu hình hiển thị cột nâng cao + tiêu đề tự wrap khi cột nhỏ.
 TICHLUY_TARGET_DEFAULT = 5000000
 TICHLUY_PERIOD_DEFAULT = 500000
 TICHLUY_HEADERS = [
@@ -2508,7 +2508,8 @@ def _get_or_create_worksheet(spreadsheet, title, rows=1000, cols=30):
         return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
 
 # ==========================================================
-# CẤU HÌNH THỨ TỰ / ĐỘ RỘNG CỘT TOÀN HỆ THỐNG
+# CẤU HÌNH HIỂN THỊ CỘT TOÀN HỆ THỐNG
+# V37: thứ tự + độ rộng + độ cao dòng + font + kiểu chữ + căn lề + wrap text
 # ==========================================================
 TABLE_LAYOUT_LABELS = {
     "tour_main": "Bảng Tour",
@@ -2543,6 +2544,15 @@ TABLE_LAYOUT_STATIC_COLUMNS = {
     ],
 }
 
+TABLE_LAYOUT_FONT_OPTIONS = [
+    "Roboto", "Arial", "Tahoma", "Verdana", "Times New Roman", "Georgia", "Courier New"
+]
+TABLE_LAYOUT_FONT_STYLE_OPTIONS = ["Thường", "Đậm", "Nghiêng", "Đậm + Nghiêng"]
+TABLE_LAYOUT_ALIGN_OPTIONS = ["left", "center", "right"]
+TABLE_LAYOUT_DEFAULT_ROW_HEIGHT = 36
+TABLE_LAYOUT_DEFAULT_FONT_SIZE = 13
+
+
 def _default_column_width(column_name):
     name = str(column_name)
     if name in {"TT", "Chọn"}: return 65
@@ -2554,6 +2564,25 @@ def _default_column_width(column_name):
     if any(x in name for x in ["Tiền", "Phạt", "Tích lũy", "Phí", "Số ngày"]): return 125
     return 140
 
+
+def _default_column_alignment(column_name):
+    name = str(column_name)
+    if name in {"TT", "Chọn"}: return "center"
+    if any(x in name for x in ["Tiền", "Phạt", "Tích lũy", "Phí", "Số ngày", "Thời gian còn lại"]):
+        return "right"
+    return "left"
+
+
+def _default_column_visual_style(column_name):
+    return {
+        "font_family": "Roboto",
+        "font_size": TABLE_LAYOUT_DEFAULT_FONT_SIZE,
+        "font_style": "Thường",
+        "align": _default_column_alignment(column_name),
+        "wrap": True,
+    }
+
+
 @st.cache_resource(show_spinner=False)
 def _ensure_ui_layout_storage():
     try:
@@ -2561,14 +2590,21 @@ def _ensure_ui_layout_storage():
         if not client:
             return None, "Chưa cấu hình quyền kết nối Google Sheets."
         ss = client.open_by_key(SHEET_MAT_KHAU_ID)
-        ws = _get_or_create_worksheet(ss, UI_LAYOUT_WORKSHEET, rows=100, cols=6)
+        ws = _get_or_create_worksheet(ss, UI_LAYOUT_WORKSHEET, rows=100, cols=8)
+        if int(getattr(ws, "col_count", 0) or 0) < 7:
+            _gs_call_with_backoff(ws.resize, cols=8)
         header = _gs_call_with_backoff(ws.row_values, 1)
-        wanted = ["TableKey", "Tên bảng", "Thứ tự cột JSON", "Độ rộng cột JSON", "Cập nhật lúc", "Người cập nhật"]
+        # Giữ 6 cột cũ để tương thích, thêm JSON kiểu hiển thị ở cột G.
+        wanted = [
+            "TableKey", "Tên bảng", "Thứ tự cột JSON", "Độ rộng cột JSON",
+            "Cập nhật lúc", "Người cập nhật", "Kiểu hiển thị JSON"
+        ]
         if header[:len(wanted)] != wanted:
-            gspread_update_range(ws, "A1:F1", [wanted])
+            gspread_update_range(ws, "A1:G1", [wanted])
         return ws, ""
     except Exception as e:
         return None, f"Lỗi khởi tạo cấu hình cột: {e}"
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_table_layouts():
@@ -2590,10 +2626,15 @@ def load_table_layouts():
                 widths = json.loads(row[3]) if len(row) > 3 and str(row[3]).strip() else {}
             except Exception:
                 widths = {}
+            try:
+                visual = json.loads(row[6]) if len(row) > 6 and str(row[6]).strip() else {}
+            except Exception:
+                visual = {}
             result[key] = {
                 "row": row_idx,
                 "order": order if isinstance(order, list) else [],
                 "widths": widths if isinstance(widths, dict) else {},
+                "visual": visual if isinstance(visual, dict) else {},
                 "updated_at": str(row[4]).strip() if len(row) > 4 else "",
                 "updated_by": str(row[5]).strip() if len(row) > 5 else "",
             }
@@ -2601,11 +2642,13 @@ def load_table_layouts():
     except Exception as e:
         return {}, f"Lỗi đọc cấu hình cột: {e}"
 
+
 def _clear_table_layout_cache():
     try:
         load_table_layouts.clear()
     except Exception:
         pass
+
 
 def get_table_layout(table_key, available_columns):
     available = [str(c) for c in available_columns]
@@ -2622,11 +2665,162 @@ def get_table_layout(table_key, available_columns):
             widths[c] = _default_column_width(c)
     return order, widths
 
+
+def get_table_visual_settings(table_key, available_columns):
+    """Đọc cấu hình kiểu hiển thị của bảng, tự bù mặc định cho cột mới."""
+    available = [str(c) for c in available_columns]
+    layouts, _ = load_table_layouts()
+    cfg = layouts.get(str(table_key), {})
+    raw = cfg.get("visual", {}) if isinstance(cfg.get("visual", {}), dict) else {}
+    try:
+        row_height = int(float(raw.get("row_height", TABLE_LAYOUT_DEFAULT_ROW_HEIGHT)))
+    except Exception:
+        row_height = TABLE_LAYOUT_DEFAULT_ROW_HEIGHT
+    row_height = max(24, min(120, row_height))
+    raw_cols = raw.get("columns", {}) if isinstance(raw.get("columns", {}), dict) else {}
+    col_styles = {}
+    for c in available:
+        d = _default_column_visual_style(c)
+        saved = raw_cols.get(c, {}) if isinstance(raw_cols.get(c, {}), dict) else {}
+        font_family = str(saved.get("font_family", d["font_family"]))
+        if font_family not in TABLE_LAYOUT_FONT_OPTIONS:
+            font_family = d["font_family"]
+        try:
+            font_size = max(8, min(30, int(float(saved.get("font_size", d["font_size"])))))
+        except Exception:
+            font_size = d["font_size"]
+        font_style = str(saved.get("font_style", d["font_style"]))
+        if font_style not in TABLE_LAYOUT_FONT_STYLE_OPTIONS:
+            font_style = d["font_style"]
+        align = str(saved.get("align", d["align"])).lower()
+        if align not in TABLE_LAYOUT_ALIGN_OPTIONS:
+            align = d["align"]
+        wrap = saved.get("wrap", d["wrap"])
+        if isinstance(wrap, str):
+            wrap = wrap.strip().lower() in {"1", "true", "yes", "y", "có", "co"}
+        else:
+            wrap = bool(wrap)
+        col_styles[c] = {
+            "font_family": font_family,
+            "font_size": font_size,
+            "font_style": font_style,
+            "align": align,
+            "wrap": wrap,
+        }
+    return row_height, col_styles
+
+
+def layout_row_height(table_key, fallback=TABLE_LAYOUT_DEFAULT_ROW_HEIGHT):
+    try:
+        row_height, _ = get_table_visual_settings(table_key, [])
+        return int(row_height)
+    except Exception:
+        return int(fallback)
+
+
+def _font_style_css(style_name):
+    style_name = str(style_name)
+    if style_name == "Đậm":
+        return "700", "normal"
+    if style_name == "Nghiêng":
+        return "400", "italic"
+    if style_name == "Đậm + Nghiêng":
+        return "700", "italic"
+    return "400", "normal"
+
+
+def apply_table_visual_styler(data_or_styler, table_key, columns=None):
+    """
+    Áp dụng font/cỡ chữ/kiểu chữ/căn lề/wrap cho bảng đọc (st.dataframe).
+    Giữ nguyên Styler sẵn có để không làm mất màu điều kiện của Tour/Lịch nghỉ.
+    """
+    if isinstance(data_or_styler, pd.DataFrame):
+        columns = list(data_or_styler.columns) if columns is None else list(columns)
+        styler = data_or_styler.style
+    else:
+        styler = data_or_styler
+        if columns is None:
+            try:
+                columns = list(styler.data.columns)
+            except Exception:
+                columns = []
+        else:
+            columns = list(columns)
+    _, col_styles = get_table_visual_settings(table_key, columns)
+    header_rules = []
+    for idx, c in enumerate(columns):
+        if c not in col_styles:
+            continue
+        cfg = col_styles[c]
+        fw, fs = _font_style_css(cfg.get("font_style"))
+        wrap = bool(cfg.get("wrap", True))
+        props = {
+            "font-family": f"'{cfg.get('font_family', 'Roboto')}', sans-serif",
+            "font-size": f"{int(cfg.get('font_size', TABLE_LAYOUT_DEFAULT_FONT_SIZE))}px",
+            "font-weight": fw,
+            "font-style": fs,
+            "text-align": cfg.get("align", "left"),
+            "white-space": "normal" if wrap else "nowrap",
+            "overflow-wrap": "anywhere" if wrap else "normal",
+            "word-break": "break-word" if wrap else "normal",
+        }
+        try:
+            styler = styler.set_properties(subset=[c], **props)
+        except Exception:
+            pass
+        # Dòng tiêu đề cũng dùng font/căn lề theo cột và luôn cho phép wrap nếu cột hẹp.
+        header_rules.append({
+            "selector": f"th.col_heading.level0.col{idx}",
+            "props": [
+                ("font-family", f"'{cfg.get('font_family', 'Roboto')}', sans-serif"),
+                ("font-size", f"{int(cfg.get('font_size', TABLE_LAYOUT_DEFAULT_FONT_SIZE))}px"),
+                ("font-weight", fw), ("font-style", fs),
+                ("text-align", cfg.get("align", "left")),
+                ("white-space", "normal"), ("overflow-wrap", "anywhere"),
+                ("word-break", "break-word"), ("line-height", "1.15"),
+            ]
+        })
+    try:
+        if header_rules:
+            styler = styler.set_table_styles(header_rules, overwrite=False)
+    except Exception:
+        pass
+    return styler
+
+
+def table_layout_html_css(table_key, columns, selector):
+    """Sinh CSS theo từng cột cho các bảng HTML (hiện dùng ở Bảng lương tổng hợp)."""
+    row_height, col_styles = get_table_visual_settings(table_key, columns)
+    css = [f"{selector} tbody tr{{height:{int(row_height)}px;}}"]
+    for idx, c in enumerate(columns, start=1):
+        cfg = col_styles.get(c, _default_column_visual_style(c))
+        fw, fs = _font_style_css(cfg.get("font_style"))
+        wrap = bool(cfg.get("wrap", True))
+        white = "normal" if wrap else "nowrap"
+        overflow = "anywhere" if wrap else "normal"
+        word_break = "break-word" if wrap else "normal"
+        font = str(cfg.get("font_family", "Roboto")).replace("'", "")
+        size = int(cfg.get("font_size", TABLE_LAYOUT_DEFAULT_FONT_SIZE))
+        align = cfg.get("align", "left")
+        css.append(
+            f"{selector} th:nth-child({idx}),{selector} td:nth-child({idx}){{"
+            f"font-family:'{font}',sans-serif!important;font-size:{size}px!important;"
+            f"font-weight:{fw}!important;font-style:{fs}!important;text-align:{align}!important;"
+            f"white-space:{white}!important;overflow-wrap:{overflow}!important;word-break:{word_break}!important;}}"
+        )
+        # Tiêu đề luôn wrap để không bị mất chữ khi cột nhỏ.
+        css.append(
+            f"{selector} th:nth-child({idx}){{white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;}}"
+        )
+    return "\n".join(css)
+
+
 def apply_table_layout_df(df, table_key):
     if not isinstance(df, pd.DataFrame):
         return df, {}
     order, widths = get_table_layout(table_key, list(df.columns))
     return df[order].copy(), widths
+
 
 def table_layout_column_config(table_key, columns, label_map=None):
     _, widths = get_table_layout(table_key, columns)
@@ -2639,12 +2833,14 @@ def table_layout_column_config(table_key, columns, label_map=None):
             cfg[c] = st.column_config.TextColumn(label_map.get(c, c), width="medium")
     return cfg
 
+
 def layout_width(table_key, column_name, fallback=None):
     _, widths = get_table_layout(table_key, [column_name])
     value = int(widths.get(column_name, _default_column_width(column_name)))
     return value if value else (fallback or "medium")
 
-def save_table_layout_config(table_key, order, widths, username):
+
+def save_table_layout_config(table_key, order, widths, username, visual=None):
     ws, err = _ensure_ui_layout_storage()
     if err or ws is None:
         return False, err or "Không mở được sheet cấu hình cột."
@@ -2653,20 +2849,23 @@ def save_table_layout_config(table_key, order, widths, username):
         cfg = layouts.get(table_key, {})
         row_idx = cfg.get("row")
         now = datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S")
+        if visual is None:
+            visual = cfg.get("visual", {}) if isinstance(cfg.get("visual", {}), dict) else {}
         values = [[
             table_key, TABLE_LAYOUT_LABELS.get(table_key, table_key),
             json.dumps(list(order), ensure_ascii=False),
             json.dumps({str(k): int(v) for k, v in widths.items()}, ensure_ascii=False),
-            now, str(username)
+            now, str(username), json.dumps(visual, ensure_ascii=False)
         ]]
         if row_idx:
-            gspread_update_range(ws, f"A{row_idx}:F{row_idx}", values)
+            gspread_update_range(ws, f"A{row_idx}:G{row_idx}", values)
         else:
             _gs_call_with_backoff(ws.append_row, values[0], value_input_option="USER_ENTERED")
         _clear_table_layout_cache()
-        return True, "Đã lưu cấu hình cột và áp dụng cho toàn hệ thống."
+        return True, "Đã lưu cấu hình hiển thị và áp dụng cho toàn hệ thống."
     except Exception as e:
         return False, f"Lỗi lưu cấu hình cột: {e}"
+
 
 def get_table_columns_for_settings(table_key):
     if table_key == "tour_main":
@@ -2678,6 +2877,98 @@ def get_table_columns_for_settings(table_key):
             pass
         return ["Tên Nhân Viên", "Trạng Thái", "Thời gian còn lại", "Đi làm", "Vào ca", "Break"]
     return list(TABLE_LAYOUT_STATIC_COLUMNS.get(table_key, []))
+
+
+def _layout_editor_rows_from_saved(table_key, available_cols):
+    current_order, current_widths = get_table_layout(table_key, available_cols)
+    _, current_styles = get_table_visual_settings(table_key, current_order)
+    rows = []
+    for pos, col in enumerate(current_order, start=1):
+        vis = current_styles.get(col, _default_column_visual_style(col))
+        rows.append({
+            "Tên cột": col,
+            "Vị trí": pos,
+            "Độ rộng (px)": int(current_widths.get(col, _default_column_width(col))),
+            "Font chữ": vis.get("font_family", "Roboto"),
+            "Cỡ chữ": int(vis.get("font_size", TABLE_LAYOUT_DEFAULT_FONT_SIZE)),
+            "Kiểu chữ": vis.get("font_style", "Thường"),
+            "Căn lề": vis.get("align", _default_column_alignment(col)),
+            "Wrap text": bool(vis.get("wrap", True)),
+        })
+    return rows
+
+
+def _layout_editor_on_change(table_key, editor_key, rows_state_key, version_state_key):
+    """
+    V37 - Đổi vị trí theo logic chèn:
+    ví dụ cột ở vị trí 6 chuyển thành 3 => vị trí 3,4,5 cũ tự thành 4,5,6.
+    Không bao giờ để trùng Vị trí.
+    """
+    rows = [dict(r) for r in st.session_state.get(rows_state_key, [])]
+    if not rows:
+        return
+    widget_state = st.session_state.get(editor_key, {})
+    edits = widget_state.get("edited_rows", {}) if isinstance(widget_state, dict) else {}
+    if not isinstance(edits, dict) or not edits:
+        return
+
+    # Map row index -> tên cột từ trạng thái trước khi di chuyển.
+    original_names = {i: str(r.get("Tên cột", "")) for i, r in enumerate(rows)}
+
+    # Áp dụng các chỉnh sửa không phải vị trí trước.
+    for idx_raw, changes in edits.items():
+        try:
+            idx = int(idx_raw)
+        except Exception:
+            continue
+        if idx < 0 or idx >= len(rows) or not isinstance(changes, dict):
+            continue
+        target_name = original_names.get(idx, "")
+        target_row = next((r for r in rows if str(r.get("Tên cột", "")) == target_name), None)
+        if target_row is None:
+            continue
+        for field, value in changes.items():
+            if field == "Vị trí":
+                continue
+            target_row[field] = value
+
+    # Xử lý vị trí theo cơ chế remove + insert, rồi đánh lại 1..N.
+    for idx_raw, changes in edits.items():
+        if not isinstance(changes, dict) or "Vị trí" not in changes:
+            continue
+        try:
+            idx = int(idx_raw)
+            target_pos = int(float(changes.get("Vị trí")))
+        except Exception:
+            continue
+        target_name = original_names.get(idx, "")
+        if not target_name:
+            continue
+        ordered = sorted(rows, key=lambda r: int(float(r.get("Vị trí", 9999))))
+        current_idx = next((i for i, r in enumerate(ordered) if str(r.get("Tên cột", "")) == target_name), None)
+        if current_idx is None:
+            continue
+        target_pos = max(1, min(len(ordered), target_pos))
+        item = ordered.pop(current_idx)
+        ordered.insert(target_pos - 1, item)
+        for pos, r in enumerate(ordered, start=1):
+            r["Vị trí"] = pos
+        rows = ordered
+
+    # Chuẩn hóa kiểu dữ liệu.
+    for pos, r in enumerate(sorted(rows, key=lambda x: int(float(x.get("Vị trí", 9999)))), start=1):
+        r["Vị trí"] = pos
+        try: r["Độ rộng (px)"] = max(50, min(800, int(float(r.get("Độ rộng (px)", 140)))))
+        except Exception: r["Độ rộng (px)"] = 140
+        try: r["Cỡ chữ"] = max(8, min(30, int(float(r.get("Cỡ chữ", TABLE_LAYOUT_DEFAULT_FONT_SIZE)))))
+        except Exception: r["Cỡ chữ"] = TABLE_LAYOUT_DEFAULT_FONT_SIZE
+        if str(r.get("Font chữ", "Roboto")) not in TABLE_LAYOUT_FONT_OPTIONS: r["Font chữ"] = "Roboto"
+        if str(r.get("Kiểu chữ", "Thường")) not in TABLE_LAYOUT_FONT_STYLE_OPTIONS: r["Kiểu chữ"] = "Thường"
+        if str(r.get("Căn lề", "left")) not in TABLE_LAYOUT_ALIGN_OPTIONS: r["Căn lề"] = "left"
+        r["Wrap text"] = bool(r.get("Wrap text", True))
+
+    st.session_state[rows_state_key] = sorted(rows, key=lambda x: int(x["Vị trí"]))
+    st.session_state[version_state_key] = int(st.session_state.get(version_state_key, 0) or 0) + 1
 
 
 @st.cache_resource(show_spinner=False)
@@ -4610,13 +4901,18 @@ elif selected_page == "👥 Danh sách nhân sự" and is_admin_letan:
     cols_staff = [c for c in cols_staff if c in df_credentials.columns]
     staff_df, staff_widths = apply_table_layout_df(df_credentials[cols_staff], "staff_list")
     st.dataframe(
-        staff_df, width='stretch', height='content', hide_index=True,
+        apply_table_visual_styler(staff_df, "staff_list", list(staff_df.columns)),
+        width='stretch', height='content', hide_index=True,
+        row_height=layout_row_height("staff_list"),
         column_config=table_layout_column_config("staff_list", list(staff_df.columns))
     )
 
 elif selected_page == "⚙️ Cấu hình cột" and st.session_state.current_role == "admin":
-    st.subheader("⚙️ Cấu hình thứ tự & độ rộng cột toàn hệ thống")
-    st.info("Admin có thể đổi vị trí và độ rộng cột. Sau khi lưu, cấu hình được lưu trên Google Sheet và áp dụng cho tất cả tài khoản trên hệ thống.")
+    st.subheader("⚙️ Cấu hình hiển thị cột toàn hệ thống")
+    st.info(
+        "Admin có thể tùy chỉnh thứ tự, độ rộng cột, độ cao dòng, font, cỡ chữ, kiểu chữ, "
+        "căn lề và Wrap Text. Sau khi lưu, cấu hình được dùng chung cho toàn bộ tài khoản."
+    )
 
     table_key = st.selectbox(
         "Chọn bảng cần tùy chỉnh",
@@ -4628,48 +4924,133 @@ elif selected_page == "⚙️ Cấu hình cột" and st.session_state.current_ro
     if not available_cols:
         st.warning("Chưa xác định được danh sách cột của bảng này.")
     else:
-        current_order, current_widths = get_table_layout(table_key, available_cols)
-        config_rows = []
-        for pos, col in enumerate(current_order, start=1):
-            config_rows.append({
-                "Tên cột": col,
-                "Vị trí": pos,
-                "Độ rộng (px)": int(current_widths.get(col, _default_column_width(col)))
-            })
-        cfg_df = pd.DataFrame(config_rows)
-        edited_cfg = st.data_editor(
+        rows_state_key = f"layout_rows_state_{table_key}"
+        version_state_key = f"layout_editor_version_{table_key}"
+        row_height_state_key = f"layout_row_height_state_{table_key}"
+        init_flag_key = f"layout_init_signature_{table_key}"
+        signature = "|".join(map(str, available_cols))
+
+        # Chỉ khởi tạo từ dữ liệu đã lưu khi mới mở bảng hoặc sau khi Save/Reset.
+        if st.session_state.get(init_flag_key) != signature or rows_state_key not in st.session_state:
+            st.session_state[rows_state_key] = _layout_editor_rows_from_saved(table_key, available_cols)
+            saved_row_height, _ = get_table_visual_settings(table_key, available_cols)
+            st.session_state[row_height_state_key] = int(saved_row_height)
+            st.session_state[version_state_key] = int(st.session_state.get(version_state_key, 0) or 0) + 1
+            st.session_state[init_flag_key] = signature
+
+        st.markdown("#### 🧱 Kích thước dòng")
+        st.number_input(
+            "Độ cao dòng (px)", min_value=24, max_value=120, step=2,
+            key=row_height_state_key,
+            help="Áp dụng cho các dòng dữ liệu của bảng. Giá trị gợi ý: 32–48 px."
+        )
+
+        st.markdown("#### 🎨 Thiết lập từng cột")
+        st.caption(
+            "Cột **Vị trí** dùng cơ chế chèn tự động. Ví dụ: đổi một cột từ vị trí 6 → 3 thì "
+            "các cột đang ở 3, 4, 5 sẽ tự chuyển thành 4, 5, 6."
+        )
+
+        editor_version = int(st.session_state.get(version_state_key, 0) or 0)
+        editor_key = f"layout_editor_{table_key}_{editor_version}"
+        cfg_df = pd.DataFrame(st.session_state.get(rows_state_key, []))
+
+        st.data_editor(
             cfg_df,
-            key=f"layout_editor_{table_key}",
+            key=editor_key,
             width="stretch", height="content", hide_index=True, num_rows="fixed",
             disabled=["Tên cột"],
+            row_height=42,
+            on_change=_layout_editor_on_change,
+            args=(table_key, editor_key, rows_state_key, version_state_key),
             column_config={
-                "Tên cột": st.column_config.TextColumn("Tên cột", disabled=True, width="large"),
-                "Vị trí": st.column_config.NumberColumn("Vị trí", min_value=1, max_value=max(1, len(cfg_df)), step=1, format="%d", width="small"),
-                "Độ rộng (px)": st.column_config.NumberColumn("Độ rộng (px)", min_value=50, max_value=800, step=10, format="%d", width="small"),
+                "Tên cột": st.column_config.TextColumn("Tên cột", disabled=True, width=210),
+                "Vị trí": st.column_config.NumberColumn(
+                    "Vị trí", min_value=1, max_value=max(1, len(cfg_df)), step=1, format="%d", width=75
+                ),
+                "Độ rộng (px)": st.column_config.NumberColumn(
+                    "Độ rộng (px)", min_value=50, max_value=800, step=10, format="%d", width=110
+                ),
+                "Font chữ": st.column_config.SelectboxColumn(
+                    "Font chữ", options=TABLE_LAYOUT_FONT_OPTIONS, width=135
+                ),
+                "Cỡ chữ": st.column_config.NumberColumn(
+                    "Cỡ chữ", min_value=8, max_value=30, step=1, format="%d", width=85
+                ),
+                "Kiểu chữ": st.column_config.SelectboxColumn(
+                    "Kiểu chữ", options=TABLE_LAYOUT_FONT_STYLE_OPTIONS, width=135
+                ),
+                "Căn lề": st.column_config.SelectboxColumn(
+                    "Căn lề", options=TABLE_LAYOUT_ALIGN_OPTIONS, width=95,
+                    help="left = trái, center = giữa, right = phải"
+                ),
+                "Wrap text": st.column_config.CheckboxColumn(
+                    "Wrap text", width=95,
+                    help="Bật để nội dung được phép xuống dòng khi chiều rộng cột nhỏ."
+                ),
             }
         )
-        st.caption("Mẹo: đổi số ở cột Vị trí (1 = ngoài cùng bên trái). Độ rộng nên từ 60–300 px; cột Địa chỉ có thể đặt 250–400 px.")
+
+        st.caption(
+            "Các tiêu đề cột vẫn luôn được phép xuống dòng để tránh mất chữ. Font/căn lề/Wrap Text "
+            "được áp dụng cho bảng hiển thị; độ rộng và độ cao dòng áp dụng cả bảng hiển thị và bảng chỉnh sửa."
+        )
+
         c_save_layout, c_reset_layout = st.columns(2)
         with c_save_layout:
             if st.button("💾 Lưu & áp dụng toàn hệ thống", use_container_width=True, key=f"save_layout_{table_key}"):
-                temp = edited_cfg.copy()
-                temp["Vị trí"] = pd.to_numeric(temp["Vị trí"], errors="coerce").fillna(9999)
-                temp["Độ rộng (px)"] = pd.to_numeric(temp["Độ rộng (px)"], errors="coerce").fillna(140).clip(50, 800)
-                # Nếu trùng vị trí, giữ thứ tự hiện tại làm tiêu chí phụ để kết quả ổn định.
-                temp["__idx"] = range(len(temp))
-                temp = temp.sort_values(["Vị trí", "__idx"], kind="stable")
-                new_order = temp["Tên cột"].astype(str).tolist()
-                new_widths = {str(r["Tên cột"]): int(r["Độ rộng (px)"]) for _, r in temp.iterrows()}
-                ok, msg = save_table_layout_config(table_key, new_order, new_widths, st.session_state.current_user)
+                rows = [dict(r) for r in st.session_state.get(rows_state_key, [])]
+                rows = sorted(rows, key=lambda r: int(float(r.get("Vị trí", 9999))))
+                for pos, r in enumerate(rows, start=1):
+                    r["Vị trí"] = pos
+                new_order = [str(r.get("Tên cột", "")) for r in rows if str(r.get("Tên cột", ""))]
+                new_widths = {
+                    str(r["Tên cột"]): max(50, min(800, int(float(r.get("Độ rộng (px)", 140)))))
+                    for r in rows if str(r.get("Tên cột", ""))
+                }
+                visual_cols = {}
+                for r in rows:
+                    col = str(r.get("Tên cột", ""))
+                    if not col:
+                        continue
+                    visual_cols[col] = {
+                        "font_family": str(r.get("Font chữ", "Roboto")),
+                        "font_size": max(8, min(30, int(float(r.get("Cỡ chữ", TABLE_LAYOUT_DEFAULT_FONT_SIZE))))),
+                        "font_style": str(r.get("Kiểu chữ", "Thường")),
+                        "align": str(r.get("Căn lề", _default_column_alignment(col))).lower(),
+                        "wrap": bool(r.get("Wrap text", True)),
+                    }
+                visual = {
+                    "row_height": max(24, min(120, int(st.session_state.get(row_height_state_key, TABLE_LAYOUT_DEFAULT_ROW_HEIGHT)))),
+                    "columns": visual_cols,
+                }
+                ok, msg = save_table_layout_config(
+                    table_key, new_order, new_widths, st.session_state.current_user, visual=visual
+                )
                 (st.success if ok else st.error)(msg)
-                if ok: st.rerun()
+                if ok:
+                    # Lần render sau đọc lại đúng dữ liệu đã lưu.
+                    st.session_state.pop(rows_state_key, None)
+                    st.session_state.pop(init_flag_key, None)
+                    st.rerun()
+
         with c_reset_layout:
             if st.button("♻️ Khôi phục mặc định", use_container_width=True, key=f"reset_layout_{table_key}"):
                 default_order = list(available_cols)
                 default_widths = {c: _default_column_width(c) for c in default_order}
-                ok, msg = save_table_layout_config(table_key, default_order, default_widths, st.session_state.current_user)
+                default_visual = {
+                    "row_height": TABLE_LAYOUT_DEFAULT_ROW_HEIGHT,
+                    "columns": {c: _default_column_visual_style(c) for c in default_order},
+                }
+                ok, msg = save_table_layout_config(
+                    table_key, default_order, default_widths, st.session_state.current_user, visual=default_visual
+                )
                 (st.success if ok else st.error)(msg)
-                if ok: st.rerun()
+                if ok:
+                    st.session_state.pop(rows_state_key, None)
+                    st.session_state.pop(init_flag_key, None)
+                    st.session_state.pop(row_height_state_key, None)
+                    st.rerun()
 
 elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
     st.subheader("➕ Thêm nhân viên")
@@ -5137,6 +5518,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 )
             edited = st.data_editor(
                 editor_df, key="payroll_adjustment_editor", width="stretch", height="content", hide_index=True,
+                row_height=layout_row_height("payroll_current"),
                 column_config=col_cfg, disabled=["TT", "Tên Hệ thống", "Tiền Lương", "Tích lũy", "Tiền phạt trong tháng"]
             )
             final_df = current.copy()
@@ -5179,14 +5561,18 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 for c in payroll_internal_order
             ) + '</colgroup>'
             payroll_html = payroll_html.replace('>', '>' + colgroup, 1)
+            payroll_layout_css = table_layout_html_css(
+                "payroll_current", payroll_internal_order, "table.vera-payroll-table"
+            )
             st.markdown(
-                """<style>
-                .vera-payroll-wrap{width:100%;overflow:visible;}
-                table.vera-payroll-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:clamp(8px,.68vw,12px);}
-                table.vera-payroll-table th{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 3px;border:1px solid #c9c9c9;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;line-height:1.15!important;vertical-align:middle!important;}
-                table.vera-payroll-table td{padding:4px 3px;border:1px solid #dedede;white-space:normal;word-break:break-word;vertical-align:middle;}
-                table.vera-payroll-table tbody tr:nth-child(even){background:#fafafa;}
-                @media(max-width:800px){table.vera-payroll-table{font-size:7px;}table.vera-payroll-table th,table.vera-payroll-table td{padding:3px 1px;}}
+                f"""<style>
+                {payroll_layout_css}
+                .vera-payroll-wrap{{width:100%;overflow:visible;}}
+                table.vera-payroll-table{{width:100%;table-layout:fixed;border-collapse:collapse;font-size:clamp(8px,.68vw,12px);}}
+                table.vera-payroll-table th{{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 3px;border:1px solid #c9c9c9;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;line-height:1.15!important;vertical-align:middle!important;}}
+                table.vera-payroll-table td{{padding:4px 3px;border:1px solid #dedede;white-space:normal;word-break:break-word;vertical-align:middle;}}
+                table.vera-payroll-table tbody tr:nth-child(even){{background:#fafafa;}}
+                @media(max-width:800px){{table.vera-payroll-table{{font-size:7px;}}table.vera-payroll-table th,table.vera-payroll-table td{{padding:3px 1px;}}}}
                 </style>""" + f"<div class='vera-payroll-wrap'>{payroll_html}</div>",
                 unsafe_allow_html=True
             )
@@ -5449,6 +5835,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     hist_editor_df,
                     key=f"payroll_history_editor_{batch}_{hist_editor_version}",
                     width="stretch", height="content", hide_index=True,
+                    row_height=layout_row_height("payroll_history"),
                     column_config=hist_col_cfg,
                     disabled=[c for c in ["TT", "Tên Hệ thống", "Tích lũy", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"] if c in hist_editor_df.columns]
                 )
@@ -5721,10 +6108,11 @@ elif selected_page == "🧭 Bảng Tour":
             )
 
         st.dataframe(
-            style_bang_tour(df_tour_display),
+            apply_table_visual_styler(style_bang_tour(df_tour_display), "tour_main", list(df_tour_display.columns)),
             use_container_width=True,
             hide_index=True,
             height="content",
+            row_height=layout_row_height("tour_main"),
             column_config=tour_column_config
         )
         st.caption(
@@ -6429,6 +6817,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                 width="stretch",
                 height="content",
                 hide_index=True,
+                row_height=layout_row_height("leave_detail"),
                 num_rows="fixed",
                 disabled=disabled_cols,
                 column_config=detail_col_config,
@@ -6546,10 +6935,11 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             # Nhân viên: chỉ xem, không có checkbox sửa/xóa và không có Export Excel.
             export_view_df, _ = apply_table_layout_df(export_df.copy(), "leave_detail")
             st.dataframe(
-                export_view_df.style.map(highlight_khong_phep),
+                apply_table_visual_styler(export_view_df.style.map(highlight_khong_phep), "leave_detail", list(export_view_df.columns)),
                 width="stretch",
                 height="content",
                 hide_index=True,
+                row_height=layout_row_height("leave_detail"),
                 column_config=table_layout_column_config("leave_detail", list(export_view_df.columns))
             )
 
@@ -6559,7 +6949,11 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         else:
             co_display = format_display_df(co_phep_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
             co_display, _ = apply_table_layout_df(co_display, "leave_detail")
-            st.dataframe(co_display.style.map(highlight_khong_phep), width="stretch", height="content", hide_index=True, column_config=table_layout_column_config("leave_detail", list(co_display.columns)))
+            st.dataframe(
+                apply_table_visual_styler(co_display.style.map(highlight_khong_phep), "leave_detail", list(co_display.columns)),
+                width="stretch", height="content", hide_index=True, row_height=layout_row_height("leave_detail"),
+                column_config=table_layout_column_config("leave_detail", list(co_display.columns))
+            )
 
     with tab3:
         if phat_sinh_df.empty:
@@ -6567,7 +6961,11 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         else:
             ps_display = format_display_df(phat_sinh_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
             ps_display, _ = apply_table_layout_df(ps_display, "leave_detail")
-            st.dataframe(ps_display.style.map(highlight_khong_phep), width="stretch", height="content", hide_index=True, column_config=table_layout_column_config("leave_detail", list(ps_display.columns)))
+            st.dataframe(
+                apply_table_visual_styler(ps_display.style.map(highlight_khong_phep), "leave_detail", list(ps_display.columns)),
+                width="stretch", height="content", hide_index=True, row_height=layout_row_height("leave_detail"),
+                column_config=table_layout_column_config("leave_detail", list(ps_display.columns))
+            )
 
     with tab4:
         if khong_phep_df.empty:
@@ -6575,7 +6973,11 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         else:
             kp_display = format_display_df(khong_phep_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
             kp_display, _ = apply_table_layout_df(kp_display, "leave_detail")
-            st.dataframe(kp_display.style.map(highlight_khong_phep), width="stretch", height="content", hide_index=True, column_config=table_layout_column_config("leave_detail", list(kp_display.columns)))
+            st.dataframe(
+                apply_table_visual_styler(kp_display.style.map(highlight_khong_phep), "leave_detail", list(kp_display.columns)),
+                width="stretch", height="content", hide_index=True, row_height=layout_row_height("leave_detail"),
+                column_config=table_layout_column_config("leave_detail", list(kp_display.columns))
+            )
 
 
 
@@ -6598,7 +7000,11 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
 
         df_view_display = format_display_df(df_view_display)
         df_view_display, _ = apply_table_layout_df(df_view_display, "leave_manage")
-        st.dataframe(df_view_display, width="stretch", height="content", hide_index=True, column_config=table_layout_column_config("leave_manage", list(df_view_display.columns)))
+        st.dataframe(
+            apply_table_visual_styler(df_view_display, "leave_manage", list(df_view_display.columns)),
+            width="stretch", height="content", hide_index=True, row_height=layout_row_height("leave_manage"),
+            column_config=table_layout_column_config("leave_manage", list(df_view_display.columns))
+        )
 
         if st.session_state.current_role == "nhanvien" and system_status["lock_nv"]:
             st.error("🔒 Tính năng xóa lịch nghỉ hiện đang bị Admin tạm khóa. Vui lòng liên hệ Admin để được hỗ trợ!")

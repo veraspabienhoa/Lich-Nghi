@@ -1240,6 +1240,32 @@ def load_credentials():
         'Remember Token Hash', 'Remember Token Expiry'
     ])
 
+def load_credentials_fresh_for_email():
+    """Đọc hồ sơ nhân sự MỚI NHẤT trực tiếp từ Sheet1 trước mỗi tác vụ gửi email.
+
+    Chỉ xóa cache load_credentials (không xóa cache toàn hệ thống) để tránh dùng Email cũ
+    đã nằm trong bảng lương/lịch sử hoặc cache Streamlit.
+    """
+    try:
+        load_credentials.clear()
+    except Exception:
+        pass
+    return load_credentials()
+
+def latest_email_from_credentials(credentials_df, username):
+    """Lấy Email mới nhất theo Tên Hệ thống, so khớp không dấu/không phân biệt hoa thường."""
+    if not isinstance(credentials_df, pd.DataFrame) or credentials_df.empty:
+        return ""
+    if 'Tên nhân viên' not in credentials_df.columns or 'Email' not in credentials_df.columns:
+        return ""
+    target = normalize_login_name(username)
+    matched = credentials_df[
+        credentials_df['Tên nhân viên'].astype(str).apply(normalize_login_name) == target
+    ]
+    if matched.empty:
+        return ""
+    return str(matched.iloc[-1].get('Email', '')).strip()
+
 def set_accounts_login_lock(usernames, locked=True):
     try:
         client = get_gspread_client()
@@ -7449,19 +7475,19 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 )
 
             with st.expander("📧 GỬI BẢNG LƯƠNG QUA EMAIL"):
-                # V44: không gửi email cá nhân cho nhân viên có Thực nhận = 0.
+                # V59: danh sách gửi chỉ phụ thuộc Thực nhận > 0. Email KHÔNG lấy từ bảng lương
+                # vì có thể đã cũ; địa chỉ mới nhất sẽ được đọc trực tiếp từ Sheet1 ngay khi bấm Gửi.
                 _email_net = final_df['Số tiền thực nhận'].apply(_money_to_float) if 'Số tiền thực nhận' in final_df.columns else pd.Series(0, index=final_df.index)
-                emailable = final_df[
-                    final_df['Email'].astype(str).str.contains('@', na=False) & (_email_net > 0)
-                ].copy()
-                employees_email = emailable['Tên Hệ thống'].tolist()
+                emailable = final_df[_email_net > 0].copy()
+                employees_email = emailable['Tên Hệ thống'].astype(str).tolist()
                 selected_email_emps = st.multiselect(
                     "Chọn 1, nhiều hoặc tất cả nhân viên:", employees_email, default=employees_email,
                     filter_mode="contains", key="payroll_email_recipients"
                 )
                 st.caption(
-                    f"Có {len(employees_email)} nhân viên có Email hợp lệ và Thực nhận > 0. "
-                    "Nhân viên có Thực nhận ≤ 0 sẽ tự động không được gửi mail."
+                    f"Có {len(employees_email)} nhân viên có Thực nhận > 0. "
+                    "Email sẽ luôn được đọc lại mới nhất từ Sheet1 ngay trước khi gửi; "
+                    "nhân viên có Thực nhận ≤ 0 sẽ không được gửi mail."
                 )
                 if st.button("🚀 Gửi bảng lương cho nhân viên đã chọn", use_container_width=True):
                     if not selected_email_emps:
@@ -7471,13 +7497,28 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         sender_pass = "zvtgbysfmdaqxaau"
                         progress = st.progress(0)
                         ok_count, errors = 0, []
+                        # V59: đọc hồ sơ nhân sự MỚI NHẤT đúng 1 lần cho cả lượt gửi.
+                        # Không dùng Email đang nằm trong final_df vì bảng lương có thể đã được tính/lưu trước khi Email được sửa.
+                        live_email_creds = load_credentials_fresh_for_email()
                         # Chỉ đọc Sheet1 lịch nghỉ một lần rồi lọc theo từng nhân viên, tránh quota 429.
                         email_leave_df = load_backup_sheet_data()
                         for idx, emp in enumerate(selected_email_emps):
-                            row = emailable[emailable['Tên Hệ thống'] == emp].iloc[0]
+                            matched_pay = emailable[emailable['Tên Hệ thống'].astype(str) == str(emp)]
+                            if matched_pay.empty:
+                                errors.append(f"{emp}: Không tìm thấy dữ liệu bảng lương.")
+                                progress.progress((idx + 1) / len(selected_email_emps))
+                                continue
+                            row = matched_pay.iloc[0].copy()
+                            to_email = latest_email_from_credentials(live_email_creds, emp)
+                            if not to_email or '@' not in to_email:
+                                errors.append(f"{emp}: Email mới nhất trong Sheet1 không hợp lệ hoặc đang để trống.")
+                                progress.progress((idx + 1) / len(selected_email_emps))
+                                continue
+                            # Đồng bộ Email trên row chỉ để nội dung/file nội bộ luôn phản ánh dữ liệu mới nhất.
+                            row['Email'] = to_email
                             emp_violations = get_employee_violation_details(emp, current_start, current_end, email_leave_df)
                             ok, msg = send_payroll_email(
-                                sender_email, sender_pass, str(row['Email']).strip(), row,
+                                sender_email, sender_pass, to_email, row,
                                 current_start, current_end, emp_violations
                             )
                             if ok: ok_count += 1
@@ -7525,26 +7566,27 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                             if matched.empty:
                                 st.error("Không tìm thấy hồ sơ Lễ tân đã chọn.")
                             else:
-                                rletan = matched.iloc[0]
-                                letan_email = str(rletan.get('Email', '')).strip()
-                                if letan_email and '@' in letan_email:
-                                    st.success(f"📧 Email nhận: {letan_email}")
-                                else:
-                                    st.warning(f"⚠️ Tài khoản {selected_letan} chưa có Email hợp lệ trong hồ sơ.")
-
+                                st.caption("📧 Email người nhận sẽ được kiểm tra lại trực tiếp từ Sheet1 ngay khi bấm Gửi.")
                                 if st.button(
                                     "📤 Gửi bảng lương tổng hợp cho Lễ tân đã check",
                                     use_container_width=True,
-                                    key="send_payroll_summary_letan",
-                                    disabled=not (letan_email and '@' in letan_email)
+                                    key="send_payroll_summary_letan"
                                 ):
-                                    sender_email = "veraspabienhoa@gmail.com"
-                                    sender_pass = "zvtgbysfmdaqxaau"
-                                    ok, msg = send_payroll_summary_email(
-                                        sender_email, sender_pass, letan_email,
-                                        selected_letan, final_df, current_start, current_end
-                                    )
-                                    (st.success if ok else st.error)(msg)
+                                    live_letan_creds = load_credentials_fresh_for_email()
+                                    letan_email = latest_email_from_credentials(live_letan_creds, selected_letan)
+                                    if not letan_email or '@' not in letan_email:
+                                        st.error(f"⚠️ Tài khoản {selected_letan} chưa có Email hợp lệ trong Sheet1 mới nhất.")
+                                    else:
+                                        sender_email = "veraspabienhoa@gmail.com"
+                                        sender_pass = "zvtgbysfmdaqxaau"
+                                        ok, msg = send_payroll_summary_email(
+                                            sender_email, sender_pass, letan_email,
+                                            selected_letan, final_df, current_start, current_end
+                                        )
+                                        if ok:
+                                            st.success(f"{msg} Email mới nhất: {letan_email}")
+                                        else:
+                                            st.error(msg)
                         else:
                             st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
 
@@ -7961,17 +8003,12 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         "Nếu cần lưu các thay đổi này vào hệ thống, hãy bấm Ghi đè cập nhật bản lương."
                     )
                     hist_emailable = edited_saved_table.copy()
-                    if 'Email' in hist_emailable.columns:
-                        _hist_email_net = (
-                            hist_emailable['Số tiền thực nhận'].apply(_money_to_float)
-                            if 'Số tiền thực nhận' in hist_emailable.columns
-                            else pd.Series(0, index=hist_emailable.index)
-                        )
-                        hist_emailable = hist_emailable[
-                            hist_emailable['Email'].astype(str).str.contains('@', na=False) & (_hist_email_net > 0)
-                        ].copy()
-                    else:
-                        hist_emailable = pd.DataFrame()
+                    _hist_email_net = (
+                        hist_emailable['Số tiền thực nhận'].apply(_money_to_float)
+                        if 'Số tiền thực nhận' in hist_emailable.columns
+                        else pd.Series(0, index=hist_emailable.index)
+                    )
+                    hist_emailable = hist_emailable[_hist_email_net > 0].copy()
 
                     hist_employee_names = (
                         hist_emailable['Tên Hệ thống'].astype(str).tolist()
@@ -7985,8 +8022,8 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         key=f"payroll_history_email_recipients_{batch}"
                     )
                     st.caption(
-                        f"Có {len(hist_employee_names)} nhân viên có Email hợp lệ và Thực nhận > 0 trong bản lương này. "
-                        "Nhân viên có Thực nhận = 0 sẽ không được gửi mail."
+                        f"Có {len(hist_employee_names)} nhân viên có Thực nhận > 0 trong bản lương này. "
+                        "Email được lấy lại mới nhất từ Sheet1 khi bấm Gửi; nhân viên có Thực nhận ≤ 0 không được gửi mail."
                     )
 
                     if st.button(
@@ -8001,6 +8038,8 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                             sender_pass = "zvtgbysfmdaqxaau"
                             progress_hist_email = st.progress(0)
                             hist_ok_count, hist_errors = 0, []
+                            # V59: đọc Email MỚI NHẤT trực tiếp từ Sheet1 một lần cho cả lượt gửi lịch sử.
+                            hist_live_email_creds = load_credentials_fresh_for_email()
                             # Một snapshot lịch vi phạm dùng chung cho toàn bộ email trong lần gửi.
                             hist_email_leave_df = load_backup_sheet_data()
                             for idx, emp in enumerate(hist_selected_email_emps):
@@ -8010,16 +8049,20 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                                 if matched_emp.empty:
                                     hist_errors.append(f"{emp}: Không tìm thấy dữ liệu bảng lương.")
                                 else:
-                                    row = matched_emp.iloc[0]
-                                    to_email = str(row.get('Email', '')).strip()
-                                    emp_violations = get_employee_violation_details(emp, hs, he, hist_email_leave_df)
-                                    ok, msg = send_payroll_email(
-                                        sender_email, sender_pass, to_email, row, hs, he, emp_violations
-                                    )
-                                    if ok:
-                                        hist_ok_count += 1
+                                    row = matched_emp.iloc[0].copy()
+                                    to_email = latest_email_from_credentials(hist_live_email_creds, emp)
+                                    if not to_email or '@' not in to_email:
+                                        hist_errors.append(f"{emp}: Email mới nhất trong Sheet1 không hợp lệ hoặc đang để trống.")
                                     else:
-                                        hist_errors.append(f"{emp}: {msg}")
+                                        row['Email'] = to_email
+                                        emp_violations = get_employee_violation_details(emp, hs, he, hist_email_leave_df)
+                                        ok, msg = send_payroll_email(
+                                            sender_email, sender_pass, to_email, row, hs, he, emp_violations
+                                        )
+                                        if ok:
+                                            hist_ok_count += 1
+                                        else:
+                                            hist_errors.append(f"{emp}: {msg}")
                                 progress_hist_email.progress((idx + 1) / len(hist_selected_email_emps))
                                 time.sleep(0.35)
 
@@ -8071,34 +8114,32 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                                 if hist_matched_letan.empty:
                                     st.error("Không tìm thấy hồ sơ Lễ tân đã chọn.")
                                 else:
-                                    hist_rletan = hist_matched_letan.iloc[0]
-                                    hist_letan_email = str(hist_rletan.get('Email', '')).strip()
-                                    if hist_letan_email and '@' in hist_letan_email:
-                                        st.success(f"📧 Email nhận: {hist_letan_email}")
-                                    else:
-                                        st.warning(
-                                            f"⚠️ Tài khoản {hist_selected_letan} chưa có Email hợp lệ trong hồ sơ."
-                                        )
-
+                                    st.caption("📧 Email người nhận sẽ được kiểm tra lại trực tiếp từ Sheet1 ngay khi bấm Gửi.")
                                     if st.button(
                                         "📤 Gửi bảng lương tổng hợp cho Lễ tân đã check",
                                         use_container_width=True,
-                                        key=f"send_payroll_history_summary_letan_{batch}",
-                                        disabled=not (hist_letan_email and '@' in hist_letan_email)
+                                        key=f"send_payroll_history_summary_letan_{batch}"
                                     ):
-                                        sender_email = "veraspabienhoa@gmail.com"
-                                        sender_pass = "zvtgbysfmdaqxaau"
-                                        ok, msg = send_payroll_summary_email(
-                                            sender_email, sender_pass, hist_letan_email,
-                                            hist_selected_letan, edited_saved_table, hs, he
-                                        )
-                                        if ok:
-                                            st.success(
-                                                f"✅ Đã gửi bảng lương tổng hợp của bản {batch} "
-                                                f"cho {hist_selected_letan}."
+                                        hist_live_letan_creds = load_credentials_fresh_for_email()
+                                        hist_letan_email = latest_email_from_credentials(hist_live_letan_creds, hist_selected_letan)
+                                        if not hist_letan_email or '@' not in hist_letan_email:
+                                            st.error(
+                                                f"⚠️ Tài khoản {hist_selected_letan} chưa có Email hợp lệ trong Sheet1 mới nhất."
                                             )
                                         else:
-                                            st.error(msg)
+                                            sender_email = "veraspabienhoa@gmail.com"
+                                            sender_pass = "zvtgbysfmdaqxaau"
+                                            ok, msg = send_payroll_summary_email(
+                                                sender_email, sender_pass, hist_letan_email,
+                                                hist_selected_letan, edited_saved_table, hs, he
+                                            )
+                                            if ok:
+                                                st.success(
+                                                    f"✅ Đã gửi bảng lương tổng hợp của bản {batch} "
+                                                    f"cho {hist_selected_letan} ({hist_letan_email})."
+                                                )
+                                            else:
+                                                st.error(msg)
                             else:
                                 st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
 
@@ -8755,13 +8796,14 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                         error_messages = []
 
                         progress_bar = st.progress(0)
+                        # V59: mọi email báo cáo cũng luôn lấy địa chỉ mới nhất trực tiếp từ Sheet1.
+                        live_report_email_creds = load_credentials_fresh_for_email()
 
                         for i, emp in enumerate(selected_to_send):
                             df_emp = filtered_df[filtered_df['Tên nhân viên'] == emp]
                             total_phat = df_emp['Phạt vi phạm'].sum()
 
-                            emp_row = df_credentials[df_credentials['Tên nhân viên'].str.lower() == str(emp).strip().lower()]
-                            emp_email = str(emp_row.iloc[0].get('Email', '')).strip() if not emp_row.empty else ""
+                            emp_email = latest_email_from_credentials(live_report_email_creds, emp)
 
                             if not emp_email or "@" not in emp_email:
                                 error_messages.append(f"⚠️ Bỏ qua {emp}: Không có Email hợp lệ.")

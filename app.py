@@ -9374,7 +9374,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             filter_type = st.selectbox(
                 "Lọc thời gian:", 
                 ["Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian", "Tuần này", "Tuần trước", "Tuần sau", "Tháng này", "Tháng trước", "Tháng sau"],
-                index=8, filter_mode="contains", key="leave_stats_time_filter"
+                index=0, filter_mode="contains", key="leave_stats_time_filter"
             )
         with col_d2:
             if filter_type == "Hôm nay": start_date = end_date = today
@@ -9913,7 +9913,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             manage_filter_type = st.selectbox(
                 "Lọc thời gian:",
                 ["Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian", "Tuần này", "Tuần trước", "Tuần sau", "Tháng này", "Tháng trước", "Tháng sau", "Tất cả"],
-                index=8, key="leave_manage_time_filter", filter_mode="contains"
+                index=0, key="leave_manage_time_filter", filter_mode="contains"
             )
         with md2:
             if manage_filter_type == "Hôm nay": manage_start = manage_end = manage_today

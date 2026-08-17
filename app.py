@@ -3355,13 +3355,34 @@ def load_tichluy_tracking():
 
 
 def _parse_vn_date(value):
+    """Đọc ngày Việt Nam và cả Excel serial date (ví dụ 46088) từ Google Sheets."""
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
+
+    # Google Sheets có thể trả ngày dưới dạng số serial của Excel/Sheets.
+    # Epoch tương thích Excel là 30/12/1899 (serial 1 = 31/12/1899).
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            serial = float(value)
+            if 20000 <= serial <= 100000:
+                return (date(1899, 12, 30) + timedelta(days=int(serial)))
+    except Exception:
+        pass
+
     text = str(value or '').strip()
     if not text or text.casefold() in {'nan','none','nat'}:
         return None
+
+    # Trường hợp serial date được trả về dưới dạng chuỗi, ví dụ "46088" hoặc "46088.0".
+    try:
+        serial = float(text.replace(',', '.'))
+        if 20000 <= serial <= 100000:
+            return (date(1899, 12, 30) + timedelta(days=int(serial)))
+    except Exception:
+        pass
+
     for fmt in ('%d/%m/%Y','%d-%m-%Y','%Y-%m-%d','%d/%m/%y'):
         try:
             return datetime.strptime(text, fmt).date()
@@ -3396,6 +3417,59 @@ def _first_pay_period_for_start(start_work_date):
     return date(start_work_date.year, start_work_date.month, 16), date(start_work_date.year, start_work_date.month, last_day)
 
 
+def _parse_tichluy_period_text(value):
+    """Đọc cột Kỳ gần nhất dạng dd/mm/yyyy - dd/mm/yyyy hoặc yyyy-mm-dd|yyyy-mm-dd."""
+    text = str(value or '').strip()
+    if not text:
+        return None, None
+    if '|' in text:
+        parts = [x.strip() for x in text.split('|', 1)]
+    elif ' - ' in text:
+        parts = [x.strip() for x in text.split(' - ', 1)]
+    else:
+        return None, None
+    if len(parts) != 2:
+        return None, None
+    return _parse_vn_date(parts[0]), _parse_vn_date(parts[1])
+
+
+def _select_preferred_tichluy_rows(tracking):
+    """
+    Sheet TichLuy của dữ liệu cũ có thể trùng Tên nhân viên.
+    Chỉ chọn 1 dòng tốt nhất cho mỗi người:
+    1) ưu tiên dòng có Ngày bắt đầu làm hợp lệ;
+    2) ưu tiên dòng có Chi tiết các kỳ / Kỳ gần nhất;
+    3) ưu tiên dòng có dữ liệu số Mục tiêu/Đã tích lũy/Còn lại;
+    4) nếu vẫn bằng nhau, lấy dòng nằm dưới cùng (STT/sheet row mới hơn).
+    """
+    if tracking is None or tracking.empty:
+        return tracking
+    best = {}
+    for _, r in tracking.iterrows():
+        key = normalize_login_name(r.get('Tên nhân viên', ''))
+        if not key:
+            continue
+        start_ok = 1 if _parse_vn_date(r.get('Ngày bắt đầu làm', '')) else 0
+        hist = _parse_tichluy_history(r.get('Chi tiết các kỳ', ''))
+        period_start, period_end = _parse_tichluy_period_text(r.get('Kỳ gần nhất', ''))
+        history_ok = 1 if hist or (period_start and period_end) else 0
+        numeric_ok = 0
+        for c in ('Mục tiêu tích lũy', 'Đã tích lũy', 'Còn lại'):
+            raw = str(r.get(c, '') or '').strip()
+            if raw not in {'', '-', 'None', 'nan'}:
+                numeric_ok += 1
+        try:
+            sheet_row = int(r.get('__sheet_row', 0) or 0)
+        except Exception:
+            sheet_row = 0
+        score = (start_ok, history_ok, numeric_ok, sheet_row)
+        if key not in best or score > best[key][0]:
+            best[key] = (score, r)
+    if not best:
+        return tracking.iloc[0:0].copy()
+    return pd.DataFrame([item[1] for item in best.values()]).reset_index(drop=True)
+
+
 def get_tichluy_charge_map(start_date, end_date, employee_names=None, for_existing_snapshot=False):
     """
     Số Tích lũy tự động của kỳ:
@@ -3405,7 +3479,7 @@ def get_tichluy_charge_map(start_date, end_date, employee_names=None, for_existi
     - khi một kỳ đã được ghi nhận trong TichLuy, bảng lương MỚI không thu lại;
       còn bản lương lịch sử đang sửa giữ đúng số của kỳ đã ghi nhận.
     """
-    tracking = load_tichluy_tracking()
+    tracking = _select_preferred_tichluy_rows(load_tichluy_tracking())
     wanted = {normalize_login_name(x) for x in (employee_names or []) if str(x).strip()} if employee_names else None
     result, info = {}, {}
     if tracking is None or tracking.empty:
@@ -3419,9 +3493,25 @@ def get_tichluy_charge_map(start_date, end_date, employee_names=None, for_existi
         start_work = _parse_vn_date(r.get('Ngày bắt đầu làm',''))
         target = float(_money_to_float(r.get('Mục tiêu tích lũy', TICHLUY_TARGET_DEFAULT)) or TICHLUY_TARGET_DEFAULT)
         accumulated = float(_money_to_float(r.get('Đã tích lũy',0)))
-        remaining = max(0.0, target - accumulated)
+        # Cột F = Còn lại là nguồn ưu tiên nếu có số hợp lệ; nếu trống / '-' thì suy ra D - E.
+        remaining_raw = str(r.get('Còn lại', '') or '').strip()
+        if remaining_raw and remaining_raw not in {'-', '–', '—'}:
+            remaining = max(0.0, float(_money_to_float(remaining_raw)))
+            # Nếu E đang trống nhưng F có dữ liệu thì suy ngược Đã tích lũy để giữ D/E/F nhất quán.
+            if not str(r.get('Đã tích lũy', '') or '').strip():
+                accumulated = max(0.0, target - remaining)
+        else:
+            remaining = max(0.0, target - accumulated)
         hist = _parse_tichluy_history(r.get('Chi tiết các kỳ',''))
         existing_amount = float(hist.get(period_key, 0))
+
+        # Tương thích dữ liệu TichLuy cũ: có thể chưa có JSON "Chi tiết các kỳ"
+        # nhưng đã có "Kỳ gần nhất" + "Số tiền kỳ gần nhất".
+        if existing_amount <= 0:
+            last_start, last_end = _parse_tichluy_period_text(r.get('Kỳ gần nhất', ''))
+            if last_start == start_date and last_end == end_date:
+                existing_amount = max(0.0, float(_money_to_float(r.get('Số tiền kỳ gần nhất', 0))))
+
         charge = 0.0
         reason = ''
         if existing_amount > 0:
@@ -3446,6 +3536,7 @@ def get_tichluy_charge_map(start_date, end_date, employee_names=None, for_existi
         info[key] = {
             'name': name, 'start_date': start_work, 'target': target, 'accumulated': accumulated,
             'remaining': remaining, 'charge': float(charge), 'reason': reason,
+            'sheet_row': int(r.get('__sheet_row', 0) or 0),
         }
     return result, info
 
@@ -3939,7 +4030,7 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
     default_living, default_locker = get_payroll_default_amounts()
     overrides = get_payroll_employee_overrides()
     penalty_map = _period_penalty_by_employee(start_date, end_date, leave_df, None)
-    tichluy_map, _ = get_tichluy_charge_map(
+    tichluy_map, tichluy_info = get_tichluy_charge_map(
         start_date, end_date, d.get('Tên Hệ thống', pd.Series(dtype=str)).astype(str).tolist(),
         for_existing_snapshot=True
     )
@@ -3993,7 +4084,12 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
 
     d = recalculate_payroll_net(d)
     d = _filter_real_payroll_rows(d)
-    return d, {"updated": updated, "missing": sorted(set(missing))}
+    return d, {
+        "updated": updated,
+        "missing": sorted(set(missing)),
+        "tichluy_updated": sum(1 for v in tichluy_map.values() if float(_money_to_float(v)) > 0),
+        "tichluy_info": tichluy_info,
+    }
 
 
 def recalculate_payroll_net(df):
@@ -5742,7 +5838,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 # Cập nhật các dữ liệu hệ thống có thể thay đổi sau khi bản lương đã được lưu.
                 # Nút được đặt ngay phía trên tiêu đề Mở lại và chỉnh sửa bản lương theo yêu cầu.
                 st.caption(
-                    "Nút cập nhật hệ thống sẽ làm mới: Vi phạm, Phí Sinh Hoạt, Tiền hỗ trợ Locker, "
+                    "Nút cập nhật hệ thống sẽ làm mới: Tích lũy, Vi phạm, Phí Sinh Hoạt, Tiền hỗ trợ Locker, "
                     "Tài khoản ngân hàng, Tên ngân hàng và Email. Tiền Lương không bị thay đổi."
                 )
                 if st.button(
@@ -5769,9 +5865,14 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                             pass
                         leave_live = load_backup_sheet_data()
 
-                        status_refresh.info("⏳ Đang tải mức Phí sinh hoạt / Locker và cập nhật bảng lương...")
+                        status_refresh.info("⏳ Đang tải Tích lũy, Phí sinh hoạt / Locker và cập nhật bảng lương...")
                         progress_refresh.progress(70)
                         _clear_payroll_config_cache()
+                        # Bắt buộc làm mới TichLuy để nút cập nhật không dùng snapshot cache 120 giây cũ.
+                        try:
+                            load_tichluy_tracking.clear()
+                        except Exception:
+                            pass
                         refreshed_df, refresh_meta = refresh_saved_payroll_from_system(
                             saved_table, hs, he,
                             credentials_df=credentials_live,
@@ -5785,7 +5886,8 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
 
                         progress_refresh.progress(100)
                         status_refresh.success(
-                            f"✅ Đã cập nhật dữ liệu hệ thống cho {refresh_meta.get('updated', len(refreshed_df))} nhân viên. "
+                            f"✅ Đã cập nhật dữ liệu hệ thống cho {refresh_meta.get('updated', len(refreshed_df))} nhân viên; "
+                            f"Tích lũy kỳ này có số tiền ở {refresh_meta.get('tichluy_updated', 0)} nhân viên. "
                             "Tiền Lương và các khoản nhập tay được giữ nguyên; Thực nhận đã tính lại."
                         )
                         missing_profiles = refresh_meta.get('missing', [])

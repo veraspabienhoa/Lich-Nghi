@@ -716,6 +716,17 @@ st.markdown("""
 
         /* V62 - NỀN TIÊU ĐỀ/NHÃN TOÀN HỆ THỐNG: RGB(217,217,217) = #D9D9D9.
            Áp dụng cho heading và toàn bộ nhãn widget như "Chọn ngày nghỉ", "Chọn nhân viên", ... */
+        /* V71 - BỘ CỠ CHỮ MẶC ĐỊNH TOÀN HỆ THỐNG.
+           Tiêu đề lớn 28px → tiêu đề con 22px → tiêu đề nhỏ 18px → label/nội dung 16px → bảng 13px. */
+        h1, .custom-main-title { font-size: 28px !important; line-height: 1.22 !important; }
+        h2, h3 { font-size: 22px !important; line-height: 1.25 !important; }
+        h4, h5, h6, [data-testid="stExpander"] details summary p { font-size: 18px !important; line-height: 1.28 !important; }
+        p, .stText, [data-testid="stMarkdownContainer"],
+        [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
+        input, textarea, button, [data-baseweb="select"] { font-size: 16px !important; }
+        table, table th, table td,
+        [data-testid="stDataFrame"], [data-testid="stDataEditor"], [data-testid="stTable"] { font-size: 13px !important; }
+
         h1, h2, h3, h4, h5, h6 {
             background: #D9D9D9 !important;
             border-left: 5px solid #A6A6A6 !important;
@@ -793,11 +804,11 @@ st.markdown("""
                 padding-left: 0.45rem !important;
                 padding-right: 0.45rem !important;
             }
-            .custom-main-title { font-size: 24px !important; line-height: 1.25 !important; margin-bottom: 8px !important; }
+            .custom-main-title { font-size: 28px !important; line-height: 1.22 !important; margin-bottom: 8px !important; }
             .custom-main-title > div { float: none !important; text-align: left !important; margin-top: 6px !important; }
-            p, .stText, [data-testid="stMarkdownContainer"] { font-size: 15px !important; }
+            p, .stText, [data-testid="stMarkdownContainer"] { font-size: 16px !important; }
             div[data-testid="stVerticalBlock"] > div { gap: 0.08rem !important; }
-            button { min-height: 42px !important; font-size: 15px !important; margin-top: 0 !important; padding-top: 0.25rem !important; padding-bottom: 0.25rem !important; }
+            button { min-height: 42px !important; font-size: 16px !important; margin-top: 0 !important; padding-top: 0.25rem !important; padding-bottom: 0.25rem !important; }
             div[data-baseweb="popover"] { max-width: calc(100vw - 12px) !important; }
             [data-testid="stDataFrame"], [data-testid="stDataEditor"] { font-size: 13px !important; }
             [data-testid="stTabs"] button { white-space: nowrap !important; }
@@ -812,12 +823,12 @@ st.markdown("""
         
         .custom-main-title {
             font-family: 'Roboto', sans-serif !important;
-            font-size: 35px; font-weight: bold; margin-bottom: 20px; color: #333 !important;
+            font-size: 28px; font-weight: bold; margin-bottom: 20px; color: #333 !important;
         }
         
         /* GIẢM SIZE CHỮ: ĐĂNG KÝ - THAY ĐỔI LỊCH NGHỈ */
         [data-testid="stExpander"] details summary p {
-            font-size: 1.3rem !important;
+            font-size: 18px !important;
             font-weight: 700 !important;
             color: #d32f2f !important;
             text-transform: uppercase;
@@ -836,6 +847,7 @@ PAYROLL_SOURCE_WORKSHEET = "Báo cáo doanh thu hóa đơn"
 PAYROLL_STORAGE_WORKSHEET = "BangLuong"
 PAYROLL_CONFIG_WORKSHEET = "CauHinhLuong"
 UI_LAYOUT_WORKSHEET = "CauHinhCot"
+UI_THEME_WORKSHEET = "CauHinhGiaoDien"
 TICHLUY_WORKSHEET = "TichLuy"
 VIOLATION_DEBT_WORKSHEET = "NoViPham"
 VIOLATION_DEBT_HEADERS = [
@@ -3394,6 +3406,324 @@ def _get_or_create_worksheet(spreadsheet, title, rows=1000, cols=30):
         return spreadsheet.worksheet(title)
     except Exception:
         return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
+
+# ==========================================================
+# V71 - CẤU HÌNH GIAO DIỆN TOÀN HỆ THỐNG (ADMIN)
+# Tiêu đề lớn / con / nhỏ / label-nội dung / bảng.
+# Lưu vào Google Sheet CauHinhGiaoDien để toàn bộ tài khoản dùng cùng mặc định.
+# ==========================================================
+UI_THEME_HEADERS = ["ThemeKey", "Cấu hình JSON", "Cập nhật lúc", "Người cập nhật"]
+UI_THEME_KEY = "global"
+UI_THEME_GROUP_ORDER = ["main_title", "sub_title", "small_title", "label_content", "table"]
+UI_THEME_GROUP_LABELS = {
+    "main_title": "Tiêu đề lớn",
+    "sub_title": "Tiêu đề con",
+    "small_title": "Tiêu đề nhỏ",
+    "label_content": "Label / Nội dung",
+    "table": "Bảng",
+}
+UI_THEME_FONT_OPTIONS = [
+    "Roboto", "Arial", "Tahoma", "Verdana", "Times New Roman", "Georgia",
+    "Courier New", "Cinzel Decorative"
+]
+UI_THEME_EFFECT_OPTIONS = ["Không", "Bóng nhẹ", "Bóng nổi", "Hover nâng", "Gradient nhẹ"]
+UI_THEME_DEFAULT = {
+    "main_title": {"desktop_size": 28, "mobile_size": 28, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
+    "sub_title": {"desktop_size": 22, "mobile_size": 22, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
+    "small_title": {"desktop_size": 18, "mobile_size": 18, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
+    "label_content": {"desktop_size": 16, "mobile_size": 16, "font_family": "Roboto", "text_color": "#333333", "bg_color": "#D9D9D9", "effect": "Không"},
+    "table": {"desktop_size": 13, "mobile_size": 13, "font_family": "Roboto", "text_color": "#333333", "bg_color": "#D9D9D9", "effect": "Không"},
+}
+
+
+def _valid_theme_hex(value, fallback):
+    value = str(value or "").strip()
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+        return value.upper()
+    return str(fallback).upper()
+
+
+def _normalized_theme_config(raw=None):
+    raw = raw if isinstance(raw, dict) else {}
+    result = {}
+    for key in UI_THEME_GROUP_ORDER:
+        base = dict(UI_THEME_DEFAULT[key])
+        incoming = raw.get(key, {}) if isinstance(raw.get(key, {}), dict) else {}
+        try:
+            desktop_size = max(8, min(48, int(float(incoming.get("desktop_size", base["desktop_size"])))))
+        except Exception:
+            desktop_size = int(base["desktop_size"])
+        try:
+            mobile_size = max(8, min(48, int(float(incoming.get("mobile_size", base["mobile_size"])))))
+        except Exception:
+            mobile_size = int(base["mobile_size"])
+        font_family = str(incoming.get("font_family", base["font_family"]))
+        if font_family not in UI_THEME_FONT_OPTIONS:
+            font_family = base["font_family"]
+        effect = str(incoming.get("effect", base["effect"]))
+        if effect not in UI_THEME_EFFECT_OPTIONS:
+            effect = base["effect"]
+        result[key] = {
+            "desktop_size": desktop_size,
+            "mobile_size": mobile_size,
+            "font_family": font_family,
+            "text_color": _valid_theme_hex(incoming.get("text_color"), base["text_color"]),
+            "bg_color": _valid_theme_hex(incoming.get("bg_color"), base["bg_color"]),
+            "effect": effect,
+        }
+    return result
+
+
+@st.cache_resource(show_spinner=False)
+def _ensure_ui_theme_storage():
+    try:
+        client = get_gspread_client()
+        if not client:
+            return None, "Chưa cấu hình quyền kết nối Google Sheets."
+        ss = client.open_by_key(SHEET_MAT_KHAU_ID)
+        ws = _get_or_create_worksheet(ss, UI_THEME_WORKSHEET, rows=20, cols=6)
+        if int(getattr(ws, "col_count", 0) or 0) < 4:
+            _gs_call_with_backoff(ws.resize, cols=6)
+        header = _gs_call_with_backoff(ws.row_values, 1)
+        if header[:4] != UI_THEME_HEADERS:
+            gspread_update_range(ws, "A1:D1", [UI_THEME_HEADERS])
+        return ws, ""
+    except Exception as e:
+        return None, f"Lỗi khởi tạo cấu hình giao diện: {e}"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_ui_theme_config():
+    ws, err = _ensure_ui_theme_storage()
+    if err or ws is None:
+        return _normalized_theme_config(), err
+    try:
+        values = _gs_call_with_backoff(ws.get_all_values)
+        for row in values[1:]:
+            if not row or str(row[0]).strip() != UI_THEME_KEY:
+                continue
+            try:
+                raw = json.loads(row[1]) if len(row) > 1 and str(row[1]).strip() else {}
+            except Exception:
+                raw = {}
+            return _normalized_theme_config(raw), ""
+        return _normalized_theme_config(), ""
+    except Exception as e:
+        return _normalized_theme_config(), f"Lỗi đọc cấu hình giao diện: {e}"
+
+
+def _clear_ui_theme_cache():
+    try:
+        load_ui_theme_config.clear()
+    except Exception:
+        pass
+
+
+def save_ui_theme_config(config, username):
+    ws, err = _ensure_ui_theme_storage()
+    if err or ws is None:
+        return False, err or "Không mở được sheet cấu hình giao diện."
+    try:
+        cfg = _normalized_theme_config(config)
+        values = _gs_call_with_backoff(ws.get_all_values)
+        row_idx = None
+        for idx, row in enumerate(values[1:], start=2):
+            if row and str(row[0]).strip() == UI_THEME_KEY:
+                row_idx = idx
+                break
+        now = datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S")
+        row_value = [UI_THEME_KEY, json.dumps(cfg, ensure_ascii=False), now, str(username)]
+        if row_idx:
+            gspread_update_range(ws, f"A{row_idx}:D{row_idx}", [row_value])
+        else:
+            _gs_call_with_backoff(ws.append_row, row_value, value_input_option="USER_ENTERED")
+        _clear_ui_theme_cache()
+        return True, "Đã lưu giao diện làm mặc định cho toàn hệ thống."
+    except Exception as e:
+        return False, f"Lỗi lưu cấu hình giao diện: {e}"
+
+
+def _theme_effect_css(effect, bg_color):
+    effect = str(effect)
+    if effect == "Bóng nhẹ":
+        return "box-shadow:0 2px 6px rgba(0,0,0,.12)!important;"
+    if effect == "Bóng nổi":
+        return "box-shadow:0 5px 14px rgba(0,0,0,.18)!important;transform:translateY(-1px);"
+    if effect == "Gradient nhẹ":
+        return f"background:linear-gradient(135deg,{bg_color} 0%,rgba(255,255,255,.88) 100%)!important;"
+    return ""
+
+
+def _theme_hover_css(effect):
+    if str(effect) == "Hover nâng":
+        return "transform:translateY(-2px)!important;box-shadow:0 4px 12px rgba(0,0,0,.14)!important;"
+    return ""
+
+
+def render_global_ui_theme_css(config=None):
+    """Áp dụng theme đã lưu cho cả desktop + mobile bằng CSS override cuối cùng."""
+    cfg = _normalized_theme_config(config)
+    selectors = {
+        # Thêm selector có data-testid để thắng các rule màu/font mặc định của Streamlit.
+        "main_title": "[data-testid='stMarkdownContainer'] h1,h1,.custom-main-title",
+        "sub_title": "[data-testid='stMarkdownContainer'] h2,[data-testid='stMarkdownContainer'] h3,h2,h3",
+        "small_title": "[data-testid='stMarkdownContainer'] h4,[data-testid='stMarkdownContainer'] h5,[data-testid='stMarkdownContainer'] h6,h4,h5,h6,[data-testid='stExpander'] details summary p",
+        "label_content": "p,.stText,[data-testid='stMarkdownContainer'],[data-testid='stWidgetLabel'],[data-testid='stWidgetLabel'] p,[data-testid='stWidgetLabel'] span,[data-testid='stWidgetLabel'] div,input,textarea,button,[data-baseweb='select']",
+        "table": "table,table th,table td,[data-testid='stDataFrame'],[data-testid='stDataEditor'],[data-testid='stTable']",
+    }
+    desktop_rules = []
+    mobile_rules = []
+    hover_rules = []
+    for key in UI_THEME_GROUP_ORDER:
+        item = cfg[key]
+        selector = selectors[key]
+        font = str(item["font_family"]).replace("'", "")
+        color = item["text_color"]
+        bg = item["bg_color"]
+        effect_css = _theme_effect_css(item["effect"], bg)
+        # Background applies to headings/labels/table headers, not table data cells or free paragraphs.
+        if key == "label_content":
+            bg_rule = ""
+            desktop_rules.append(
+                f"{selector}{{font-family:'{font}',sans-serif!important;font-size:{item['desktop_size']}px!important;color:{color}!important;}}"
+            )
+            desktop_rules.append(
+                f"[data-testid='stWidgetLabel'],label[data-testid='stWidgetLabel'],div[data-testid='stWidgetLabel'],"
+                f"[data-testid='stSelectbox']>label,[data-testid='stMultiSelect']>label,[data-testid='stDateInput']>label,"
+                f"[data-testid='stTextInput']>label,[data-testid='stTextArea']>label,[data-testid='stNumberInput']>label,"
+                f"[data-testid='stFileUploader']>label,[data-testid='stRadio']>label,[data-testid='stCheckbox']>label,fieldset>legend"
+                f"{{background:{bg}!important;color:{color}!important;{effect_css}}}"
+            )
+            desktop_rules.append(
+                f"[data-testid='stWidgetLabel'] p,[data-testid='stWidgetLabel'] span,[data-testid='stWidgetLabel'] div,fieldset>legend"
+                f"{{color:{color}!important;font-family:'{font}',sans-serif!important;font-size:{item['desktop_size']}px!important;}}"
+            )
+        elif key == "table":
+            desktop_rules.append(
+                f"{selector}{{font-family:'{font}',sans-serif!important;font-size:{item['desktop_size']}px!important;color:{color}!important;}}"
+            )
+            desktop_rules.append(
+                f"table th,[data-testid='stDataFrame'] [role='columnheader'],[data-testid='stDataEditor'] [role='columnheader']"
+                f"{{background:{bg}!important;color:{color}!important;{effect_css}}}"
+            )
+        else:
+            desktop_rules.append(
+                f"{selector}{{font-family:'{font}',sans-serif!important;font-size:{item['desktop_size']}px!important;color:{color}!important;background:{bg}!important;{effect_css}transition:transform .15s ease,box-shadow .15s ease!important;}}"
+            )
+        if item["effect"] == "Hover nâng":
+            hover_rules.append(f"{selector}:hover{{{_theme_hover_css(item['effect'])}}}")
+        mobile_rules.append(f"{selector}{{font-size:{item['mobile_size']}px!important;}}")
+
+    # Mobile: giảm padding/gap chứ không ép giảm cỡ chữ; Admin có cột riêng để tự đặt nếu muốn.
+    css = "\n".join(desktop_rules + hover_rules)
+    mobile_css = "\n".join(mobile_rules)
+    st.markdown(f"""
+<style id="vera-global-theme-v71">
+{css}
+@media (max-width:768px) {{
+{mobile_css}
+  h1,h2,h3,h4,h5,h6,.custom-main-title {{padding:.32rem .48rem!important;margin-top:.18rem!important;margin-bottom:.3rem!important;overflow-wrap:anywhere!important;}}
+  [data-testid='stWidgetLabel'] {{padding:.22rem .4rem!important;overflow-wrap:anywhere!important;}}
+  .block-container {{padding-left:.4rem!important;padding-right:.4rem!important;}}
+  table th,table td {{padding-left:4px!important;padding-right:4px!important;}}
+}}
+</style>
+""", unsafe_allow_html=True)
+
+
+def _theme_editor_df(config):
+    cfg = _normalized_theme_config(config)
+    rows = []
+    for key in UI_THEME_GROUP_ORDER:
+        item = cfg[key]
+        rows.append({
+            "Nhóm": UI_THEME_GROUP_LABELS[key],
+            "Font chữ": item["font_family"],
+            "Cỡ chữ Web": item["desktop_size"],
+            "Cỡ chữ Mobile": item["mobile_size"],
+            "Màu chữ": item["text_color"],
+            "Màu nền": item["bg_color"],
+            "Hiệu ứng": item["effect"],
+        })
+    return pd.DataFrame(rows)
+
+
+def _theme_from_editor_df(df):
+    result = {}
+    label_to_key = {v: k for k, v in UI_THEME_GROUP_LABELS.items()}
+    if not isinstance(df, pd.DataFrame):
+        return _normalized_theme_config()
+    for _, row in df.iterrows():
+        key = label_to_key.get(str(row.get("Nhóm", "")).strip())
+        if not key:
+            continue
+        result[key] = {
+            "font_family": row.get("Font chữ", "Roboto"),
+            "desktop_size": row.get("Cỡ chữ Web", UI_THEME_DEFAULT[key]["desktop_size"]),
+            "mobile_size": row.get("Cỡ chữ Mobile", UI_THEME_DEFAULT[key]["mobile_size"]),
+            "text_color": row.get("Màu chữ", UI_THEME_DEFAULT[key]["text_color"]),
+            "bg_color": row.get("Màu nền", UI_THEME_DEFAULT[key]["bg_color"]),
+            "effect": row.get("Hiệu ứng", "Không"),
+        }
+    return _normalized_theme_config(result)
+
+
+def render_admin_theme_config_panel():
+    """Bảng tùy chỉnh font/cỡ/màu/hiệu ứng, chỉ Admin mới nhìn thấy và lưu được."""
+    if st.session_state.get("current_role") != "admin":
+        return
+    current, err = load_ui_theme_config()
+    with st.expander("🎨 Cấu hình Font · Màu · Cỡ chữ · Hiệu ứng", expanded=True):
+        st.caption(
+            "Mặc định: Tiêu đề lớn 28px · Tiêu đề con 22px · Tiêu đề nhỏ 18px · "
+            "Label/Nội dung 16px · Bảng 13px. Có cột riêng cho Web và Mobile. "
+            "Màu nhập theo mã HEX, ví dụ #D9D9D9."
+        )
+        if err:
+            st.warning(err)
+        editor_key = "admin_global_theme_editor_v71"
+        edited = st.data_editor(
+            _theme_editor_df(current),
+            key=editor_key,
+            hide_index=True,
+            num_rows="fixed",
+            width="stretch",
+            height="content",
+            disabled=["Nhóm"],
+            row_height=42,
+            column_config={
+                "Nhóm": st.column_config.TextColumn("Nhóm", disabled=True, width=150),
+                "Font chữ": st.column_config.SelectboxColumn("Font chữ", options=UI_THEME_FONT_OPTIONS, width=145),
+                "Cỡ chữ Web": st.column_config.NumberColumn("Cỡ chữ Web", min_value=8, max_value=48, step=1, format="%d", width=105),
+                "Cỡ chữ Mobile": st.column_config.NumberColumn("Cỡ chữ Mobile", min_value=8, max_value=48, step=1, format="%d", width=120),
+                "Màu chữ": st.column_config.TextColumn("Màu chữ", width=105, help="HEX: #RRGGBB"),
+                "Màu nền": st.column_config.TextColumn("Màu nền", width=105, help="HEX: #RRGGBB"),
+                "Hiệu ứng": st.column_config.SelectboxColumn("Hiệu ứng", options=UI_THEME_EFFECT_OPTIONS, width=125),
+            },
+        )
+        preview_cfg = _theme_from_editor_df(edited)
+        # Preview dùng HTML đơn giản, không ghi dữ liệu cho tới khi bấm Lưu.
+        p1, p2, p3 = preview_cfg["main_title"], preview_cfg["sub_title"], preview_cfg["small_title"]
+        st.markdown(
+            f"<div style=\"font-family:'{p1['font_family']}';font-size:{p1['desktop_size']}px;color:{p1['text_color']};background:{p1['bg_color']};padding:6px 10px;border-radius:6px;margin:3px 0;\">Tiêu đề lớn – Xem trước</div>"
+            f"<div style=\"font-family:'{p2['font_family']}';font-size:{p2['desktop_size']}px;color:{p2['text_color']};background:{p2['bg_color']};padding:5px 9px;border-radius:6px;margin:3px 0;\">Tiêu đề con – Xem trước</div>"
+            f"<div style=\"font-family:'{p3['font_family']}';font-size:{p3['desktop_size']}px;color:{p3['text_color']};background:{p3['bg_color']};padding:4px 8px;border-radius:6px;margin:3px 0;\">Tiêu đề nhỏ – Xem trước</div>",
+            unsafe_allow_html=True,
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("💾 Lưu giao diện làm mặc định", use_container_width=True, key="save_global_theme_v71"):
+                ok, msg = save_ui_theme_config(preview_cfg, st.session_state.current_user)
+                (st.success if ok else st.error)(msg)
+                if ok:
+                    st.rerun()
+        with c2:
+            if st.button("♻️ Khôi phục 28 · 22 · 18 · 16 · 13", use_container_width=True, key="reset_global_theme_v71"):
+                ok, msg = save_ui_theme_config(UI_THEME_DEFAULT, st.session_state.current_user)
+                (st.success if ok else st.error)(msg)
+                if ok:
+                    st.rerun()
+
 
 # ==========================================================
 # CẤU HÌNH HIỂN THỊ CỘT TOÀN HỆ THỐNG
@@ -6655,6 +6985,10 @@ with st.spinner("Đang tải dữ liệu hệ thống..."):
 
 df_loai_nghi = df_loai_nghi_gsheet if not df_loai_nghi_gsheet.empty else df_loai_nghi_excel
 
+# V71: áp dụng giao diện mặc định đã lưu cho cả màn hình đăng nhập và toàn bộ trang chức năng.
+_ui_theme_cfg, _ui_theme_err = load_ui_theme_config()
+render_global_ui_theme_css(_ui_theme_cfg)
+
 if df_lich.empty or df_nv_excel.empty:
     st.warning("Hệ thống chưa tìm thấy dữ liệu.")
     st.stop()
@@ -7272,6 +7606,7 @@ elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff
 
 elif selected_page == "⚙️ Cấu hình cột" and st.session_state.current_role == "admin":
     st.subheader("⚙️ Cấu hình hiển thị cột toàn hệ thống")
+    render_admin_theme_config_panel()
     st.info(
         "Admin có thể tùy chỉnh thứ tự, độ rộng cột, độ cao dòng, font, cỡ chữ, kiểu chữ, "
         "căn lề và Wrap Text. Sau khi lưu, cấu hình được dùng chung cho toàn bộ tài khoản."

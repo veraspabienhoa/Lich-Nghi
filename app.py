@@ -680,6 +680,10 @@ def load_credentials():
                     remember_hash = str(row[18]).strip() if len(row) > 18 else ""
                     remember_expiry = str(row[19]).strip() if len(row) > 19 else ""
 
+                    # Bỏ các dòng tiêu đề phụ bị đặt lẫn trong dữ liệu tài khoản.
+                    ten_norm = normalize_login_name(ten)
+                    if ten_norm in {"ten nhan vien", "ten he thong", "username", "user name"}:
+                        continue
                     if str(ten).strip() != "":
                         data_list.append({
                             'STT': stt, 'Tên nhân viên': str(ten).strip(), 'Mật khẩu': pwd,
@@ -2372,6 +2376,21 @@ def _money_to_float(value):
     return -val if neg else val
 
 
+def _filter_real_payroll_rows(df):
+    """Loại các dòng tiêu đề/placeholder bị đọc nhầm thành nhân viên thật."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    d = df.copy()
+    if 'Tên Hệ thống' in d.columns:
+        bad_names = {"ten nhan vien", "ten he thong", "username", "user name"}
+        mask_bad = d['Tên Hệ thống'].astype(str).apply(normalize_login_name).isin(bad_names)
+        d = d[~mask_bad].copy()
+    if 'TT' in d.columns:
+        d = d.reset_index(drop=True)
+        d['TT'] = range(1, len(d) + 1)
+    return d
+
+
 def _standardize_payroll_source(raw_df):
     """Chuẩn hóa đúng theo quy tắc người dùng: B=Thời gian, F=Loại, G=Tiền, I=Nhân viên."""
     if raw_df is None or raw_df.empty:
@@ -2489,6 +2508,10 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
     if creds.empty:
         return pd.DataFrame(columns=PAYROLL_COLUMNS), sorted(set(tip['NV tư vấn'].tolist())) if not tip.empty else []
     creds = creds[creds['Tên nhân viên'].astype(str).str.strip() != ''].copy()
+    # Loại dòng tiêu đề phụ nếu sheet tài khoản có header lặp trong vùng dữ liệu.
+    creds = creds[~creds['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
+        'ten nhan vien', 'ten he thong', 'username', 'user name'
+    })].copy()
     if 'Phân quyền' in creds.columns:
         # Không tạo dòng lương cho Admin hoặc Lễ tân.
         roles = creds['Phân quyền'].astype(str).str.strip().str.lower()
@@ -2609,13 +2632,13 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
 
     d = recalculate_payroll_net(payroll_df).copy()
     export_cols = [
-        "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
+        "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
         "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
         "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
     ]
     for c in export_cols:
         if c not in d.columns:
-            d[c] = "" if c in {"Tên Hệ thống","Họ và tên","Số tài khoản ngân hàng","Tên ngân hàng","Email"} else 0
+            d[c] = "" if c in {"Tên Hệ thống","Số tài khoản ngân hàng","Tên ngân hàng","Email"} else 0
 
     wb = Workbook()
     ws = wb.active
@@ -2659,7 +2682,7 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
         ws.cell(row=i, column=bank_col).number_format = '@'
 
     total_row = start_row + len(d)
-    ws.cell(total_row, 3, "TỔNG")
+    ws.cell(total_row, 2, "TỔNG")
     for j, col in enumerate(export_cols, start=1):
         if col in money_cols:
             ws.cell(total_row, j, float(d[col].apply(_money_to_float).sum()))
@@ -2686,7 +2709,7 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
             max_len = max(max_len, len(str(ws.cell(row, j).value or '')))
         if col in money_cols:
             width = min(max(max_len + 2, 12), 17)
-        elif col in {'Họ và tên', 'Tên ngân hàng'}:
+        elif col == 'Tên ngân hàng':
             width = min(max(max_len + 2, 16), 24)
         elif col == 'Email':
             width = min(max(max_len + 2, 16), 25)
@@ -3382,6 +3405,9 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
 
         current = st.session_state.get('payroll_current_df')
         if isinstance(current, pd.DataFrame) and not current.empty:
+            # Dọn cả dữ liệu đang nằm trong session từ bản cũ để không còn dòng header giả.
+            current = _filter_real_payroll_rows(current)
+            st.session_state.payroll_current_df = current
             current_start = date.fromisoformat(st.session_state.get('payroll_current_start'))
             current_end = date.fromisoformat(st.session_state.get('payroll_current_end'))
             unmatched = st.session_state.get('payroll_unmatched', [])
@@ -3391,14 +3417,13 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             # Bảng nhập điều chỉnh: không tạo lương cho Lễ tân; bỏ Học phí/Hỗ trợ dạy nghề.
             # Chi phí sinh hoạt và Locker đã được đổ mặc định cho tất cả, ngoại lệ sửa trực tiếp tại đây.
             editor_cols = [
-                "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
+                "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
                 "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker"
             ]
             editor_df = current[editor_cols].copy()
             col_cfg = {
                 "TT": st.column_config.NumberColumn("TT", format="%d", disabled=True, width="small"),
                 "Tên Hệ thống": st.column_config.TextColumn("Tên Hệ thống", disabled=True, width="small"),
-                "Họ và tên": st.column_config.TextColumn("Họ và tên", disabled=True, width="medium"),
                 "Tiền Lương": st.column_config.NumberColumn("Tiền Lương", format="%.0f", disabled=True, width="small"),
                 "Tiền phạt trong tháng": st.column_config.NumberColumn("Tiền phạt", format="%.0f", disabled=True, width="small"),
             }
@@ -3406,13 +3431,14 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 col_cfg[c] = st.column_config.NumberColumn(c, min_value=0.0, step=50000.0, format="%.0f", width="small")
             edited = st.data_editor(
                 editor_df, key="payroll_adjustment_editor", width="stretch", height="content", hide_index=True,
-                column_config=col_cfg, disabled=["TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền phạt trong tháng"]
+                column_config=col_cfg, disabled=["TT", "Tên Hệ thống", "Tiền Lương", "Tiền phạt trong tháng"]
             )
             final_df = current.copy()
             for c in editor_cols:
                 if c in edited.columns:
                     final_df[c] = edited[c].values
             final_df = recalculate_payroll_net(final_df)
+            final_df = _filter_real_payroll_rows(final_df)
             st.session_state.payroll_current_df = final_df
 
             total_salary = final_df['Tiền Lương'].sum()
@@ -3425,7 +3451,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             c4.metric("Tổng thực nhận", f"{total_net:,.0f} đ".replace(',', '.'))
 
             display_cols = [
-                "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
+                "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
                 "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
                 "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng"
             ]
@@ -3498,28 +3524,64 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
 
             if st.session_state.current_role == "admin":
                 with st.expander("📨 GỬI BẢNG LƯƠNG TỔNG HỢP CHO LỄ TÂN"):
+                    # Hiển thị TẤT CẢ tài khoản Lễ tân trước; chỉ sau khi Admin check tên
+                    # mới lấy Email tương ứng từ hồ sơ hệ thống. Không lọc Email từ đầu.
                     letan_df = df_credentials.copy()
                     if not letan_df.empty and 'Phân quyền' in letan_df.columns:
-                        letan_df = letan_df[letan_df['Phân quyền'].astype(str).str.strip().str.lower().eq('letan')].copy()
-                        letan_df = letan_df[letan_df['Email'].astype(str).str.contains('@', na=False)] if 'Email' in letan_df.columns else pd.DataFrame()
+                        letan_df = letan_df[
+                            letan_df['Phân quyền'].astype(str).str.strip().str.lower().eq('letan')
+                        ].copy()
+                        if 'Tên nhân viên' in letan_df.columns:
+                            letan_df = letan_df[
+                                ~letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
+                                    'ten nhan vien', 'ten he thong', 'username', 'user name'
+                                })
+                            ].copy()
                     if letan_df.empty:
-                        st.info("Không có tài khoản Lễ tân nào có Email hợp lệ trong hồ sơ hệ thống.")
+                        st.info("Không có tài khoản Lễ tân trong hồ sơ hệ thống.")
                     else:
-                        letan_options = letan_df['Tên nhân viên'].astype(str).tolist()
-                        selected_letan = st.selectbox(
-                            "Chọn Lễ tân nhận bảng lương tổng hợp:", letan_options,
-                            filter_mode="contains", key="payroll_summary_letan"
-                        )
-                        if st.button("📤 Gửi bảng lương tổng hợp cho Lễ tân này", use_container_width=True, key="send_payroll_summary_letan"):
-                            rletan = letan_df[letan_df['Tên nhân viên'].astype(str) == str(selected_letan)].iloc[0]
-                            sender_email = "veraspabienhoa@gmail.com"
-                            sender_pass = "zvtgbysfmdaqxaau"
-                            ok, msg = send_payroll_summary_email(
-                                sender_email, sender_pass, str(rletan.get('Email','')).strip(),
-                                str(rletan.get('Họ và tên đầy đủ','')).strip() or str(selected_letan),
-                                final_df, current_start, current_end
-                            )
-                            (st.success if ok else st.error)(msg)
+                        st.write("**Check đúng 1 Lễ tân để hệ thống lấy Email từ hồ sơ:**")
+                        checked_letan = []
+                        for i, (_, lr) in enumerate(letan_df.iterrows()):
+                            lname = str(lr.get('Tên nhân viên', '')).strip()
+                            if not lname:
+                                continue
+                            if st.checkbox(lname, key=f"payroll_letan_check_{i}_{normalize_login_name(lname)}"):
+                                checked_letan.append(lname)
+
+                        if len(checked_letan) > 1:
+                            st.warning("⚠️ Chỉ được check 1 Lễ tân cho mỗi lần gửi.")
+                        elif len(checked_letan) == 1:
+                            selected_letan = checked_letan[0]
+                            matched = letan_df[
+                                letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name)
+                                == normalize_login_name(selected_letan)
+                            ]
+                            if matched.empty:
+                                st.error("Không tìm thấy hồ sơ Lễ tân đã chọn.")
+                            else:
+                                rletan = matched.iloc[0]
+                                letan_email = str(rletan.get('Email', '')).strip()
+                                if letan_email and '@' in letan_email:
+                                    st.success(f"📧 Email nhận: {letan_email}")
+                                else:
+                                    st.warning(f"⚠️ Tài khoản {selected_letan} chưa có Email hợp lệ trong hồ sơ.")
+
+                                if st.button(
+                                    "📤 Gửi bảng lương tổng hợp cho Lễ tân đã check",
+                                    use_container_width=True,
+                                    key="send_payroll_summary_letan",
+                                    disabled=not (letan_email and '@' in letan_email)
+                                ):
+                                    sender_email = "veraspabienhoa@gmail.com"
+                                    sender_pass = "zvtgbysfmdaqxaau"
+                                    ok, msg = send_payroll_summary_email(
+                                        sender_email, sender_pass, letan_email,
+                                        selected_letan, final_df, current_start, current_end
+                                    )
+                                    (st.success if ok else st.error)(msg)
+                        else:
+                            st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
 
     with tab_history:
         history = load_payroll_history()
@@ -3549,7 +3611,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 except Exception:
                     pass
                 hist_display_cols = [c for c in [
-                    "TT","Tên Hệ thống","Họ và tên","Tiền Lương","Tiền Hỗ Trợ Hoàn Lại","Tích lũy",
+                    "TT","Tên Hệ thống","Tiền Lương","Tiền Hỗ Trợ Hoàn Lại","Tích lũy",
                     "Chi Phí Sinh Hoạt","Tiền phạt trong tháng","Tiền ứng lương","Tiền hỗ trợ Locker",
                     "Số tiền thực nhận","Số tài khoản ngân hàng","Tên ngân hàng"
                 ] if c in saved_table.columns]

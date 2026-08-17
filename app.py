@@ -2611,6 +2611,55 @@ def save_payroll_snapshot(payroll_df, start_date, end_date, source_label, saved_
         return False, f"Lỗi lưu bảng lương: {e}", ""
 
 
+def overwrite_payroll_snapshot(batch_id, payroll_df, start_date, end_date, source_label, saved_by):
+    """Ghi đè một bản lương đã lưu, giữ nguyên Mã bản lưu và cập nhật dấu thời gian/người sửa."""
+    try:
+        ws_pay, _, err = _ensure_payroll_storage()
+        if err or ws_pay is None:
+            return False, err or "Không mở được vùng lưu Bảng lương."
+
+        batch_id = str(batch_id).strip()
+        if not batch_id:
+            return False, "Thiếu Mã bản lưu cần cập nhật."
+
+        values = ws_pay.get_all_values()
+        matched_rows = []
+        for row_idx, row in enumerate(values[1:], start=2):
+            if row and str(row[0]).strip() == batch_id:
+                matched_rows.append(row_idx)
+
+        if not matched_rows:
+            return False, f"Không tìm thấy bản lương {batch_id} để ghi đè."
+
+        # Xóa bản cũ từ dưới lên để không làm lệch chỉ số dòng.
+        for row_idx in sorted(matched_rows, reverse=True):
+            ws_pay.delete_rows(row_idx)
+
+        now = datetime.now(VN_TZ)
+        rows = []
+        payroll_df = _filter_real_payroll_rows(recalculate_payroll_net(payroll_df))
+        for _, r in payroll_df.iterrows():
+            rows.append([
+                batch_id, start_date.strftime('%d/%m/%Y'), end_date.strftime('%d/%m/%Y'),
+                now.strftime('%d/%m/%Y'), now.strftime('%H:%M:%S'), str(saved_by), str(source_label),
+                int(_money_to_float(r.get('TT', 0))), str(r.get('Tên Hệ thống', '')), str(r.get('Họ và tên', '')),
+                float(_money_to_float(r.get('Tiền Lương', 0))), float(_money_to_float(r.get('Tiền Hỗ Trợ Hoàn Lại', 0))),
+                0.0, 0.0,
+                float(_money_to_float(r.get('Tích lũy', 0))), float(_money_to_float(r.get('Chi Phí Sinh Hoạt', 0))),
+                float(_money_to_float(r.get('Tiền phạt trong tháng', 0))), float(_money_to_float(r.get('Tiền ứng lương', 0))),
+                float(_money_to_float(r.get('Tiền hỗ trợ Locker', 0))), float(_money_to_float(r.get('Số tiền thực nhận', 0))),
+                str(r.get('Email', '')), "'" + str(r.get('Số tài khoản ngân hàng', '')).replace("'", ""),
+                str(r.get('Tên ngân hàng', '')), int(_money_to_float(r.get('Số dòng Tip', 0)))
+            ])
+
+        if rows:
+            ws_pay.append_rows(rows, value_input_option='USER_ENTERED')
+        st.cache_data.clear()
+        return True, f"Đã ghi đè cập nhật bản lương {batch_id} cho {len(rows)} nhân viên."
+    except Exception as e:
+        return False, f"Lỗi ghi đè bảng lương: {e}"
+
+
 @st.cache_data(ttl=15, show_spinner=False)
 def load_payroll_history():
     try:
@@ -3520,30 +3569,95 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             else:
                 st.caption("Nguồn mặc định: Google Sheet 1WtYsbEAlifL1PZ-nSGBojgL4Bnur-1vF")
 
-        if st.button("🔄 Tải dữ liệu & tính bảng lương", use_container_width=True, disabled=bool(period_err)):
-            with st.spinner("Đang đọc dữ liệu doanh thu và tính lương..."):
+        # Trạng thái trực quan cho quy trình tải dữ liệu & tính lương.
+        if "payroll_process_message" not in st.session_state:
+            st.session_state.payroll_process_message = "⏸️ Sẵn sàng tải dữ liệu và tính lương."
+        if "payroll_process_state" not in st.session_state:
+            st.session_state.payroll_process_state = "idle"
+
+        state_icon = {"idle": "⚪", "running": "🔵", "complete": "🟢", "error": "🔴"}.get(
+            st.session_state.payroll_process_state, "⚪"
+        )
+        st.markdown(
+            f"<div style='padding:8px 12px;border:1px solid #d9d9d9;border-radius:8px;"
+            f"background:#fafafa;margin:4px 0 8px 0;font-weight:600;'>"
+            f"{state_icon} {st.session_state.payroll_process_message}</div>",
+            unsafe_allow_html=True
+        )
+
+        if st.button("🔄 Tải dữ liệu & Tính lương", use_container_width=True, disabled=bool(period_err)):
+            progress = st.progress(0, text="0% - Bắt đầu xử lý...")
+            status = st.status("🔄 Đang xử lý bảng lương...", expanded=True, state="running")
+            try:
+                st.session_state.payroll_process_state = "running"
+                st.session_state.payroll_process_message = "Đang kiểm tra nguồn dữ liệu..."
+                status.write("1/5 · Kiểm tra nguồn dữ liệu và kỳ lương")
+                progress.progress(10, text="10% - Kiểm tra nguồn dữ liệu")
+
                 if source_mode == "Upload file Excel":
+                    if payroll_upload is None:
+                        raise ValueError("Vui lòng upload file Excel dữ liệu lương trước khi tính.")
+                    status.write(f"2/5 · Đang đọc file: {getattr(payroll_upload, 'name', 'Upload Excel')}")
+                    progress.progress(25, text="25% - Đang đọc file Excel")
                     src_df, src_err = load_payroll_source_from_uploaded_excel(payroll_upload)
-                    src_label = getattr(payroll_upload, 'name', 'Upload Excel') if payroll_upload is not None else 'Upload Excel'
+                    src_label = getattr(payroll_upload, 'name', 'Upload Excel')
                 else:
+                    status.write("2/5 · Đang tải dữ liệu từ Google Sheet mặc định")
+                    progress.progress(25, text="25% - Đang tải Google Sheet")
                     src_df, src_err = load_payroll_source_from_google_sheet()
                     src_label = f"Google Sheet {PAYROLL_SOURCE_SHEET_ID}"
+
                 if src_err:
-                    st.error(src_err)
-                else:
-                    # Tiền phạt chỉ dùng dữ liệu ở Google Sheet 1Kz0...; không lấy nguồn lịch nghỉ thứ hai.
-                    payroll_df, unmatched_names = build_payroll_table(
-                        src_df, df_credentials, p_start, p_end,
-                        leave_primary=load_backup_sheet_data(), leave_secondary=None,
-                        default_living_expense=payroll_default_living,
-                        default_locker_support=payroll_default_locker
-                    )
-                    st.session_state.payroll_current_df = payroll_df
-                    st.session_state.payroll_current_start = p_start.isoformat()
-                    st.session_state.payroll_current_end = p_end.isoformat()
-                    st.session_state.payroll_current_source = src_label
-                    st.session_state.payroll_unmatched = unmatched_names
-                    st.success(f"Đã tính lương cho {len(payroll_df)} tài khoản nhân viên.")
+                    raise ValueError(src_err)
+
+                row_count = len(src_df) if isinstance(src_df, pd.DataFrame) else 0
+                status.write(f"✅ Đã đọc {row_count:,} dòng dữ liệu nguồn".replace(",", "."))
+                progress.progress(45, text="45% - Đã đọc dữ liệu nguồn")
+
+                status.write("3/5 · Đang tải dữ liệu tiền phạt từ hệ thống")
+                st.session_state.payroll_process_message = "Đang tải dữ liệu tiền phạt..."
+                progress.progress(60, text="60% - Đang tải tiền phạt")
+                leave_primary = load_backup_sheet_data()
+                penalty_rows = len(leave_primary) if isinstance(leave_primary, pd.DataFrame) else 0
+                status.write(f"✅ Đã tải {penalty_rows:,} dòng lịch nghỉ/vi phạm".replace(",", "."))
+
+                status.write("4/5 · Đang khớp tên nhân viên và tính lương")
+                st.session_state.payroll_process_message = "Đang khớp nhân viên và tính lương..."
+                progress.progress(75, text="75% - Đang tính lương")
+                # Tiền phạt chỉ dùng dữ liệu ở Google Sheet 1Kz0...; không lấy nguồn lịch nghỉ thứ hai.
+                payroll_df, unmatched_names = build_payroll_table(
+                    src_df, df_credentials, p_start, p_end,
+                    leave_primary=leave_primary, leave_secondary=None,
+                    default_living_expense=payroll_default_living,
+                    default_locker_support=payroll_default_locker
+                )
+
+                status.write("5/5 · Đang hoàn tất và lưu kết quả vào phiên làm việc")
+                st.session_state.payroll_process_message = "Đang hoàn tất bảng lương..."
+                progress.progress(92, text="92% - Đang hoàn tất")
+                st.session_state.payroll_current_df = payroll_df
+                st.session_state.payroll_current_start = p_start.isoformat()
+                st.session_state.payroll_current_end = p_end.isoformat()
+                st.session_state.payroll_current_source = src_label
+                st.session_state.payroll_unmatched = unmatched_names
+
+                progress.progress(100, text="100% - Hoàn tất")
+                st.session_state.payroll_process_state = "complete"
+                st.session_state.payroll_process_message = f"Hoàn tất · Đã tính lương cho {len(payroll_df)} nhân viên."
+                status.update(
+                    label=f"✅ Hoàn tất - Đã tính lương cho {len(payroll_df)} nhân viên",
+                    state="complete", expanded=False
+                )
+                st.success(f"✅ Đã tính lương cho {len(payroll_df)} tài khoản nhân viên.")
+                if unmatched_names:
+                    status.write(f"⚠️ Có {len(unmatched_names)} tên trong dữ liệu Tip chưa khớp tài khoản hệ thống.")
+            except Exception as e:
+                progress.empty()
+                st.session_state.payroll_process_state = "error"
+                st.session_state.payroll_process_message = f"Lỗi: {e}"
+                status.update(label=f"❌ Không thể tính lương: {e}", state="error", expanded=True)
+                status.write(f"❌ {e}")
+                st.error(f"❌ {e}")
 
         current = st.session_state.get('payroll_current_df')
         if isinstance(current, pd.DataFrame) and not current.empty:
@@ -3745,6 +3859,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     f"Lưu bởi {saved.iloc[0].get('Người lưu','')} lúc {saved.iloc[0].get('Giờ lưu','')} ngày {saved.iloc[0].get('Ngày lưu','')}"
                 )
                 saved_table = payroll_history_to_table(saved)
+                saved_table = _filter_real_payroll_rows(saved_table)
                 # Không hiển thị/tính dòng Lễ tân kể cả với bản lịch sử cũ đã lưu từ V18.
                 try:
                     letan_keys = set(
@@ -3756,30 +3871,103 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         saved_table = saved_table[~saved_table['Tên Hệ thống'].apply(normalize_login_name).isin(letan_keys)].copy()
                 except Exception:
                     pass
-                hist_display_cols = [c for c in [
-                    "TT","Tên Hệ thống","Tiền Lương","Tiền Hỗ Trợ Hoàn Lại","Tích lũy",
-                    "Chi Phí Sinh Hoạt","Tiền phạt trong tháng","Tiền ứng lương","Tiền hỗ trợ Locker",
-                    "Số tiền thực nhận","Số tài khoản ngân hàng","Tên ngân hàng","Email"
-                ] if c in saved_table.columns]
-                hist_web = saved_table[hist_display_cols].copy()
-                for c in [x for x in hist_display_cols if x.startswith('Tiền') or x in {'Tích lũy','Chi Phí Sinh Hoạt','Số tiền thực nhận'}]:
-                    hist_web[c] = hist_web[c].apply(lambda v: f"{_money_to_float(v):,.0f}".replace(',', '.'))
-                hist_web = hist_web.rename(columns={c: PAYROLL_DISPLAY_LABELS.get(c, c) for c in hist_web.columns})
-                hist_html = hist_web.to_html(index=False, escape=True, classes='vera-payroll-table')
-                st.markdown(f"<div class='vera-payroll-wrap'>{hist_html}</div>", unsafe_allow_html=True)
+
                 try:
                     hs = pd.to_datetime(saved.iloc[0]['Từ ngày'], dayfirst=True).date()
                     he = pd.to_datetime(saved.iloc[0]['Đến ngày'], dayfirst=True).date()
-                    hist_excel = build_payroll_excel_bytes(saved_table, hs, he)
-                    st.download_button(
-                        "📥 Export lại bản lương đã lưu",
-                        data=hist_excel,
-                        file_name=f"BangLuong_DaLuu_{hs.strftime('%d%m%Y')}_{he.strftime('%d%m%Y')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-                except Exception as e:
-                    st.warning(f"Không tạo được file export lịch sử: {e}")
+                except Exception:
+                    hs, he = get_vn_today(), get_vn_today()
+
+                st.markdown("#### ✏️ Mở lại và chỉnh sửa bản lương")
+                st.caption(
+                    "Bạn có thể sửa trực tiếp các khoản tiền bên dưới. Cột Thực nhận được hệ thống tự tính lại. "
+                    "Khi bấm Ghi đè, Mã bản lưu được giữ nguyên và bản cũ sẽ được thay bằng dữ liệu mới."
+                )
+
+                history_edit_cols = [c for c in [
+                    "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy",
+                    "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker",
+                    "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
+                ] if c in saved_table.columns]
+                hist_editor_df = saved_table[history_edit_cols].copy()
+
+                hist_col_cfg = {
+                    "TT": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS.get("TT", "TT"), format="%d", disabled=True, width="small"),
+                    "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Tên Hệ thống", "Tên Hệ thống"), disabled=True, width="small"),
+                    "Số tiền thực nhận": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS.get("Số tiền thực nhận", "Thực nhận"), format="%.0f", disabled=True, width="small"),
+                    "Số tài khoản ngân hàng": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Số tài khoản ngân hàng", "Tài khoản ngân hàng"), disabled=True, width="small"),
+                    "Tên ngân hàng": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Tên ngân hàng", "Tên ngân hàng"), disabled=True, width="small"),
+                    "Email": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Email", "Email"), disabled=True, width="small"),
+                }
+                for c in [
+                    "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
+                    "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker"
+                ]:
+                    if c in hist_editor_df.columns:
+                        hist_col_cfg[c] = st.column_config.NumberColumn(
+                            PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%.0f", width="small"
+                        )
+
+                edited_hist = st.data_editor(
+                    hist_editor_df,
+                    key=f"payroll_history_editor_{batch}",
+                    width="stretch", height="content", hide_index=True,
+                    column_config=hist_col_cfg,
+                    disabled=[c for c in ["TT", "Tên Hệ thống", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"] if c in hist_editor_df.columns]
+                )
+
+                edited_saved_table = saved_table.copy()
+                for c in edited_hist.columns:
+                    if c in edited_saved_table.columns:
+                        edited_saved_table[c] = edited_hist[c].values
+                edited_saved_table = recalculate_payroll_net(edited_saved_table)
+                edited_saved_table = _filter_real_payroll_rows(edited_saved_table)
+
+                # Hiển thị nhanh tổng sau khi sửa để Admin kiểm tra trước khi ghi đè.
+                h1, h2, h3 = st.columns(3)
+                h1.metric("Nhân viên", len(edited_saved_table))
+                h2.metric("Tổng Tiền Lương", f"{edited_saved_table['Tiền Lương'].apply(_money_to_float).sum():,.0f} đ".replace(',', '.'))
+                h3.metric("Tổng Thực nhận", f"{edited_saved_table['Số tiền thực nhận'].apply(_money_to_float).sum():,.0f} đ".replace(',', '.'))
+
+                confirm_overwrite = st.checkbox(
+                    f"Tôi xác nhận ghi đè bản lương {batch}",
+                    key=f"confirm_payroll_overwrite_{batch}"
+                )
+                c_overwrite, c_export_hist = st.columns(2)
+                with c_overwrite:
+                    if st.button(
+                        "💾 Ghi đè cập nhật bản lương này",
+                        use_container_width=True,
+                        key=f"overwrite_payroll_{batch}",
+                        disabled=not confirm_overwrite
+                    ):
+                        source_label = str(saved.iloc[0].get('Nguồn dữ liệu', '')).strip()
+                        ok, msg = overwrite_payroll_snapshot(
+                            batch, edited_saved_table, hs, he, source_label, st.session_state.current_user
+                        )
+                        if ok:
+                            load_payroll_history.clear()
+                            st.success(msg)
+                            st.info(
+                                f"Bản {batch} đã được cập nhật lúc {datetime.now(VN_TZ).strftime('%H:%M:%S %d/%m/%Y')} "
+                                f"bởi {st.session_state.current_user}."
+                            )
+                        else:
+                            st.error(msg)
+
+                with c_export_hist:
+                    try:
+                        hist_excel = build_payroll_excel_bytes(edited_saved_table, hs, he)
+                        st.download_button(
+                            "📥 Export bản đang chỉnh sửa",
+                            data=hist_excel,
+                            file_name=f"BangLuong_DaLuu_{hs.strftime('%d%m%Y')}_{he.strftime('%d%m%Y')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            key=f"export_payroll_history_{batch}"
+                        )
+                    except Exception as e:
+                        st.warning(f"Không tạo được file export lịch sử: {e}")
 
 elif selected_page == "🧭 Bảng Tour":
     st.subheader("🧭 Bảng Tour")

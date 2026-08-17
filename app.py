@@ -2657,11 +2657,32 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
     ws['B2'] = f"Từ ngày {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}"
     ws['B2'].font = Font(name='Arial', size=11, bold=True)
 
+    # Tên hiển thị ở dòng tiêu đề Excel theo mẫu bảng lương rút gọn.
+    header_labels = {
+        "TT": "TT",
+        "Tên Hệ thống": "Tên Hệ thống",
+        "Tiền Lương": "Tiền Lương",
+        "Tiền Hỗ Trợ Hoàn Lại": "Hỗ Trợ Hoàn Lại",
+        "Tích lũy": "Tích lũy",
+        "Chi Phí Sinh Hoạt": "Phí Sinh Hoạt",
+        "Tiền phạt trong tháng": "Vi phạm",
+        "Tiền ứng lương": "Tiền ứng",
+        "Tiền hỗ trợ Locker": "Tiền hỗ trợ Locker",
+        "Số tiền thực nhận": "Thực nhận",
+        "Số tài khoản ngân hàng": "Tài khoản ngân hàng",
+        "Tên ngân hàng": "Tên ngân hàng",
+        "Email": "Email",
+    }
     for c, h in enumerate(export_cols, start=1):
-        cell = ws.cell(row=3, column=c, value=h)
+        display_header = header_labels.get(h, h)
+        cell = ws.cell(row=3, column=c, value=display_header)
         cell.font = Font(name='Arial', size=9, bold=True, color='000000')
         cell.fill = PatternFill('solid', fgColor='A1948C')
-        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        # Riêng Tên ngân hàng không wrap text theo yêu cầu.
+        cell.alignment = Alignment(
+            horizontal='center', vertical='center',
+            wrap_text=False if h == 'Tên ngân hàng' else True
+        )
     ws.row_dimensions[3].height = 52
     thin = Side(style='thin', color='A6A6A6')
 
@@ -2695,7 +2716,12 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
             cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
             if cell.row >= 4:
                 cell.font = Font(name='Arial', size=9, bold=(cell.row == total_row))
-                cell.alignment = Alignment(vertical='center', wrap_text=True)
+                # Không wrap cột Tên ngân hàng; các cột còn lại giữ wrap để gọn trên A4 ngang.
+                col_name = export_cols[cell.column - 1]
+                cell.alignment = Alignment(
+                    vertical='center',
+                    wrap_text=False if col_name == 'Tên ngân hàng' else True
+                )
     for j, col in enumerate(export_cols, start=1):
         if col in money_cols:
             for row in range(4, total_row + 1):
@@ -2707,10 +2733,14 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
         max_len = len(col)
         for row in range(4, min(total_row, 60) + 1):
             max_len = max(max_len, len(str(ws.cell(row, j).value or '')))
-        if col in money_cols:
+        if col == 'TT':
+            # Cột TT cũ tối thiểu rộng 6; giảm 80% còn khoảng 20% chiều rộng.
+            width = 1.2
+        elif col in money_cols:
             width = min(max(max_len + 2, 12), 17)
         elif col == 'Tên ngân hàng':
-            width = min(max(max_len + 2, 16), 24)
+            # Không wrap nên cho phép cột rộng hơn để tên ngân hàng nằm trên một dòng.
+            width = min(max(max_len + 2, 22), 32)
         elif col == 'Email':
             width = min(max(max_len + 2, 16), 25)
         else:

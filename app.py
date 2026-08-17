@@ -75,9 +75,19 @@ PROGRESSIVE_PENALTY_REASONS = {
     normalize_login_name("Ra sớm không phép"): "Về sớm không phép",
 }
 
+# Các loại này tuyệt đối KHÔNG tham gia xếp hạng Người Thứ 1/2/3... dù tên danh mục
+# sau này có bị chỉnh gần giống một nhóm phạt lũy tiến.
+PROGRESSIVE_PENALTY_EXCLUDED_REASONS = {
+    normalize_login_name("Ra ngoài vào muộn dưới 30 phút"),
+    normalize_login_name("Ra ngoài vào muộn dưới 60 phút"),
+    normalize_login_name("Ra ngoài vào muộn dưới 120 phút"),
+}
+
 def get_progressive_penalty_reason(value):
-    """Trả về tên chuẩn nếu loại nghỉ thuộc 3 nhóm phạt lũy tiến, ngược lại trả về None."""
+    """Trả về tên chuẩn nếu loại nghỉ thuộc nhóm phạt lũy tiến, ngược lại trả về None."""
     key = normalize_login_name(str(value).replace("🔴", "").strip())
+    if key in PROGRESSIVE_PENALTY_EXCLUDED_REASONS:
+        return None
     return PROGRESSIVE_PENALTY_REASONS.get(key)
 
 def is_progressive_penalty_reason(value):
@@ -496,7 +506,7 @@ online_users_count = len(active_users)
 online_users_list = list(active_users.keys())
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Vera Spa", page_icon="📅", layout="wide", initial_sidebar_state="auto")
+st.set_page_config(page_title="Vera-Spa", page_icon="📅", layout="wide", initial_sidebar_state="auto")
 
 # --- JAVASCRIPT: NHỚ ĐĂNG NHẬP + ĐÓNG DROPDOWN KHI BẤM RA NGOÀI ---
 components.html("""
@@ -1618,39 +1628,150 @@ def update_user_profile(username, new_pass, fullname, dob, phone, email, address
     except Exception as e:
         return False, f"Lỗi cập nhật: {e}"
 
+# --- THIẾT LẬP CA LÀM VIỆC / TEMPLATE EXCEL ---
+SHIFT_OPTIONS = [
+    "Ca 1 (10:00 - 23:00)",
+    "Ca 2 (13:00 - 00:00)",
+    "Cố định Ca 1 (Không đổi)",
+    "Cố định Ca 2 (Không đổi)",
+]
+SHIFT_CYCLE_OPTIONS = [
+    "Luân phiên (14 ngày)",
+    "Theo chu kỳ Tháng",
+    "Cố định (Không đổi)",
+]
+
+def get_nhanvien_shift_dataframe(credentials_df):
+    """Trang Thiết lập ca chỉ hiển thị đúng role `nhanvien`, sắp xếp A→Z."""
+    cols = ['Tên nhân viên', 'Ca làm việc', 'Ngày bắt đầu ca', 'Chu kỳ']
+    if credentials_df is None or credentials_df.empty:
+        return pd.DataFrame(columns=cols)
+    d = credentials_df.copy()
+    for c in cols:
+        if c not in d.columns:
+            d[c] = ''
+    if 'Phân quyền' in d.columns:
+        d = d[d['Phân quyền'].astype(str).str.strip().str.lower().eq('nhanvien')].copy()
+    d = d[cols].copy()
+    if not d.empty:
+        d['_sort'] = d['Tên nhân viên'].astype(str).apply(normalize_login_name)
+        d = d.sort_values('_sort', kind='stable').drop(columns=['_sort']).reset_index(drop=True)
+    return d
+
+def build_shift_template_excel_bytes(credentials_df):
+    """Tạo template Excel phân ca có dropdown ở Ca làm việc và Chu kỳ luân phiên."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.utils import get_column_letter
+
+    d = get_nhanvien_shift_dataframe(credentials_df)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'ThietLapCa'
+    headers = ['Tên nhân viên', 'Ca làm việc', 'Ngày bắt đầu ca', 'Chu kỳ luân phiên']
+    ws.append(headers)
+    for _, r in d.iterrows():
+        ws.append([
+            str(r.get('Tên nhân viên','')).strip(),
+            str(r.get('Ca làm việc','')).strip(),
+            str(r.get('Ngày bắt đầu ca','')).strip(),
+            str(r.get('Chu kỳ','')).strip(),
+        ])
+
+    fill = PatternFill('solid', fgColor='A1948C')
+    thin = Side(style='thin', color='D9D9D9')
+    for cell in ws[1]:
+        cell.fill = fill
+        cell.font = Font(bold=True, color='000000')
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    for row in ws.iter_rows(min_row=1, max_row=max(2, ws.max_row), min_col=1, max_col=4):
+        for cell in row:
+            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            cell.alignment = Alignment(vertical='center', wrap_text=False)
+    widths = [24, 30, 22, 24]
+    for i, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+    ws.freeze_panes = 'A2'
+    ws.auto_filter.ref = f'A1:D{max(2, ws.max_row)}'
+
+    dm = wb.create_sheet('DanhMuc')
+    dm['A1'] = 'Ca làm việc'; dm['B1'] = 'Chu kỳ luân phiên'
+    for i, v in enumerate(SHIFT_OPTIONS, start=2): dm.cell(i, 1, v)
+    for i, v in enumerate(SHIFT_CYCLE_OPTIONS, start=2): dm.cell(i, 2, v)
+    dm.sheet_state = 'hidden'
+
+    max_target_row = max(300, ws.max_row + 100)
+    dv_shift = DataValidation(type='list', formula1=f"=DanhMuc!$A$2:$A${len(SHIFT_OPTIONS)+1}", allow_blank=True)
+    dv_cycle = DataValidation(type='list', formula1=f"=DanhMuc!$B$2:$B${len(SHIFT_CYCLE_OPTIONS)+1}", allow_blank=True)
+    ws.add_data_validation(dv_shift); ws.add_data_validation(dv_cycle)
+    dv_shift.add(f'B2:B{max_target_row}')
+    dv_cycle.add(f'D2:D{max_target_row}')
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+def read_shift_template_excel(uploaded_file, credentials_df):
+    """Đọc template đã nhập và chỉ nhận tên thuộc role nhanvien hiện tại."""
+    try:
+        raw = pd.read_excel(uploaded_file, sheet_name='ThietLapCa', dtype=str, engine='openpyxl').fillna('')
+    except Exception as e:
+        return pd.DataFrame(), f'Không đọc được file template: {e}'
+    raw = raw.rename(columns={'Chu kỳ luân phiên': 'Chu kỳ'})
+    required = ['Tên nhân viên', 'Ca làm việc', 'Ngày bắt đầu ca', 'Chu kỳ']
+    missing = [c for c in required if c not in raw.columns]
+    if missing:
+        return pd.DataFrame(), 'Thiếu cột: ' + ', '.join(missing)
+    allowed = get_nhanvien_shift_dataframe(credentials_df)
+    allowed_keys = {normalize_login_name(x) for x in allowed['Tên nhân viên'].astype(str).tolist()}
+    raw = raw[required].copy()
+    raw = raw[raw['Tên nhân viên'].astype(str).apply(normalize_login_name).isin(allowed_keys)].copy()
+    raw['Ca làm việc'] = raw['Ca làm việc'].astype(str).where(raw['Ca làm việc'].astype(str).isin(SHIFT_OPTIONS), '')
+    raw['Chu kỳ'] = raw['Chu kỳ'].astype(str).where(raw['Chu kỳ'].astype(str).isin(SHIFT_CYCLE_OPTIONS), '')
+    raw['_sort'] = raw['Tên nhân viên'].astype(str).apply(normalize_login_name)
+    raw = raw.sort_values('_sort', kind='stable').drop(columns=['_sort']).reset_index(drop=True)
+    return raw, ''
+
 # --- GHI NHẬN HÀNG LOẠT CA LÀM VIỆC TỪ DATAFRAME ---
 def batch_update_shift_schedule(edited_df):
+    """Ghi đồng loạt O:P:Q một lần, không update lại toàn bộ Sheet1."""
     try:
         client = get_gspread_client()
         if not client: return False, "Chưa cấu hình quyền kết nối."
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
         all_vals = _gs_call_with_backoff(sheet.get_all_values)
-        
+        if not all_vals or len(all_vals) < 2:
+            return False, "Sheet1 chưa có dữ liệu nhân viên."
+
         shift_map = {}
         for _, r in edited_df.iterrows():
-            nv_name = normalize_login_name(r['Tên nhân viên'])
+            nv_name = normalize_login_name(r.get('Tên nhân viên', ''))
+            if not nv_name:
+                continue
             shift_map[nv_name] = {
                 'ca': str(r.get('Ca làm việc', '')).replace("nan", "").strip(),
                 'ngay': str(r.get('Ngày bắt đầu ca', '')).replace("nan", "").strip(),
                 'chuky': str(r.get('Chu kỳ', '')).replace("nan", "").strip()
             }
-        
-        for i, row in enumerate(all_vals):
-            if i == 0: continue 
-            if len(row) > 1:
-                nv_name = normalize_login_name(row[1])
-                if nv_name in shift_map:
-                    while len(row) < 20: row.append("") 
-                    row[14] = shift_map[nv_name]['ca']
-                    row[15] = shift_map[nv_name]['ngay']
-                    row[16] = shift_map[nv_name]['chuky']
-                    all_vals[i] = row
-        
-        try: sheet.update('A1', all_vals)
-        except: sheet.update(all_vals) 
-            
+
+        out = []
+        updated = 0
+        for row in all_vals[1:]:
+            rr = list(row)
+            while len(rr) < 17:
+                rr.append("")
+            key = normalize_login_name(rr[1] if len(rr) > 1 else '')
+            ca, ngay, chuky = rr[14], rr[15], rr[16]
+            if key in shift_map:
+                ca = shift_map[key]['ca']; ngay = shift_map[key]['ngay']; chuky = shift_map[key]['chuky']
+                updated += 1
+            out.append([ca, ngay, chuky])
+
+        if out:
+            gspread_update_range(sheet, f"O2:Q{len(out)+1}", out, value_input_option='USER_ENTERED')
         _clear_dynamic_data_caches()
-        return True, "Đã lưu đồng loạt cấu hình Ca làm việc thành công!"
+        return True, f"Đã lưu cấu hình ca cho {updated} nhân viên."
     except Exception as e:
         return False, f"Lỗi cập nhật: {e}"
 
@@ -3450,6 +3571,50 @@ def save_table_layout_config(table_key, order, widths, username, visual=None):
         return True, "Đã lưu cấu hình hiển thị và áp dụng cho toàn hệ thống."
     except Exception as e:
         return False, f"Lỗi lưu cấu hình cột: {e}"
+
+
+def render_admin_quick_layout_default(table_key, columns, key_suffix=""):
+    """
+    Nút lưu bố cục ngay tại từng bảng, chỉ Admin.
+    Streamlit không trả lại kích thước cột khi người dùng kéo trực tiếp bằng chuột, vì vậy
+    khối này cung cấp chỉnh nhanh Vị trí/Độ rộng ngay cạnh bảng rồi lưu làm mặc định toàn hệ thống.
+    """
+    if st.session_state.get('current_role') != 'admin':
+        return
+    cols = [str(c) for c in (columns or []) if str(c)]
+    if not cols:
+        return
+    safe_suffix = re.sub(r'[^a-zA-Z0-9_]+', '_', str(key_suffix or table_key))
+    with st.expander("⭐ Lưu bố cục bảng này làm mặc định", expanded=False):
+        st.caption("Chỉnh nhanh thứ tự/độ rộng rồi lưu. Font, căn lề, Wrap Text và độ cao dòng được giữ theo cấu hình hiện tại.")
+        order, widths = get_table_layout(table_key, cols)
+        quick_df = pd.DataFrame([
+            {"Tên cột": c, "Vị trí": i, "Độ rộng (px)": int(widths.get(c, _default_column_width(c)))}
+            for i, c in enumerate(order, start=1)
+        ])
+        quick_edit = st.data_editor(
+            quick_df, hide_index=True, num_rows='fixed', width='stretch', height='content',
+            disabled=['Tên cột'], key=f"quick_layout_{table_key}_{safe_suffix}",
+            column_config={
+                'Tên cột': st.column_config.TextColumn('Tên cột', disabled=True, width=220),
+                'Vị trí': st.column_config.NumberColumn('Vị trí', min_value=1, max_value=max(1, len(quick_df)), step=1, format='%d', width=85),
+                'Độ rộng (px)': st.column_config.NumberColumn('Độ rộng (px)', min_value=50, max_value=800, step=10, format='%d', width=120),
+            }
+        )
+        if st.button("💾 Lưu làm mặc định", use_container_width=True, key=f"quick_layout_save_{table_key}_{safe_suffix}"):
+            rows = quick_edit.to_dict('records')
+            rows = sorted(rows, key=lambda r: (int(float(r.get('Vị trí', 9999) or 9999)), normalize_login_name(r.get('Tên cột',''))))
+            new_order = [str(r.get('Tên cột','')).strip() for r in rows if str(r.get('Tên cột','')).strip()]
+            new_widths = {
+                str(r.get('Tên cột','')).strip(): max(50, min(800, int(float(r.get('Độ rộng (px)', 140) or 140))))
+                for r in rows if str(r.get('Tên cột','')).strip()
+            }
+            row_height, styles = get_table_visual_settings(table_key, new_order)
+            visual = {"row_height": row_height, "columns": styles}
+            ok, msg = save_table_layout_config(table_key, new_order, new_widths, st.session_state.current_user, visual=visual)
+            (st.success if ok else st.error)(msg)
+            if ok:
+                st.rerun()
 
 
 def get_table_columns_for_settings(table_key):
@@ -6427,6 +6592,7 @@ PAGE_SLUGS = {
     "🔄 Đồng bộ dữ liệu": "dong-bo-du-lieu",
     "⚙️ Cấu hình cột": "cau-hinh-cot",
     "🔐 Phân quyền chức năng": "phan-quyen-chuc-nang",
+    "🎂 Sinh nhật nhân sự": "sinh-nhat-nhan-su",
     "👤 Hồ sơ cá nhân": "ho-so-ca-nhan",
 }
 SLUG_TO_PAGE = {v: k for k, v in PAGE_SLUGS.items()}
@@ -6447,6 +6613,7 @@ PAGE_FEATURE_KEYS = {
     "🔄 Đồng bộ dữ liệu": "sync",
     "⚙️ Cấu hình cột": "column_config",
     "🔐 Phân quyền chức năng": "permission_admin",
+    "🎂 Sinh nhật nhân sự": "birthday",
     "👤 Hồ sơ cá nhân": "profile",
 }
 PAGE_FEATURE_GROUPS = {
@@ -6457,6 +6624,9 @@ PAGE_FEATURE_GROUPS = {
 }
 
 def has_page_access(page_name):
+    # Cấu hình cột/lưu mặc định chỉ dành cho Admin, không cho phép override xuống vai trò khác.
+    if page_name == "⚙️ Cấu hình cột" and st.session_state.get('current_role') != 'admin':
+        return False
     features = PAGE_FEATURE_GROUPS.get(page_name)
     if features:
         return any(has_feature_access(key) for key in features)
@@ -6513,7 +6683,7 @@ st.write("")
 col_title, col_logout = st.columns([8, 2])
 with col_title:
     st.markdown("""
-        <div class='custom-main-title'>WELCOME TO VERA SPA</div>
+        <div class='custom-main-title'>WELCOME TO VERA-SPA</div>
     """, unsafe_allow_html=True)
 with col_logout:
     if st.button("🚪 Đăng xuất", use_container_width=True):
@@ -6535,13 +6705,7 @@ with col_logout:
 
 # V48: Thông báo sinh nhật đầu tháng cho Admin/Quản lý/Lễ tân.
 render_birthday_login_notice(df_credentials)
-# V51: nút xem sinh nhật chủ động áp dụng cho mọi tài khoản.
-if has_feature_access("birthday"):
-    with st.expander("🎂 Sinh nhật nhân sự trong tháng", expanded=False):
-        render_manual_birthday_check(
-            df_credentials,
-            key_prefix=f"birthday_manual_{normalize_login_name(st.session_state.current_user) or 'user'}"
-        )
+# Nút xem sinh nhật chủ động đã được chuyển vào menu chức năng riêng.
 
 # Nhân viên: thanh nút điều hướng ngay trên nội dung, phù hợp điện thoại.
 if st.session_state.current_role in ["nhanvien", "leader", "locker"]:
@@ -6628,42 +6792,127 @@ if selected_page == "👤 Hồ sơ cá nhân" and st.session_state.current_role 
 # ==========================================
 # CÁC TRANG CHỨC NĂNG ĐỘC LẬP
 # ==========================================
-if selected_page == "👤 Hồ sơ cá nhân":
+if selected_page == "🎂 Sinh nhật nhân sự" and has_feature_access("birthday"):
+    st.subheader("🎂 Sinh nhật nhân sự trong tháng")
+    st.caption("Danh sách được lấy từ hồ sơ mới nhất và sắp theo ngày sinh trong tháng.")
+    render_manual_birthday_check(
+        load_credentials_recent(),
+        key_prefix=f"birthday_menu_{normalize_login_name(st.session_state.current_user) or 'user'}"
+    )
+elif selected_page == "👤 Hồ sơ cá nhân":
     pass  # Nội dung hồ sơ đã hiển thị ở phía trên.
 elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access("shift"):
     st.subheader("⏰ Thiết lập ca làm việc")
-    st.info("Chỉnh sửa trực tiếp trên bảng dưới đây để phân ca đồng loạt cho toàn bộ nhân viên.")
-
-    df_shifts = df_credentials[['Tên nhân viên', 'Ca làm việc', 'Ngày bắt đầu ca', 'Chu kỳ']].copy()
-    calc_height = (len(df_shifts) * 36) + 42 
-
-    edited_df = st.data_editor(
-        df_shifts,
-        height=calc_height,
-        column_config={
-            "Tên nhân viên": st.column_config.TextColumn("Tên nhân viên", disabled=True),
-            "Ca làm việc": st.column_config.SelectboxColumn(
-                "Ca làm việc",
-                options=["Ca 1 (10:00 - 23:00)", "Ca 2 (13:00 - 00:00)", "Cố định Ca 1 (Không đổi)", "Cố định Ca 2 (Không đổi)"],
-                width="large"
-            ),
-            "Ngày bắt đầu ca": st.column_config.TextColumn("Ngày bắt đầu (DD/MM/YYYY)"),
-            "Chu kỳ": st.column_config.SelectboxColumn(
-                "Chu kỳ luân phiên",
-                options=["Luân phiên (14 ngày)", "Theo chu kỳ Tháng", "Cố định (Không đổi)"],
-                width="medium"
-            )
-        },
-        hide_index=True,
-        use_container_width=True
+    st.info(
+        "Chỉ hiển thị tài khoản role `nhanvien`. Bảng được đặt trong Form nên khi chỉnh nhiều ô sẽ không tải lại dữ liệu nguồn; "
+        "hệ thống chỉ ghi Google Sheet khi bấm **Lưu Toàn Bộ Cấu Hình Ca**."
     )
 
-    st.write("")
-    if st.button("💾 Lưu Toàn Bộ Cấu Hình Ca", use_container_width=True):
-        with st.spinner("Đang lưu đồng loạt vào hệ thống..."):
-            res, msg = batch_update_shift_schedule(edited_df)
-            if res: st.success(msg)
-            else: st.error(msg)
+    shift_base = get_nhanvien_shift_dataframe(df_credentials)
+    shift_seed_key = "shift_schedule_working_df"
+    shift_seed_signature_key = "shift_schedule_seed_signature"
+    shift_signature = "|".join(
+        f"{normalize_login_name(r.get('Tên nhân viên',''))}:{r.get('Ca làm việc','')}:{r.get('Ngày bắt đầu ca','')}:{r.get('Chu kỳ','')}"
+        for _, r in shift_base.iterrows()
+    )
+    if shift_seed_key not in st.session_state or st.session_state.get(shift_seed_signature_key) != shift_signature:
+        st.session_state[shift_seed_key] = shift_base.copy()
+        st.session_state[shift_seed_signature_key] = shift_signature
+
+    c_export_shift, c_import_shift = st.columns(2)
+    with c_export_shift:
+        st.download_button(
+            "📥 Export Excel template phân ca",
+            data=build_shift_template_excel_bytes(df_credentials),
+            file_name=f"Vera-Spa_Template_Ca_{get_vn_today().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            help="Template có dropdown sẵn ở cột Ca làm việc và Chu kỳ luân phiên."
+        )
+    with c_import_shift:
+        uploaded_shift = st.file_uploader(
+            "📤 Import Excel template", type=["xlsx", "xlsm"], key="shift_template_upload",
+            help="Dùng đúng template Export từ hệ thống để giữ dropdown và tên cột chuẩn."
+        )
+
+    if uploaded_shift is not None:
+        imported_shift, import_err = read_shift_template_excel(uploaded_shift, df_credentials)
+        if import_err:
+            st.error(import_err)
+        elif not imported_shift.empty:
+            if st.button("✅ Nạp dữ liệu Import vào bảng chỉnh sửa", use_container_width=True, key="apply_shift_import"):
+                base = get_nhanvien_shift_dataframe(df_credentials).copy()
+                imp_map = {normalize_login_name(r['Tên nhân viên']): r for _, r in imported_shift.iterrows()}
+                for idx, rr in base.iterrows():
+                    key = normalize_login_name(rr.get('Tên nhân viên',''))
+                    if key in imp_map:
+                        ir = imp_map[key]
+                        base.at[idx, 'Ca làm việc'] = str(ir.get('Ca làm việc','')).strip()
+                        base.at[idx, 'Ngày bắt đầu ca'] = str(ir.get('Ngày bắt đầu ca','')).strip()
+                        base.at[idx, 'Chu kỳ'] = str(ir.get('Chu kỳ','')).strip()
+                st.session_state[shift_seed_key] = base
+                st.success(f"Đã nạp {len(imported_shift)} dòng từ file. Kiểm tra lại rồi bấm Lưu.")
+                st.rerun()
+
+    working_shift = st.session_state.get(shift_seed_key, shift_base).copy()
+    st.markdown("#### 🔎 Bộ lọc")
+    f1, f2, f3 = st.columns([2.2, 1.5, 1.5])
+    with f1:
+        filter_shift_name = st.text_input("Tìm theo tên nhân viên", key="shift_filter_name", placeholder="Gõ tên để lọc...")
+    with f2:
+        shift_filter_value = st.selectbox("Lọc theo ca", ["- Tất cả ca -"] + SHIFT_OPTIONS, key="shift_filter_shift")
+    with f3:
+        cycle_filter_value = st.selectbox("Lọc theo luân phiên", ["- Tất cả luân phiên -"] + SHIFT_CYCLE_OPTIONS, key="shift_filter_cycle")
+
+    filtered_shift = working_shift.copy()
+    if str(filter_shift_name).strip():
+        keyq = normalize_login_name(filter_shift_name)
+        filtered_shift = filtered_shift[filtered_shift['Tên nhân viên'].astype(str).apply(normalize_login_name).str.contains(keyq, regex=False)]
+    if shift_filter_value != "- Tất cả ca -":
+        filtered_shift = filtered_shift[filtered_shift['Ca làm việc'].astype(str).eq(shift_filter_value)]
+    if cycle_filter_value != "- Tất cả luân phiên -":
+        filtered_shift = filtered_shift[filtered_shift['Chu kỳ'].astype(str).eq(cycle_filter_value)]
+
+    st.caption(f"Đang hiển thị {len(filtered_shift)}/{len(working_shift)} nhân viên.")
+    if filtered_shift.empty:
+        st.info("Không có nhân viên phù hợp bộ lọc.")
+    else:
+        with st.form("shift_schedule_batch_form", clear_on_submit=False):
+            edited_df = st.data_editor(
+                filtered_shift,
+                height=min(900, max(160, (len(filtered_shift) * 36) + 42)),
+                column_config={
+                    "Tên nhân viên": st.column_config.TextColumn("Tên nhân viên", disabled=True),
+                    "Ca làm việc": st.column_config.SelectboxColumn(
+                        "Ca làm việc", options=SHIFT_OPTIONS, width="large"
+                    ),
+                    "Ngày bắt đầu ca": st.column_config.TextColumn("Ngày bắt đầu (DD/MM/YYYY)"),
+                    "Chu kỳ": st.column_config.SelectboxColumn(
+                        "Chu kỳ luân phiên", options=SHIFT_CYCLE_OPTIONS, width="medium"
+                    )
+                },
+                hide_index=True, use_container_width=True, key="shift_schedule_editor_form"
+            )
+            submit_shift = st.form_submit_button("💾 Lưu Toàn Bộ Cấu Hình Ca", use_container_width=True)
+
+        if submit_shift:
+            # Ghép các dòng đang lọc/chỉnh vào toàn bộ danh sách rồi mới ghi 1 lần.
+            updated_all = working_shift.copy()
+            edit_map = {normalize_login_name(r['Tên nhân viên']): r for _, r in edited_df.iterrows()}
+            for idx, rr in updated_all.iterrows():
+                k = normalize_login_name(rr.get('Tên nhân viên',''))
+                if k in edit_map:
+                    er = edit_map[k]
+                    updated_all.at[idx, 'Ca làm việc'] = str(er.get('Ca làm việc','')).strip()
+                    updated_all.at[idx, 'Ngày bắt đầu ca'] = str(er.get('Ngày bắt đầu ca','')).strip()
+                    updated_all.at[idx, 'Chu kỳ'] = str(er.get('Chu kỳ','')).strip()
+            with st.spinner("Đang lưu đồng loạt vào hệ thống..."):
+                res, msg = batch_update_shift_schedule(updated_all)
+            (st.success if res else st.error)(msg)
+            if res:
+                st.session_state.pop(shift_seed_key, None)
+                st.session_state.pop(shift_seed_signature_key, None)
+                st.rerun()
 
 elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff_list"):
     st.subheader("👥 Danh sách nhân sự")
@@ -6682,19 +6931,25 @@ elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff
         row_height=layout_row_height("staff_list"),
         column_config=table_layout_column_config("staff_list", list(staff_df.columns))
     )
+    render_admin_quick_layout_default("staff_list", list(staff_df.columns), "staff_list_page")
 
-elif selected_page == "⚙️ Cấu hình cột" and has_feature_access("column_config"):
+elif selected_page == "⚙️ Cấu hình cột" and st.session_state.current_role == "admin":
     st.subheader("⚙️ Cấu hình hiển thị cột toàn hệ thống")
     st.info(
         "Admin có thể tùy chỉnh thứ tự, độ rộng cột, độ cao dòng, font, cỡ chữ, kiểu chữ, "
         "căn lề và Wrap Text. Sau khi lưu, cấu hình được dùng chung cho toàn bộ tài khoản."
     )
 
+    st.markdown(
+        "<div style='background:#FFF2CC;border:1px solid #E6C95C;border-radius:8px;padding:8px 12px;"
+        "font-weight:700;margin:4px 0 6px 0;'>🎨 Chọn bảng cần tùy chỉnh</div>",
+        unsafe_allow_html=True
+    )
     table_key = st.selectbox(
         "Chọn bảng cần tùy chỉnh",
         options=list(TABLE_LAYOUT_LABELS.keys()),
         format_func=lambda x: TABLE_LAYOUT_LABELS.get(x, x),
-        key="ui_layout_table_selector"
+        key="ui_layout_table_selector", label_visibility="collapsed"
     )
     available_cols = get_table_columns_for_settings(table_key)
     if not available_cols:
@@ -6772,43 +7027,48 @@ elif selected_page == "⚙️ Cấu hình cột" and has_feature_access("column_
             "được áp dụng cho bảng hiển thị; độ rộng và độ cao dòng áp dụng cả bảng hiển thị và bảng chỉnh sửa."
         )
 
-        c_save_layout, c_reset_layout = st.columns(2)
+        c_save_layout, c_default_layout, c_reset_layout = st.columns(3)
         with c_save_layout:
-            if st.button("💾 Lưu & áp dụng toàn hệ thống", use_container_width=True, key=f"save_layout_{table_key}"):
-                rows = [dict(r) for r in st.session_state.get(rows_state_key, [])]
-                rows = sorted(rows, key=lambda r: int(float(r.get("Vị trí", 9999))))
-                for pos, r in enumerate(rows, start=1):
-                    r["Vị trí"] = pos
-                new_order = [str(r.get("Tên cột", "")) for r in rows if str(r.get("Tên cột", ""))]
-                new_widths = {
-                    str(r["Tên cột"]): max(50, min(800, int(float(r.get("Độ rộng (px)", 140)))))
-                    for r in rows if str(r.get("Tên cột", ""))
+            _save_layout_clicked = st.button("💾 Lưu & áp dụng", use_container_width=True, key=f"save_layout_{table_key}")
+        with c_default_layout:
+            _default_layout_clicked = st.button("⭐ Lưu làm mặc định", use_container_width=True, key=f"save_default_layout_{table_key}")
+
+        if _save_layout_clicked or _default_layout_clicked:
+            rows = [dict(r) for r in st.session_state.get(rows_state_key, [])]
+            rows = sorted(rows, key=lambda r: int(float(r.get("Vị trí", 9999))))
+            for pos, r in enumerate(rows, start=1):
+                r["Vị trí"] = pos
+            new_order = [str(r.get("Tên cột", "")) for r in rows if str(r.get("Tên cột", ""))]
+            new_widths = {
+                str(r["Tên cột"]): max(50, min(800, int(float(r.get("Độ rộng (px)", 140)))))
+                for r in rows if str(r.get("Tên cột", ""))
+            }
+            visual_cols = {}
+            for r in rows:
+                col = str(r.get("Tên cột", ""))
+                if not col:
+                    continue
+                visual_cols[col] = {
+                    "font_family": str(r.get("Font chữ", "Roboto")),
+                    "font_size": max(8, min(30, int(float(r.get("Cỡ chữ", TABLE_LAYOUT_DEFAULT_FONT_SIZE))))),
+                    "font_style": str(r.get("Kiểu chữ", "Thường")),
+                    "align": str(r.get("Căn lề", _default_column_alignment(col))).lower(),
+                    "wrap": bool(r.get("Wrap text", True)),
                 }
-                visual_cols = {}
-                for r in rows:
-                    col = str(r.get("Tên cột", ""))
-                    if not col:
-                        continue
-                    visual_cols[col] = {
-                        "font_family": str(r.get("Font chữ", "Roboto")),
-                        "font_size": max(8, min(30, int(float(r.get("Cỡ chữ", TABLE_LAYOUT_DEFAULT_FONT_SIZE))))),
-                        "font_style": str(r.get("Kiểu chữ", "Thường")),
-                        "align": str(r.get("Căn lề", _default_column_alignment(col))).lower(),
-                        "wrap": bool(r.get("Wrap text", True)),
-                    }
-                visual = {
-                    "row_height": max(24, min(120, int(st.session_state.get(row_height_state_key, TABLE_LAYOUT_DEFAULT_ROW_HEIGHT)))),
-                    "columns": visual_cols,
-                }
-                ok, msg = save_table_layout_config(
-                    table_key, new_order, new_widths, st.session_state.current_user, visual=visual
-                )
-                (st.success if ok else st.error)(msg)
-                if ok:
-                    # Lần render sau đọc lại đúng dữ liệu đã lưu.
-                    st.session_state.pop(rows_state_key, None)
-                    st.session_state.pop(init_flag_key, None)
-                    st.rerun()
+            visual = {
+                "row_height": max(24, min(120, int(st.session_state.get(row_height_state_key, TABLE_LAYOUT_DEFAULT_ROW_HEIGHT)))),
+                "columns": visual_cols,
+            }
+            ok, msg = save_table_layout_config(
+                table_key, new_order, new_widths, st.session_state.current_user, visual=visual
+            )
+            if ok and _default_layout_clicked:
+                msg = "Đã lưu bố cục này làm mặc định và áp dụng toàn hệ thống."
+            (st.success if ok else st.error)(msg)
+            if ok:
+                st.session_state.pop(rows_state_key, None)
+                st.session_state.pop(init_flag_key, None)
+                st.rerun()
 
         with c_reset_layout:
             if st.button("♻️ Khôi phục mặc định", use_container_width=True, key=f"reset_layout_{table_key}"):
@@ -7847,6 +8107,7 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                     </style>""" + f"<div class='vera-payroll-wrap'>{payroll_html}</div>",
                     unsafe_allow_html=True
                 )
+                render_admin_quick_layout_default("payroll_current", payroll_internal_order, "payroll_current_summary")
 
                 c_save, c_export = st.columns(2)
                 with c_save:
@@ -8359,6 +8620,7 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                         )
                     except Exception:
                         pass
+                    render_admin_quick_layout_default("payroll_history", history_edit_cols, f"history_{batch}")
 
                     # Hiển thị nhanh tổng sau khi sửa để Admin kiểm tra trước khi ghi đè.
                     h1, h2, h3 = st.columns(3)
@@ -8643,6 +8905,7 @@ elif selected_page == "🧭 Bảng Tour":
             row_height=layout_row_height("tour_main"),
             column_config=tour_column_config
         )
+        render_admin_quick_layout_default("tour_main", list(df_tour_display.columns), "tour_main_page")
         st.caption(
             "Màu dòng: Nghỉ phép = chữ mờ/nền trắng; Đi làm = chữ đen/nền trắng; "
             "≥15 phút = xanh; 0–<15 = vàng; -15–<0 = đỏ; ≤-15 làm trống thời gian; Break = cam."
@@ -8997,8 +9260,8 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         with col_d1:
             filter_type = st.selectbox(
                 "Lọc thời gian:", 
-                ["Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian", "Tuần này", "Tuần trước", "Tuần sau", "Tháng này", "Tháng sau"],
-                filter_mode="contains"
+                ["Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian", "Tuần này", "Tuần trước", "Tuần sau", "Tháng này", "Tháng trước", "Tháng sau"],
+                index=8, filter_mode="contains", key="leave_stats_time_filter"
             )
         with col_d2:
             if filter_type == "Hôm nay": start_date = end_date = today
@@ -9191,7 +9454,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                 st.download_button(
                     "📥 Tải Dữ Liệu Lọc Xuống (Excel)",
                     data=to_excel(df_for_excel),
-                    file_name=f"LichNghi_{start_date.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.xlsx",
+                    file_name=f"Vera-Spa_{start_date.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
@@ -9518,16 +9781,84 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                 column_config=table_layout_column_config("leave_detail", list(kp_display.columns))
             )
 
-
+    # Nút lưu bố cục ngay tại nhóm bảng Chi tiết danh sách, chỉ Admin.
+    render_admin_quick_layout_default(
+        "leave_detail", get_table_columns_for_settings("leave_detail"), "leave_detail_tabs"
+    )
 
 
 elif selected_page == "✏️ Quản lý lịch nghỉ":
     st.subheader("✏️ Quản lý lịch nghỉ")
     st.markdown("### 🗑️ Xóa / Quản lý lịch nghỉ đã đăng ký")
 
+    # Bộ lọc giống phần Đăng ký & Thống kê nghỉ phép: thời gian + nhân viên.
+    manage_today = get_vn_today()
+    mf_date, mf_name, mf_refresh = st.columns([5, 4, 2])
+    with mf_date:
+        md1, md2 = st.columns(2)
+        with md1:
+            manage_filter_type = st.selectbox(
+                "Lọc thời gian:",
+                ["Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian", "Tuần này", "Tuần trước", "Tuần sau", "Tháng này", "Tháng trước", "Tháng sau", "Tất cả"],
+                index=8, key="leave_manage_time_filter", filter_mode="contains"
+            )
+        with md2:
+            if manage_filter_type == "Hôm nay": manage_start = manage_end = manage_today
+            elif manage_filter_type == "Hôm qua": manage_start = manage_end = manage_today - timedelta(days=1)
+            elif manage_filter_type == "Ngày mai": manage_start = manage_end = manage_today + timedelta(days=1)
+            elif manage_filter_type == "Tuần này":
+                manage_start = manage_today - timedelta(days=manage_today.weekday()); manage_end = manage_start + timedelta(days=6)
+            elif manage_filter_type == "Tuần trước":
+                manage_start = manage_today - timedelta(days=manage_today.weekday() + 7); manage_end = manage_start + timedelta(days=6)
+            elif manage_filter_type == "Tuần sau":
+                manage_start = manage_today - timedelta(days=manage_today.weekday()) + timedelta(days=7); manage_end = manage_start + timedelta(days=6)
+            elif manage_filter_type == "Tháng này":
+                manage_start = manage_today.replace(day=1); manage_end = manage_today.replace(day=calendar.monthrange(manage_today.year, manage_today.month)[1])
+            elif manage_filter_type == "Tháng trước":
+                manage_end = manage_today.replace(day=1) - timedelta(days=1); manage_start = manage_end.replace(day=1)
+            elif manage_filter_type == "Tháng sau":
+                manage_start = manage_today.replace(year=manage_today.year + 1, month=1, day=1) if manage_today.month == 12 else manage_today.replace(month=manage_today.month + 1, day=1)
+                manage_end = manage_start.replace(day=calendar.monthrange(manage_start.year, manage_start.month)[1])
+            elif manage_filter_type == "Chọn ngày":
+                manage_start = manage_end = st.date_input("Chọn ngày:", manage_today, key="leave_manage_single_date")
+            elif manage_filter_type == "Khoảng thời gian":
+                _manage_range = st.date_input("Chọn khoảng thời gian:", [manage_today, manage_today], key="leave_manage_date_range")
+                manage_start, manage_end = (_manage_range[0], _manage_range[1]) if len(_manage_range) == 2 else (_manage_range[0], _manage_range[0])
+            else:
+                manage_start = manage_end = None
+
     df_backup_view = df_backup.copy()
     if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:
-        df_backup_view = df_backup_view[df_backup_view['Tên nhân viên'] == st.session_state.current_user]
+        df_backup_view = df_backup_view[
+            df_backup_view['Tên nhân viên'].astype(str).apply(normalize_login_name).eq(normalize_login_name(st.session_state.current_user))
+        ].copy()
+        manage_selected_nv = st.session_state.current_user
+        with mf_name:
+            st.text_input("👤 Nhân viên:", value=st.session_state.current_user, disabled=True, key="leave_manage_emp_locked")
+    else:
+        with mf_name:
+            manage_employee_options = ["- Tất cả nhân viên -"] + sort_employee_names(df_backup_view.get('Tên nhân viên', pd.Series(dtype=str)).dropna().astype(str).tolist())
+            manage_selected_nv = st.selectbox("👤 Tìm kiếm nhân viên:", manage_employee_options, key="leave_manage_employee_filter", filter_mode="contains")
+
+    with mf_refresh:
+        st.write("")
+        if st.button("🔄 Cập Nhật Dữ Liệu", use_container_width=True, key="refresh_leave_manage"):
+            load_backup_sheet_data.clear()
+            _clear_dynamic_data_caches()
+            st.rerun()
+
+    if not df_backup_view.empty:
+        df_backup_view = df_backup_view.copy()
+        df_backup_view['__filter_date'] = df_backup_view['Ngày'].apply(_parse_vn_date)
+        if manage_start is not None and manage_end is not None:
+            df_backup_view = df_backup_view[
+                df_backup_view['__filter_date'].apply(lambda d: d is not None and manage_start <= d <= manage_end)
+            ].copy()
+        if st.session_state.current_role not in EMPLOYEE_LIKE_ROLES and manage_selected_nv != "- Tất cả nhân viên -":
+            df_backup_view = df_backup_view[
+                df_backup_view['Tên nhân viên'].astype(str).apply(normalize_login_name).eq(normalize_login_name(manage_selected_nv))
+            ].copy()
+        df_backup_view = df_backup_view.drop(columns=['__filter_date'], errors='ignore')
 
     if df_backup_view.empty: 
         st.info("Chưa có lịch nghỉ nào được đăng ký.")
@@ -9544,6 +9875,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             width="stretch", height="content", hide_index=True, row_height=layout_row_height("leave_manage"),
             column_config=table_layout_column_config("leave_manage", list(df_view_display.columns))
         )
+        render_admin_quick_layout_default("leave_manage", list(df_view_display.columns), "leave_manage_page")
 
         if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and system_status["lock_nv"]:
             st.error("🔒 Tính năng xóa lịch nghỉ hiện đang bị Admin tạm khóa. Vui lòng liên hệ Admin để được hỗ trợ!")
@@ -9553,9 +9885,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
 
                 row_options = []
                 valid_indices = []
-                for i, row in df_backup.iterrows():
-                    if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and row.get('Tên nhân viên') != st.session_state.current_user:
-                        continue
+                for i, row in df_backup_view.iterrows():
                     row_options.append(f"Dòng {i+1}: {row.get('Ngày')} - {row.get('Tên nhân viên')} - {row.get(col_ly_do_disp, '')}")
                     valid_indices.append((i, str(row.get('Ngày'))))
 

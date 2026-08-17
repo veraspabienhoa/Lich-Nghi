@@ -2251,6 +2251,65 @@ def get_leave_reason_options(source_df=None, extra_values=None):
     return options
 
 
+
+def _schedule_compare_value(column_name, value):
+    """Chuẩn hóa giá trị để phát hiện dòng lịch nghỉ thật sự đã thay đổi."""
+    if column_name == 'Ngày':
+        return normalize_schedule_date(value)
+    if column_name == 'Tên nhân viên':
+        return normalize_login_name(value)
+    if column_name == 'Lý do nghỉ':
+        return normalize_leave_reason(clean_leave_reason_display(value))
+    if column_name == 'Chi tiết':
+        return str(value or '').strip()
+    return str(value if value is not None else '').strip()
+
+
+def get_changed_schedule_positions(original_df, edited_df, editable_columns=None):
+    """Trả về các vị trí dòng đã đổi, không phụ thuộc checkbox Chọn."""
+    if original_df is None or edited_df is None:
+        return []
+    editable_columns = editable_columns or ['Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết']
+    changed = []
+    limit = min(len(original_df), len(edited_df))
+    for pos in range(limit):
+        old = original_df.iloc[pos]
+        new = edited_df.iloc[pos]
+        if any(
+            c in new.index and _schedule_compare_value(c, old.get(c, '')) != _schedule_compare_value(c, new.get(c, ''))
+            for c in editable_columns
+        ):
+            changed.append(pos)
+    return changed
+
+
+def validate_schedule_edit_permission(original_row, edited_row, role, today=None):
+    """Giữ đúng giới hạn sửa lịch của từng vai trò trước khi batch-save."""
+    today = today or get_vn_today()
+    old_dt = pd.to_datetime(original_row.get('Ngày'), errors='coerce', dayfirst=True)
+    new_dt = pd.to_datetime(edited_row.get('Ngày'), errors='coerce', dayfirst=True)
+    old_date = old_dt.date() if pd.notna(old_dt) else today
+    new_date = new_dt.date() if pd.notna(new_dt) else None
+    if new_date is None:
+        return False, "Ngày nghỉ không hợp lệ."
+
+    role = str(role or '').strip().lower()
+    if role in EMPLOYEE_LIKE_ROLES:
+        emp_min_date, emp_max_date = employee_registration_window(today)
+        if new_date < emp_min_date or new_date > emp_max_date:
+            return False, f"Nhân viên chỉ được sửa lịch từ hôm nay đến hết {emp_max_date.strftime('%d/%m/%Y')}."
+        if normalize_login_name(edited_row.get('Tên nhân viên', '')) != normalize_login_name(original_row.get('Tên nhân viên', '')):
+            return False, "Nhân viên không được đổi lịch sang tên người khác."
+    elif role in {'letan', 'quanly'}:
+        if old_date < today or new_date < today:
+            return False, "Lễ tân/Quản lý không được sửa lịch trong quá khứ."
+
+    if not str(edited_row.get('Tên nhân viên', '')).strip():
+        return False, "Tên nhân viên không được để trống."
+    if not str(edited_row.get('Lý do nghỉ', '')).strip():
+        return False, "Lý do nghỉ không được để trống."
+    return True, ""
+
 def _exclude_original_from_leave_df(df_sources, original_row):
     """Loại đúng bản ghi đang sửa ra khỏi tập dữ liệu dùng để tính lại."""
     if df_sources is None or df_sources.empty:
@@ -6814,6 +6873,123 @@ elif st.session_state.get("app_page") not in allowed_pages:
 selected_page = st.session_state.get("app_page", "")
 
 
+def render_global_unsaved_changes_guard(page_labels):
+    """V70: cảnh báo khi rời trang trong lúc form/data editor còn thay đổi chưa lưu.
+
+    Chạy phía trình duyệt nên vẫn phát hiện được thay đổi bên trong st.form trước khi
+    Streamlit gửi dữ liệu về Python. Áp dụng chung cho các vùng chỉnh dữ liệu của hệ thống.
+    """
+    labels_json = json.dumps([str(x) for x in (page_labels or [])], ensure_ascii=False)
+    components.html(f"""
+<script>
+(function() {{
+  try {{
+    const W = window.parent, D = W.document;
+    const NAV_LABELS = {labels_json};
+    if (W.__veraUnsavedGuardV70) {{
+      W.__veraUnsavedGuardV70.setNavLabels(NAV_LABELS);
+      return;
+    }}
+
+    let dirty = false;
+    let navLabels = NAV_LABELS.slice();
+    const bannerId = 'vera-unsaved-banner-v70';
+
+    function ensureBanner() {{
+      let b = D.getElementById(bannerId);
+      if (!b) {{
+        b = D.createElement('div');
+        b.id = bannerId;
+        b.style.cssText = 'position:fixed;left:50%;top:8px;transform:translateX(-50%);z-index:2147483647;background:#fff3cd;color:#664d03;border:1px solid #D9D9D9;border-radius:8px;padding:8px 14px;font:600 13px Arial,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.12);display:none;max-width:92vw;text-align:center;';
+        b.textContent = '⚠️ Có thay đổi chưa lưu. Hãy bấm Lưu trước khi chuyển trang hoặc thoát.';
+        D.body.appendChild(b);
+      }}
+      return b;
+    }}
+    function setDirty() {{ dirty = true; ensureBanner().style.display = 'block'; }}
+    function clearDirty() {{ dirty = false; const b = D.getElementById(bannerId); if (b) b.style.display='none'; }}
+    function isEditableArea(t) {{
+      if (!t || !t.closest) return false;
+      if (t.closest('[data-testid="stDataEditor"]')) return true;
+
+      const form = t.closest('[data-testid="stForm"]');
+      if (form) {{
+        const txt = (form.innerText || '').toLowerCase();
+        return /lưu|cập nhật|ghi đè|xóa|xoá|thêm nhân viên|chỉnh sửa|thiết lập|save/.test(txt);
+      }}
+
+      // Các màn hình cũ chưa dùng st.form: chỉ đánh dấu dirty khi input nằm trong
+      // một khối có nút ghi dữ liệu, đồng thời bỏ qua các ô chỉ dùng để lọc/tìm kiếm.
+      const widget = t.closest('[data-testid="stTextInput"],[data-testid="stNumberInput"],[data-testid="stSelectbox"],[data-testid="stCheckbox"],[data-testid="stDateInput"],[data-testid="stTextArea"],[data-testid="stFileUploader"]');
+      if (!widget) return false;
+      const widgetText = (widget.innerText || '').toLowerCase();
+      if (/lọc|tìm kiếm|tìm theo|search|chọn khoảng thời gian|chọn ngày:|lọc thời gian|chọn bảng cần tùy chỉnh/.test(widgetText)) return false;
+      let block = widget.closest('[data-testid="stVerticalBlock"]');
+      let hops = 0;
+      while (block && hops < 4) {{
+        const txt = (block.innerText || '').toLowerCase();
+        if (/💾|lưu|cập nhật|ghi đè|xóa|xoá|thêm nhân viên|chỉnh sửa hồ sơ|thiết lập|save/.test(txt)) return true;
+        block = block.parentElement ? block.parentElement.closest('[data-testid="stVerticalBlock"]') : null;
+        hops += 1;
+      }}
+      return false;
+    }}
+    function isEditEventTarget(t) {{
+      if (!isEditableArea(t)) return false;
+      const tag = (t.tagName || '').toLowerCase();
+      return ['input','textarea','select'].includes(tag) || (t.getAttribute && (t.getAttribute('role') === 'checkbox' || t.getAttribute('contenteditable') === 'true'));
+    }}
+    function markFromEvent(e) {{ if (isEditEventTarget(e.target)) setDirty(); }}
+    D.addEventListener('input', markFromEvent, true);
+    D.addEventListener('change', markFromEvent, true);
+    D.addEventListener('keydown', function(e) {{
+      if (isEditableArea(e.target) && !['Shift','Control','Alt','Meta','Tab','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) setDirty();
+    }}, true);
+
+    D.addEventListener('click', function(e) {{
+      const btn = e.target && e.target.closest ? e.target.closest('button') : null;
+      if (!btn) return;
+      const text = (btn.innerText || btn.textContent || '').trim();
+      const low = text.toLowerCase();
+
+      // Các nút thực hiện ghi/xóa dữ liệu: form sẽ gửi ngay sau click nên bỏ cờ cảnh báo.
+      if (/lưu|ghi đè|xóa|xoá|cập nhật hồ sơ|cập nhật nhân viên|thêm nhân viên|save/.test(low)) {{
+        clearDirty();
+        return;
+      }}
+
+      const inSidebar = !!btn.closest('[data-testid="stSidebar"]');
+      const isNav = inSidebar || navLabels.some(x => text === x) || /đăng xuất/i.test(text);
+      if (dirty && isNav) {{
+        const ok = W.confirm('Bạn đang có thay đổi CHƯA LƯU.\n\nNhấn HỦY để quay lại và bấm LƯU bản cập nhật.\nNhấn OK nếu muốn rời trang và BỎ các thay đổi chưa lưu.');
+        if (!ok) {{
+          e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+          return false;
+        }}
+        clearDirty();
+      }}
+    }}, true);
+
+    W.addEventListener('beforeunload', function(e) {{
+      if (!dirty) return;
+      e.preventDefault();
+      e.returnValue = '';
+    }});
+
+    W.__veraUnsavedGuardV70 = {{
+      setDirty, clearDirty,
+      isDirty: () => dirty,
+      setNavLabels: (xs) => {{ navLabels = Array.isArray(xs) ? xs.slice() : []; }}
+    }};
+  }} catch (err) {{}}
+}})();
+</script>
+""", height=0, width=0)
+
+
+render_global_unsaved_changes_guard(allowed_pages)
+
+
 def open_app_page(page_name):
     if page_name not in allowed_pages:
         return
@@ -9707,8 +9883,8 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                 raw_detail['Lý do nghỉ'].tolist() if 'Lý do nghỉ' in raw_detail.columns else []
             )
 
-            # Seed riêng cho data_editor để khi đổi Lý do nghỉ, các cột phụ thuộc được
-            # tự tính và hiển thị lại ngay ở lần rerun kế tiếp.
+            # V70: toàn bộ chỉnh sửa lịch trong Chi tiết danh sách nằm trong st.form.
+            # Vì vậy thay đổi nhiều ô KHÔNG reload/re-run trang; chỉ khi bấm Lưu/Xóa mới gửi dữ liệu.
             fingerprint_parts = []
             for _, _r in raw_detail_full.iterrows():
                 fingerprint_parts.append(
@@ -9728,19 +9904,20 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                 editor_df.insert(0, "Chọn", False)
             editor_df, _ = apply_table_layout_df(editor_df, "leave_detail")
 
-            # Các cột này chỉ do hệ thống tính, không cho nhập tay để tránh sai dữ liệu.
             derived_cols = [
                 "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
                 "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
             ]
             disabled_cols = [c for c in derived_cols if c in editor_df.columns]
+            if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and "Tên nhân viên" in editor_df.columns:
+                disabled_cols.append("Tên nhân viên")
 
             editor_version = int(st.session_state.get('_detail_editor_version', 1))
-            editor_key = f"detail_schedule_editor_v{editor_version}"
+            editor_key = f"detail_schedule_editor_batch_v{editor_version}"
             detail_col_config = table_layout_column_config("leave_detail", list(editor_df.columns))
             if "Chọn" in editor_df.columns:
                 detail_col_config["Chọn"] = st.column_config.CheckboxColumn(
-                    "Chọn", help="Tick 1 hoặc nhiều dòng để sửa/xóa",
+                    "Chọn", help="Chỉ cần tick khi muốn XÓA. Khi sửa, hệ thống tự nhận biết dòng đã thay đổi.",
                     default=False, width=layout_width("leave_detail", "Chọn", "small")
                 )
             if "Ngày" in editor_df.columns:
@@ -9751,7 +9928,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                 detail_col_config["Lý do nghỉ"] = st.column_config.SelectboxColumn(
                     "Lý do nghỉ", options=reason_options, required=True,
                     width=layout_width("leave_detail", "Lý do nghỉ", "medium"),
-                    help="Bấm vào ô để chọn Lý do nghỉ. Danh sách được tải tự động từ sheet LoaiNghi."
+                    help="Bấm vào ô để mở dropdown rồi gõ tên loại nghỉ để tìm nhanh. Danh sách lấy từ sheet LoaiNghi."
                 )
             if "Số ngày tính" in editor_df.columns:
                 detail_col_config["Số ngày tính"] = st.column_config.NumberColumn(
@@ -9773,125 +9950,92 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                     detail_col_config[_c] = st.column_config.TextColumn(
                         _c, disabled=True, width=layout_width("leave_detail", _c, "small")
                     )
-            detail_editor = st.data_editor(
-                editor_df,
-                width="stretch",
-                height="content",
-                hide_index=True,
-                row_height=layout_row_height("leave_detail"),
-                num_rows="fixed",
-                disabled=disabled_cols,
-                column_config=detail_col_config,
-                key=editor_key
-            )
 
-            # Khi Lý do nghỉ / Ngày / Nhân viên thay đổi, tự động tính lại ngay các cột phụ thuộc.
-            editor_event = st.session_state.get(editor_key, {})
-            edited_rows_event = editor_event.get('edited_rows', {}) if isinstance(editor_event, dict) else {}
-            recalc_positions = []
-            for row_pos, changes in edited_rows_event.items():
-                try:
-                    pos_int = int(row_pos)
-                except Exception:
-                    continue
-                if isinstance(changes, dict) and any(
-                    c in changes for c in ["Lý do nghỉ", "Ngày", "Tên nhân viên", "Chi tiết"]
-                ):
-                    recalc_positions.append(pos_int)
+            with st.form(f"detail_schedule_batch_form_v{editor_version}", clear_on_submit=False):
+                detail_editor = st.data_editor(
+                    editor_df,
+                    width="stretch", height="content", hide_index=True,
+                    row_height=layout_row_height("leave_detail"),
+                    num_rows="fixed", disabled=disabled_cols,
+                    column_config=detail_col_config, key=editor_key
+                )
+                st.caption(
+                    "Sửa trực tiếp nhiều dòng rồi bấm Lưu một lần. Cột Lý do nghỉ là dropdown có thể gõ để tìm. "
+                    "Checkbox Chọn chỉ dùng khi muốn xóa dòng."
+                )
+                _d_save, _d_delete = st.columns(2)
+                with _d_save:
+                    submit_detail_save = st.form_submit_button("💾 Lưu tất cả thay đổi", use_container_width=True)
+                with _d_delete:
+                    submit_detail_delete = st.form_submit_button("🗑️ Xóa các dòng đã chọn", use_container_width=True)
 
-            if recalc_positions:
-                recalculated_editor = detail_editor.copy()
-                # Phần Chi tiết danh sách đang dùng đúng hai Google Sheet này.
-                calculation_df = detail_all_df.copy() if 'detail_all_df' in locals() else pd.DataFrame()
-                for pos in sorted(set(recalc_positions)):
-                    if pos < 0 or pos >= len(recalculated_editor) or pos >= len(raw_detail_full):
-                        continue
-                    original_for_calc = raw_detail_full.iloc[pos].copy()
-                    edited_for_calc = recalculated_editor.drop(columns=['Chọn'], errors='ignore').iloc[pos].copy()
-                    calculated = recalculate_schedule_fields(
-                        original_for_calc,
-                        edited_for_calc,
-                        st.session_state.current_user,
-                        all_leave_data=calculation_df,
-                        source_df=globals().get('df_loai_nghi', pd.DataFrame()),
-                    )
-                    for c in [
-                        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-                        "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
-                        "Giờ cập nhật", "Người cập nhật"
-                    ]:
-                        if c in recalculated_editor.columns and c in calculated.index:
-                            recalculated_editor.at[pos, c] = calculated[c]
+            detail_edit_only = detail_editor.drop(columns=['Chọn'], errors='ignore').copy()
+            original_compare = raw_detail.copy().reset_index(drop=True)
+            detail_compare = detail_edit_only.copy().reset_index(drop=True)
+            changed_positions = get_changed_schedule_positions(original_compare, detail_compare)
+            selected_positions = detail_editor.index[detail_editor.get('Chọn', False) == True].tolist() if 'Chọn' in detail_editor.columns else []
 
-                # Dùng key mới để data_editor nhận DataFrame đã tính lại, tránh phải bấm lần hai.
-                st.session_state['_detail_editor_seed'] = recalculated_editor
-                st.session_state['_detail_editor_version'] = editor_version + 1
-                st.rerun()
+            if submit_detail_save:
+                if not changed_positions:
+                    st.info("Không có thay đổi nào cần lưu.")
+                else:
+                    all_ok = True
+                    messages = []
+                    for pos in changed_positions:
+                        if pos >= len(raw_detail_full) or pos >= len(detail_compare):
+                            continue
+                        original = raw_detail_full.iloc[pos].copy()
+                        edited = detail_compare.iloc[pos].copy()
+                        permitted, perm_msg = validate_schedule_edit_permission(
+                            original, edited, st.session_state.current_role, get_vn_today()
+                        )
+                        if not permitted:
+                            st.error(f"❌ {original.get('Tên nhân viên','')}: {perm_msg}")
+                            all_ok = False
+                            break
+                        ok, msg = update_schedule_record(original, edited, st.session_state.current_user)
+                        messages.append((ok, msg))
+                        if not ok:
+                            all_ok = False
+                            break
+                    for ok, msg in messages:
+                        (st.success if ok else st.error)(msg)
+                    if all_ok:
+                        st.session_state.pop('_detail_editor_seed', None)
+                        st.session_state.pop('_detail_editor_fingerprint', None)
+                        _clear_dynamic_data_caches()
+                        st.rerun()
 
-            selected_positions = detail_editor.index[detail_editor['Chọn'] == True].tolist()
-            st.caption(f"Đã chọn {len(selected_positions)} dòng. Chỉ các dòng được tick mới được lưu thay đổi hoặc xóa.")
-            c_edit, c_delete = st.columns(2)
-
-            with c_edit:
-                if st.button("💾 Lưu thay đổi các dòng đã chọn", use_container_width=True):
-                    if not selected_positions:
-                        st.warning("Vui lòng tick ít nhất 1 dòng cần sửa.")
-                    else:
-                        can_edit_all = True
-                        messages = []
-                        today_edit = get_vn_today()
-                        for pos in selected_positions:
-                            original = raw_detail_full.iloc[pos].copy()
-                            edited = detail_editor.drop(columns=['Chọn']).iloc[pos].copy()
-
-                            # Lễ tân không được sửa lịch quá khứ; Admin được phép.
-                            original_date = pd.to_datetime(original.get('Ngày'), errors='coerce').date() if pd.notna(pd.to_datetime(original.get('Ngày'), errors='coerce')) else today_edit
-                            edited_date_obj = pd.to_datetime(edited.get('Ngày'), errors='coerce')
-                            if st.session_state.current_role in ['letan', 'quanly'] and (original_date < today_edit or (pd.notna(edited_date_obj) and edited_date_obj.date() < today_edit)):
-                                st.error("❌ Lễ tân không được sửa lịch trong quá khứ.")
-                                can_edit_all = False
+            if submit_detail_delete:
+                if not selected_positions:
+                    st.warning("Vui lòng tick ít nhất 1 dòng cần xóa.")
+                else:
+                    originals = [raw_detail_full.iloc[pos].copy() for pos in selected_positions if pos < len(raw_detail_full)]
+                    today_del = get_vn_today()
+                    can_delete = True
+                    if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:
+                        emp_min_date, emp_max_date = employee_registration_window(today_del)
+                        for r in originals:
+                            dt = pd.to_datetime(r.get('Ngày'), errors='coerce', dayfirst=True)
+                            if pd.isna(dt) or dt.date() < emp_min_date or dt.date() > emp_max_date:
+                                st.error(f"❌ Nhân viên chỉ được xóa lịch từ hôm nay đến hết {emp_max_date.strftime('%d/%m/%Y')}.")
+                                can_delete = False
                                 break
-                            if not str(edited.get('Tên nhân viên', '')).strip() or not str(edited.get('Lý do nghỉ', '')).strip():
-                                st.error("❌ Tên nhân viên và Lý do nghỉ không được để trống.")
-                                can_edit_all = False
+                    elif st.session_state.current_role in ['letan', 'quanly']:
+                        for r in originals:
+                            dt = pd.to_datetime(r.get('Ngày'), errors='coerce', dayfirst=True)
+                            if pd.notna(dt) and dt.date() < today_del:
+                                st.error("❌ Lễ tân/Quản lý không được xóa lịch trong quá khứ.")
+                                can_delete = False
                                 break
-
-                            ok, msg = update_schedule_record(original, edited, st.session_state.current_user)
-                            messages.append((ok, msg))
-                            if not ok:
-                                can_edit_all = False
-                                break
-
-                        for ok, msg in messages:
-                            (st.success if ok else st.error)(msg)
-                        if can_edit_all:
+                    if can_delete:
+                        ok, msg = delete_schedule_records(originals, st.session_state.current_user)
+                        (st.success if ok else st.error)(msg)
+                        if ok:
+                            st.session_state.pop('_detail_editor_seed', None)
+                            st.session_state.pop('_detail_editor_fingerprint', None)
                             _clear_dynamic_data_caches()
                             st.rerun()
-
-            with c_delete:
-                if st.button("🗑️ Xóa các dòng đã chọn", use_container_width=True):
-                    if not selected_positions:
-                        st.warning("Vui lòng tick ít nhất 1 dòng cần xóa.")
-                    else:
-                        originals = [raw_detail_full.iloc[pos].copy() for pos in selected_positions]
-                        today_del = get_vn_today()
-                        if st.session_state.current_role in ['letan', 'quanly']:
-                            has_past = False
-                            for r in originals:
-                                dt = pd.to_datetime(r.get('Ngày'), errors='coerce')
-                                if pd.notna(dt) and dt.date() < today_del:
-                                    has_past = True
-                                    break
-                            if has_past:
-                                st.error("❌ Lễ tân không được xóa lịch trong quá khứ.")
-                            else:
-                                ok, msg = delete_schedule_records(originals, st.session_state.current_user)
-                                (st.success if ok else st.error)(msg)
-                                if ok: st.rerun()
-                        else:
-                            ok, msg = delete_schedule_records(originals, st.session_state.current_user)
-                            (st.success if ok else st.error)(msg)
-                            if ok: st.rerun()
         else:
             # Nhân viên: chỉ xem, không có checkbox sửa/xóa và không có Export Excel.
             export_view_df, _ = apply_table_layout_df(export_df.copy(), "leave_detail")
@@ -9957,8 +10101,8 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
 elif selected_page == "✏️ Quản lý lịch nghỉ":
     st.subheader("✏️ Quản lý lịch nghỉ")
     st.markdown("### 🗑️ Xóa / Quản lý lịch nghỉ đã đăng ký")
+    st.caption("V70: sửa trực tiếp nhiều dòng trên bảng. Dữ liệu chỉ được ghi/reload sau khi bấm Lưu hoặc Xóa.")
 
-    # Bộ lọc giống phần Đăng ký & Thống kê nghỉ phép: thời gian + nhân viên.
     manage_today = get_vn_today()
     mf_date, mf_name, mf_refresh = st.columns([5, 4, 2])
     with mf_date:
@@ -10027,65 +10171,139 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             ].copy()
         df_backup_view = df_backup_view.drop(columns=['__filter_date'], errors='ignore')
 
-    if df_backup_view.empty: 
-        st.info("Chưa có lịch nghỉ nào được đăng ký.")
+    if df_backup_view.empty:
+        st.info("Chưa có lịch nghỉ nào được đăng ký trong bộ lọc hiện tại.")
     else:
-        # ẨN CỘT PHẠT VI PHẠM TRONG BẢNG QUẢN LÝ CHO NON-ADMIN NHƯNG ĐÃ QUA ĐỊNH DẠNG SẠCH
-        df_view_display = df_backup_view.copy()
-        if st.session_state.current_role != "admin" and "Phạt vi phạm" in df_view_display.columns:
-            df_view_display = df_view_display.drop(columns=["Phạt vi phạm"])
+        manage_raw_full = df_backup_view.reset_index(drop=True).copy()
+        manage_visible = manage_raw_full.drop(columns=['__source_sheet_id', '__source_row'], errors='ignore').copy()
+        if st.session_state.current_role != "admin" and "Phạt vi phạm" in manage_visible.columns:
+            manage_visible = manage_visible.drop(columns=["Phạt vi phạm"])
+        if 'Lý do nghỉ' in manage_visible.columns:
+            manage_visible['Lý do nghỉ'] = manage_visible['Lý do nghỉ'].apply(clean_leave_reason_display)
+        manage_visible.insert(0, 'Chọn', False)
+        manage_visible, _ = apply_table_layout_df(manage_visible, "leave_manage")
 
-        df_view_display = format_display_df(df_view_display)
-        # V69: Quản lý lịch nghỉ: dòng chứa "Không phép" được ép về nền thường + chữ tối dễ đọc.
-        # Không nền riêng, không màu chữ riêng, không bold/italic/underline.
-        df_view_display, _ = apply_table_layout_df(df_view_display, "leave_manage")
-        st.dataframe(
-            neutralize_khong_phep_rows_styler(
-                apply_table_visual_styler(df_view_display, "leave_manage", list(df_view_display.columns))
-            ),
-            width="stretch", height="content", hide_index=True, row_height=layout_row_height("leave_manage"),
-            column_config=table_layout_column_config("leave_manage", list(df_view_display.columns))
+        manage_reason_options = get_leave_reason_options(
+            globals().get('df_loai_nghi', pd.DataFrame()),
+            manage_visible['Lý do nghỉ'].tolist() if 'Lý do nghỉ' in manage_visible.columns else []
         )
-        render_admin_quick_layout_default("leave_manage", list(df_view_display.columns), "leave_manage_page")
 
-        if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and system_status["lock_nv"]:
-            st.error("🔒 Tính năng xóa lịch nghỉ hiện đang bị Admin tạm khóa. Vui lòng liên hệ Admin để được hỗ trợ!")
-        else:
-            with st.form("form_delete_backup_row"):
-                col_ly_do_disp = 'Lý do nghỉ' if 'Lý do nghỉ' in df_backup_view.columns else 'Loại nghỉ'
+        manage_col_config = table_layout_column_config("leave_manage", list(manage_visible.columns))
+        if 'Chọn' in manage_visible.columns:
+            manage_col_config['Chọn'] = st.column_config.CheckboxColumn(
+                'Chọn', default=False, width=70,
+                help='Tick khi muốn XÓA. Không cần tick khi sửa; hệ thống tự nhận biết dòng đã thay đổi.'
+            )
+        if 'Ngày' in manage_visible.columns:
+            manage_col_config['Ngày'] = st.column_config.DateColumn('Ngày', format='DD/MM/YYYY', width=layout_width('leave_manage', 'Ngày', 'small'))
+        if 'Lý do nghỉ' in manage_visible.columns:
+            manage_col_config['Lý do nghỉ'] = st.column_config.SelectboxColumn(
+                'Lý do nghỉ', options=manage_reason_options, required=True,
+                width=layout_width('leave_manage', 'Lý do nghỉ', 'medium'),
+                help='Click vào ô để mở dropdown. Có thể gõ trực tiếp tên loại nghỉ để tìm trong danh sách.'
+            )
+        if 'Số ngày tính' in manage_visible.columns:
+            manage_col_config['Số ngày tính'] = st.column_config.NumberColumn('Số ngày tính', format='%.1f', disabled=True)
+        if 'Số ngày phép cộng dồn' in manage_visible.columns:
+            manage_col_config['Số ngày phép cộng dồn'] = st.column_config.NumberColumn('Số ngày phép cộng dồn', format='%.1f', disabled=True)
+        if 'Phạt vi phạm' in manage_visible.columns:
+            manage_col_config['Phạt vi phạm'] = st.column_config.NumberColumn('Phạt vi phạm', format='%.0f', disabled=True)
+        for _c in ['Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật']:
+            if _c in manage_visible.columns:
+                manage_col_config[_c] = st.column_config.TextColumn(_c, disabled=True)
 
-                row_options = []
-                valid_indices = []
-                for i, row in df_backup_view.iterrows():
-                    row_options.append(f"Dòng {i+1}: {row.get('Ngày')} - {row.get('Tên nhân viên')} - {row.get(col_ly_do_disp, '')}")
-                    valid_indices.append((i, str(row.get('Ngày'))))
+        manage_derived = [c for c in ['Số ngày tính','Số ngày phép cộng dồn','Phạt vi phạm','Ngày cập nhật','Giờ cập nhật','Người cập nhật'] if c in manage_visible.columns]
+        if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and 'Tên nhân viên' in manage_visible.columns:
+            manage_derived.append('Tên nhân viên')
+        manage_locked = st.session_state.current_role in EMPLOYEE_LIKE_ROLES and system_status['lock_nv']
+        if manage_locked:
+            st.error("🔒 Admin đang khóa quyền thay đổi lịch nghỉ của nhân viên. Bảng chỉ được xem cho đến khi mở khóa.")
+            manage_derived = [c for c in manage_visible.columns if c != 'Chọn']
 
-                selected_row_str = st.selectbox("Chọn dòng lịch nghỉ cần xóa:", row_options, filter_mode="contains")
+        with st.form('leave_manage_batch_edit_form_v70', clear_on_submit=False):
+            manage_editor = st.data_editor(
+                manage_visible,
+                width='stretch', height='content', hide_index=True, num_rows='fixed',
+                row_height=layout_row_height('leave_manage'),
+                disabled=manage_derived,
+                column_config=manage_col_config,
+                key='leave_manage_batch_editor_v70'
+            )
+            st.caption(
+                "Sửa trực tiếp nhiều dòng rồi bấm Lưu một lần. Dropdown Lý do nghỉ hỗ trợ gõ để tìm. "
+                "Checkbox Chọn chỉ dùng cho thao tác Xóa."
+            )
+            _m_save, _m_delete = st.columns(2)
+            with _m_save:
+                manage_submit_save = st.form_submit_button('💾 Lưu tất cả thay đổi', use_container_width=True, disabled=manage_locked)
+            with _m_delete:
+                manage_submit_delete = st.form_submit_button('🗑️ Xóa các dòng đã chọn', use_container_width=True, disabled=manage_locked)
 
-                if st.form_submit_button("🗑️ Xóa Lịch Nghỉ Đã Chọn") and selected_row_str:
-                    sel_idx = row_options.index(selected_row_str)
-                    real_i, sel_date_str = valid_indices[sel_idx]
+        # Bảng không dùng formatting condition riêng cho các loại chứa "Không phép".
+        # st.data_editor hiển thị màu chữ/nền mặc định nên không còn tình trạng chữ trắng.
+        render_admin_quick_layout_default("leave_manage", [c for c in manage_visible.columns if c != 'Chọn'], "leave_manage_page")
 
-                    try:
-                        sel_date = pd.to_datetime(sel_date_str, format='%d/%m/%Y').date()
-                    except:
-                        sel_date = get_vn_today()
+        manage_edit_only = manage_editor.drop(columns=['Chọn'], errors='ignore').reset_index(drop=True)
+        manage_original_visible = manage_raw_full.drop(columns=['__source_sheet_id','__source_row'], errors='ignore').copy()
+        if st.session_state.current_role != 'admin' and 'Phạt vi phạm' in manage_original_visible.columns:
+            manage_original_visible = manage_original_visible.drop(columns=['Phạt vi phạm'])
+        if 'Lý do nghỉ' in manage_original_visible.columns:
+            manage_original_visible['Lý do nghỉ'] = manage_original_visible['Lý do nghỉ'].apply(clean_leave_reason_display)
+        manage_original_visible = manage_original_visible.reset_index(drop=True)
+        manage_changed = get_changed_schedule_positions(manage_original_visible, manage_edit_only)
+        manage_selected = manage_editor.index[manage_editor.get('Chọn', False) == True].tolist() if 'Chọn' in manage_editor.columns else []
 
-                    can_delete = True
-                    today = get_vn_today()
-                    if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:
-                        emp_min_date, emp_max_date = employee_registration_window(today)
-                        if sel_date < emp_min_date or sel_date > emp_max_date:
+        if manage_submit_save:
+            if not manage_changed:
+                st.info('Không có thay đổi nào cần lưu.')
+            else:
+                all_ok = True
+                save_messages = []
+                for pos in manage_changed:
+                    if pos >= len(manage_raw_full) or pos >= len(manage_edit_only):
+                        continue
+                    original = manage_raw_full.iloc[pos].copy()
+                    edited = manage_edit_only.iloc[pos].copy()
+                    permitted, perm_msg = validate_schedule_edit_permission(original, edited, st.session_state.current_role, manage_today)
+                    if not permitted:
+                        st.error(f"❌ {original.get('Tên nhân viên','')}: {perm_msg}")
+                        all_ok = False
+                        break
+                    ok, msg = update_schedule_record(original, edited, st.session_state.current_user)
+                    save_messages.append((ok, msg))
+                    if not ok:
+                        all_ok = False
+                        break
+                for ok, msg in save_messages:
+                    (st.success if ok else st.error)(msg)
+                if all_ok:
+                    _clear_dynamic_data_caches()
+                    st.rerun()
+
+        if manage_submit_delete:
+            if not manage_selected:
+                st.warning('Vui lòng tick ít nhất 1 dòng cần xóa.')
+            else:
+                originals = [manage_raw_full.iloc[pos].copy() for pos in manage_selected if pos < len(manage_raw_full)]
+                can_delete = True
+                if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:
+                    emp_min_date, emp_max_date = employee_registration_window(manage_today)
+                    for r in originals:
+                        dt = pd.to_datetime(r.get('Ngày'), errors='coerce', dayfirst=True)
+                        if pd.isna(dt) or dt.date() < emp_min_date or dt.date() > emp_max_date:
                             st.error(f"❌ Nhân viên chỉ được xóa lịch từ hôm nay đến hết {emp_max_date.strftime('%d/%m/%Y')}.")
                             can_delete = False
-                    elif st.session_state.current_role in ["letan", "quanly"] and sel_date < today:
-                        st.error("❌ Lỗi: Tài khoản LỄ TÂN không được xóa lịch trong **QUÁ KHỨ**. Vui lòng liên hệ Admin.")
-                        can_delete = False
-
-                    if can_delete:
-                        success_del, msg_del = delete_backup_row(real_i + 2, st.session_state.current_user)
-                        if success_del:
-                            st.success(f"✅ {msg_del}")
-                            _clear_dynamic_data_caches()
-                            st.rerun()
-                        else: st.error(f"❌ {msg_del}")
+                            break
+                elif st.session_state.current_role in ['letan','quanly']:
+                    for r in originals:
+                        dt = pd.to_datetime(r.get('Ngày'), errors='coerce', dayfirst=True)
+                        if pd.notna(dt) and dt.date() < manage_today:
+                            st.error('❌ Lễ tân/Quản lý không được xóa lịch trong quá khứ.')
+                            can_delete = False
+                            break
+                if can_delete:
+                    ok, msg = delete_schedule_records(originals, st.session_state.current_user)
+                    (st.success if ok else st.error)(msg)
+                    if ok:
+                        _clear_dynamic_data_caches()
+                        st.rerun()

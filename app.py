@@ -4739,6 +4739,132 @@ def defer_violation_to_next_period(employee_name, amount, start_date, end_date, 
         return False, f"Lỗi lưu nghĩa vụ Vi phạm: {e}"
 
 
+def _renumber_violation_debt_stt(ws):
+    """Đánh lại STT cột A từ dòng 2 sau khi xóa nghĩa vụ."""
+    try:
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        if not vals or len(vals) <= 1:
+            return
+        # Chỉ đánh STT cho các dòng có dữ liệu thật ở B:N.
+        numbers = []
+        n = 0
+        for row in vals[1:]:
+            has_data = any(str(v).strip() for v in row[1:14]) if len(row) > 1 else False
+            if has_data:
+                n += 1
+                numbers.append([n])
+            else:
+                numbers.append([''])
+        if numbers:
+            gspread_update_range(ws, f"A2:A{len(numbers)+1}", numbers)
+    except Exception:
+        pass
+
+
+def update_violation_debt_obligation(sheet_row, amount, content, due_from, updated_by):
+    """
+    Admin sửa một nghĩa vụ Vi phạm đang mở.
+    Giữ nguyên nhân viên / loại / kỳ phát sinh / mã nguồn để không phá lịch sử,
+    chỉ cho chỉnh số tiền, nội dung và ngày bắt đầu trừ.
+    """
+    try:
+        sheet_row = int(sheet_row)
+    except Exception:
+        return False, "Không xác định được dòng nghĩa vụ cần sửa."
+    if sheet_row < 2:
+        return False, "Dòng nghĩa vụ không hợp lệ."
+    amount = max(0.0, float(_money_to_float(amount)))
+    if amount <= 0:
+        return False, "Số tiền nghĩa vụ phải lớn hơn 0. Nếu không còn nghĩa vụ, hãy dùng nút Xóa."
+    if not hasattr(due_from, 'strftime'):
+        due_from = _parse_vn_date(due_from)
+    if due_from is None:
+        return False, "Ngày bắt đầu trừ không hợp lệ."
+
+    ws, err = _ensure_violation_debt_storage()
+    if err or ws is None:
+        return False, err or "Không mở được sổ nghĩa vụ Vi phạm."
+    try:
+        row = _gs_call_with_backoff(ws.row_values, sheet_row)
+        if not row or not any(str(v).strip() for v in row):
+            return False, "Nghĩa vụ này không còn tồn tại. Hãy tải lại danh sách."
+        while len(row) < len(VIOLATION_DEBT_HEADERS):
+            row.append('')
+        pos = {name: VIOLATION_DEBT_HEADERS.index(name) for name in VIOLATION_DEBT_HEADERS}
+        if not _is_open_violation_debt_status(row[pos['Trạng thái']]):
+            return False, "Chỉ có thể sửa nghĩa vụ đang ở trạng thái Chưa hoàn thành."
+
+        now = datetime.now(VN_TZ)
+        row[pos['Số tiền']] = int(round(amount))
+        row[pos['Nội dung']] = str(content).strip() or VIOLATION_DEBT_CONTENT
+        row[pos['Bắt đầu trừ từ']] = due_from.strftime('%d/%m/%Y')
+        row[pos['Ngày cập nhật']] = now.strftime('%d/%m/%Y')
+        row[pos['Giờ cập nhật']] = now.strftime('%H:%M:%S')
+        row[pos['Người cập nhật']] = str(updated_by)
+        gspread_update_range(ws, f"A{sheet_row}:N{sheet_row}", [row[:len(VIOLATION_DEBT_HEADERS)]])
+        _clear_violation_debt_cache()
+        return True, "Đã cập nhật Nghĩa vụ Vi phạm."
+    except Exception as e:
+        return False, f"Lỗi cập nhật Nghĩa vụ Vi phạm: {e}"
+
+
+def delete_violation_debt_obligation(sheet_row, updated_by=''):
+    """Admin xóa hẳn một nghĩa vụ Vi phạm đang mở và đánh lại STT."""
+    try:
+        sheet_row = int(sheet_row)
+    except Exception:
+        return False, "Không xác định được dòng nghĩa vụ cần xóa."
+    if sheet_row < 2:
+        return False, "Dòng nghĩa vụ không hợp lệ."
+    ws, err = _ensure_violation_debt_storage()
+    if err or ws is None:
+        return False, err or "Không mở được sổ nghĩa vụ Vi phạm."
+    try:
+        row = _gs_call_with_backoff(ws.row_values, sheet_row)
+        if not row or not any(str(v).strip() for v in row):
+            return False, "Nghĩa vụ này không còn tồn tại."
+        while len(row) < len(VIOLATION_DEBT_HEADERS):
+            row.append('')
+        status = row[VIOLATION_DEBT_HEADERS.index('Trạng thái')]
+        if not _is_open_violation_debt_status(status):
+            return False, "Chỉ xóa trực tiếp nghĩa vụ đang Chưa hoàn thành."
+        _gs_call_with_backoff(ws.delete_rows, sheet_row)
+        _renumber_violation_debt_stt(ws)
+        _clear_violation_debt_cache()
+        return True, "Đã xóa Nghĩa vụ Vi phạm."
+    except Exception as e:
+        return False, f"Lỗi xóa Nghĩa vụ Vi phạm: {e}"
+
+
+def refresh_current_payroll_violation_debt(payroll_df, start_date, end_date):
+    """Tính lại riêng cột Vi phạm kỳ trước theo ledger mới nhất rồi tính lại Thực nhận."""
+    if payroll_df is None or payroll_df.empty:
+        return payroll_df
+    d = payroll_df.copy()
+    names = d.get('Tên Hệ thống', pd.Series(dtype=str)).astype(str).tolist()
+    due_map, _, _ = get_violation_debt_state(start_date, end_date, names)
+    if 'Vi phạm kỳ trước' not in d.columns:
+        d['Vi phạm kỳ trước'] = 0.0
+    for idx, r in d.iterrows():
+        key = normalize_login_name(r.get('Tên Hệ thống', ''))
+        d.at[idx, 'Vi phạm kỳ trước'] = float(_money_to_float(due_map.get(key, 0)))
+    return recalculate_payroll_net(d)
+
+
+def get_all_open_violation_debts_for_admin():
+    """Trả toàn bộ nghĩa vụ Vi phạm đang mở, kể cả nhân viên không nằm trong kỳ lương hiện tại."""
+    d = load_violation_debt_ledger().copy()
+    if d is None or d.empty:
+        return pd.DataFrame(columns=VIOLATION_DEBT_HEADERS + ['__sheet_row'])
+    keep = []
+    for _, r in d.iterrows():
+        amount = max(0.0, float(_money_to_float(r.get('Số tiền', 0))))
+        if amount <= 0 or not _is_open_violation_debt_status(r.get('Trạng thái', '')):
+            continue
+        keep.append(r.to_dict())
+    return pd.DataFrame(keep) if keep else pd.DataFrame(columns=VIOLATION_DEBT_HEADERS + ['__sheet_row'])
+
+
 def _upsert_negative_violation_debt(ws, vals, employee_name, amount, start_date, end_date, updated_by):
     """Tạo/cập nhật khoản âm Thực nhận của một kỳ, không tạo trùng khi lưu lại cùng kỳ."""
     source_key = _violation_debt_source_key('NEG', start_date, end_date, employee_name)
@@ -6949,10 +7075,9 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     else:
                         st.info("Không còn khoản Vi phạm của kỳ hiện tại có thể tạm hoãn.")
 
-                    # Hiển thị các nghĩa vụ đang mở để Admin kiểm soát số tiền sẽ chuyển kỳ.
-                    _, _, _all_active = get_violation_debt_state(
-                        current_start, current_end, final_df['Tên Hệ thống'].astype(str).tolist()
-                    )
+                    # V54: Admin xem + sửa/xóa toàn bộ Nghĩa vụ Vi phạm đang mở.
+                    # Việc sửa/xóa có hiệu lực ngay với kỳ đang mở và mọi kỳ tính sau.
+                    _all_active = get_all_open_violation_debts_for_admin()
                     if isinstance(_all_active, pd.DataFrame) and not _all_active.empty:
                         _show_cols = [c for c in [
                             'Tên nhân viên','Số tiền','Nội dung','Loại','Kỳ phát sinh từ','Kỳ phát sinh đến','Bắt đầu trừ từ','Trạng thái'
@@ -6962,6 +7087,119 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                             _debt_show['Số tiền'] = _debt_show['Số tiền'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
                         st.caption("Nghĩa vụ Vi phạm đang mở")
                         st.dataframe(_debt_show, hide_index=True, width="stretch", height="content")
+
+                        with st.expander("✏️ Sửa / Xóa Nghĩa vụ Vi phạm", expanded=False):
+                            _manage_rows = _all_active.reset_index(drop=True).copy()
+                            _manage_options = []
+                            _manage_lookup = {}
+                            for _i, _r in _manage_rows.iterrows():
+                                _sheet_row = int(_r.get('__sheet_row', 0) or 0)
+                                _emp = str(_r.get('Tên nhân viên', '')).strip()
+                                _amt = float(_money_to_float(_r.get('Số tiền', 0)))
+                                _typ = str(_r.get('Loại', '')).strip()
+                                _p1 = str(_r.get('Kỳ phát sinh từ', '')).strip()
+                                _p2 = str(_r.get('Kỳ phát sinh đến', '')).strip()
+                                _label = f"{_emp} · {_amt:,.0f} đ · {_typ} · {_p1} → {_p2}".replace(',', '.')
+                                # Bảo đảm label duy nhất nếu có nhiều dòng giống nhau.
+                                if _label in _manage_lookup:
+                                    _label = f"{_label} · dòng {_sheet_row}"
+                                _manage_options.append(_label)
+                                _manage_lookup[_label] = _r.to_dict()
+
+                            _selected_label = st.selectbox(
+                                "Chọn nghĩa vụ cần chỉnh sửa",
+                                _manage_options,
+                                filter_mode="contains",
+                                key="admin_manage_violation_debt_select",
+                            )
+                            _selected = _manage_lookup.get(_selected_label, {})
+                            _selected_row = int(_selected.get('__sheet_row', 0) or 0)
+                            _selected_amount = max(0.0, float(_money_to_float(_selected.get('Số tiền', 0))))
+                            _selected_due = _parse_vn_date(_selected.get('Bắt đầu trừ từ', '')) or current_start
+                            _edit_amount = st.number_input(
+                                "Số tiền nghĩa vụ",
+                                min_value=1.0,
+                                value=float(max(1.0, _selected_amount)),
+                                step=50000.0,
+                                format="%.0f",
+                                key=f"edit_violation_debt_amount_{_selected_row}",
+                            )
+                            _edit_content = st.text_input(
+                                "Nội dung",
+                                value=str(_selected.get('Nội dung', '')).strip() or VIOLATION_DEBT_CONTENT,
+                                key=f"edit_violation_debt_content_{_selected_row}",
+                            )
+                            _edit_due = st.date_input(
+                                "Bắt đầu trừ từ kỳ/ngày",
+                                value=_selected_due,
+                                format="DD/MM/YYYY",
+                                key=f"edit_violation_debt_due_{_selected_row}",
+                            )
+                            _btn_edit, _btn_delete = st.columns(2)
+                            if _btn_edit.button(
+                                "💾 Lưu chỉnh sửa nghĩa vụ",
+                                use_container_width=True,
+                                key=f"save_violation_debt_edit_{_selected_row}",
+                            ):
+                                _ok, _msg = update_violation_debt_obligation(
+                                    _selected_row,
+                                    _edit_amount,
+                                    _edit_content,
+                                    _edit_due,
+                                    st.session_state.current_user,
+                                )
+                                if _ok:
+                                    _clear_violation_debt_cache()
+                                    try:
+                                        st.session_state.payroll_current_df = refresh_current_payroll_violation_debt(
+                                            st.session_state.payroll_current_df,
+                                            current_start,
+                                            current_end,
+                                        )
+                                    except Exception:
+                                        pass
+                                    st.session_state.pop('payroll_adjustment_editor', None)
+                                    st.success(_msg + " Kỳ đang mở đã được tính lại; các kỳ tiếp theo sẽ dùng số mới.")
+                                    st.rerun()
+                                else:
+                                    st.error(_msg)
+
+                            _confirm_delete = st.checkbox(
+                                "Tôi xác nhận xóa vĩnh viễn nghĩa vụ này",
+                                key=f"confirm_delete_violation_debt_{_selected_row}",
+                            )
+                            if _btn_delete.button(
+                                "🗑️ Xóa nghĩa vụ",
+                                use_container_width=True,
+                                disabled=not _confirm_delete,
+                                key=f"delete_violation_debt_{_selected_row}",
+                            ):
+                                _ok, _msg = delete_violation_debt_obligation(
+                                    _selected_row,
+                                    st.session_state.current_user,
+                                )
+                                if _ok:
+                                    _clear_violation_debt_cache()
+                                    try:
+                                        st.session_state.payroll_current_df = refresh_current_payroll_violation_debt(
+                                            st.session_state.payroll_current_df,
+                                            current_start,
+                                            current_end,
+                                        )
+                                    except Exception:
+                                        pass
+                                    st.session_state.pop('payroll_adjustment_editor', None)
+                                    st.success(_msg + " Kỳ đang mở đã được tính lại; các kỳ tiếp theo sẽ không còn khoản đã xóa.")
+                                    st.rerun()
+                                else:
+                                    st.error(_msg)
+
+                            st.caption(
+                                "Thay đổi áp dụng ngay cho kỳ lương đang mở và mọi kỳ tính sau. "
+                                "Các bản lương lịch sử đã lưu không bị ghi đè tự động; khi cần cập nhật bản cũ, mở bản đó và bấm Cập nhật bảng lương từ hệ thống."
+                            )
+                    else:
+                        st.caption("Hiện không có Nghĩa vụ Vi phạm nào đang mở.")
 
             # Thông báo rõ các dòng âm: khi Admin lưu bảng lương, phần âm sẽ chuyển thành nghĩa vụ Vi phạm kỳ sau.
             _negative_rows = final_df[final_df['Số tiền thực nhận'].apply(_money_to_float) < 0]

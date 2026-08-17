@@ -2742,6 +2742,81 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
     return result, unmatched
 
 
+def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credentials_df=None, leave_primary=None):
+    """
+    Cập nhật một bản lương đã lưu bằng dữ liệu hệ thống mới nhất, nhưng giữ nguyên
+    các khoản nhập tay và Tiền Lương đã lưu.
+
+    Tự cập nhật:
+    - Tiền phạt trong kỳ từ Google Sheet lịch nghỉ chính 1Kz0...
+    - Phí Sinh Hoạt / Hỗ trợ Locker theo mức mặc định hoặc mức riêng hiện hành
+    - Tài khoản ngân hàng / Tên ngân hàng / Email từ hồ sơ nhân viên
+    - Thực nhận sau khi các khoản trên thay đổi
+
+    Không tự đổi Tiền Lương vì dữ liệu doanh thu nguồn có thể là file Excel upload
+    và không được lưu như một nguồn dữ liệu vĩnh viễn trong hệ thống.
+    """
+    if payroll_df is None or not isinstance(payroll_df, pd.DataFrame) or payroll_df.empty:
+        return pd.DataFrame(columns=PAYROLL_COLUMNS), {"updated": 0, "missing": []}
+
+    d = payroll_df.copy()
+    creds = credentials_df.copy() if isinstance(credentials_df, pd.DataFrame) else load_credentials()
+    leave_df = leave_primary.copy() if isinstance(leave_primary, pd.DataFrame) else load_backup_sheet_data()
+
+    # Dùng cùng snapshot cấu hình để tránh phát sinh nhiều request Google Sheets.
+    default_living, default_locker = get_payroll_default_amounts()
+    overrides = get_payroll_employee_overrides()
+    penalty_map = _period_penalty_by_employee(start_date, end_date, leave_df, None)
+
+    cred_map = {}
+    if isinstance(creds, pd.DataFrame) and not creds.empty and 'Tên nhân viên' in creds.columns:
+        for _, cr in creds.iterrows():
+            key = normalize_login_name(cr.get('Tên nhân viên', ''))
+            if key:
+                cred_map[key] = cr
+
+    missing = []
+    updated = 0
+    for idx, row in d.iterrows():
+        emp_name = str(row.get('Tên Hệ thống', '')).strip()
+        key = normalize_login_name(emp_name)
+        if not key:
+            continue
+
+        # Tiền phạt luôn lấy lại theo đúng kỳ của bản lương đang mở.
+        new_penalty = float(_money_to_float(penalty_map.get(key, 0)))
+        if 'Tiền phạt trong tháng' in d.columns:
+            d.at[idx, 'Tiền phạt trong tháng'] = new_penalty
+
+        # Mức khấu trừ/hỗ trợ dùng mức riêng nếu có, nếu không dùng mức chung.
+        ov = overrides.get(key, {}) if isinstance(overrides, dict) else {}
+        living = ov.get('living', default_living)
+        locker = ov.get('locker', default_locker)
+        if 'Chi Phí Sinh Hoạt' in d.columns:
+            d.at[idx, 'Chi Phí Sinh Hoạt'] = float(_money_to_float(living))
+        if 'Tiền hỗ trợ Locker' in d.columns:
+            d.at[idx, 'Tiền hỗ trợ Locker'] = float(_money_to_float(locker))
+
+        # Đồng bộ thông tin hồ sơ mới nhất.
+        cr = cred_map.get(key)
+        if cr is None:
+            missing.append(emp_name)
+        else:
+            if 'Số tài khoản ngân hàng' in d.columns:
+                d.at[idx, 'Số tài khoản ngân hàng'] = str(cr.get('Số tài khoản ngân hàng', '')).strip().replace("'", "")
+            if 'Tên ngân hàng' in d.columns:
+                d.at[idx, 'Tên ngân hàng'] = str(cr.get('Tên ngân hàng', '')).strip()
+            if 'Email' in d.columns:
+                d.at[idx, 'Email'] = str(cr.get('Email', '')).strip()
+            if 'Họ và tên' in d.columns:
+                d.at[idx, 'Họ và tên'] = str(cr.get('Họ và tên đầy đủ', '')).strip()
+        updated += 1
+
+    d = recalculate_payroll_net(d)
+    d = _filter_real_payroll_rows(d)
+    return d, {"updated": updated, "missing": sorted(set(missing))}
+
+
 def recalculate_payroll_net(df):
     d = df.copy()
     money_cols = [
@@ -4143,6 +4218,19 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 )
                 saved_table = payroll_history_to_table(saved)
                 saved_table = _filter_real_payroll_rows(saved_table)
+
+                # Nếu Admin vừa bấm "Cập nhật bảng lương từ hệ thống", dùng bản đã làm mới
+                # làm dữ liệu nền cho editor ở lần rerun kế tiếp. Mỗi batch có state riêng.
+                hist_refresh_key = f"payroll_history_system_refresh_{batch}"
+                hist_editor_version_key = f"payroll_history_editor_version_{batch}"
+                if hist_refresh_key in st.session_state:
+                    try:
+                        refreshed_state_df = st.session_state.get(hist_refresh_key)
+                        if isinstance(refreshed_state_df, pd.DataFrame) and not refreshed_state_df.empty:
+                            saved_table = _filter_real_payroll_rows(refreshed_state_df.copy())
+                    except Exception:
+                        pass
+
                 # Không hiển thị/tính dòng Lễ tân kể cả với bản lịch sử cũ đã lưu từ V18.
                 try:
                     letan_keys = set(
@@ -4191,9 +4279,10 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                             PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%.0f", width="small"
                         )
 
+                hist_editor_version = int(st.session_state.get(hist_editor_version_key, 0) or 0)
                 edited_hist = st.data_editor(
                     hist_editor_df,
-                    key=f"payroll_history_editor_{batch}",
+                    key=f"payroll_history_editor_{batch}_{hist_editor_version}",
                     width="stretch", height="content", hide_index=True,
                     column_config=hist_col_cfg,
                     disabled=[c for c in ["TT", "Tên Hệ thống", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"] if c in hist_editor_df.columns]
@@ -4205,6 +4294,68 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         edited_saved_table[c] = edited_hist[c].values
                 edited_saved_table = recalculate_payroll_net(edited_saved_table)
                 edited_saved_table = _filter_real_payroll_rows(edited_saved_table)
+
+                # Cập nhật các dữ liệu hệ thống có thể thay đổi sau khi bản lương đã được lưu.
+                # Giữ nguyên Tiền Lương và các khoản Admin nhập tay; chỉ đồng bộ phạt,
+                # mức sinh hoạt/Locker, ngân hàng, email rồi tính lại Thực nhận.
+                if st.button(
+                    "🔄 Cập nhật bảng lương từ hệ thống",
+                    use_container_width=True,
+                    key=f"refresh_payroll_from_system_{batch}"
+                ):
+                    progress_refresh = st.progress(0)
+                    status_refresh = st.empty()
+                    try:
+                        status_refresh.info("⏳ Đang tải hồ sơ nhân viên mới nhất...")
+                        progress_refresh.progress(20)
+                        try:
+                            load_credentials.clear()
+                        except Exception:
+                            pass
+                        credentials_live = load_credentials()
+
+                        status_refresh.info("⏳ Đang tải tiền phạt trong kỳ từ hệ thống lịch nghỉ...")
+                        progress_refresh.progress(45)
+                        try:
+                            load_backup_sheet_data.clear()
+                        except Exception:
+                            pass
+                        leave_live = load_backup_sheet_data()
+
+                        status_refresh.info("⏳ Đang tải mức Phí sinh hoạt / Locker và cập nhật bảng lương...")
+                        progress_refresh.progress(70)
+                        # Làm mới đúng cache cấu hình lương 1 lần; hai hàm get bên trong
+                        # dùng chung snapshot nên không tạo bão request API.
+                        _clear_payroll_config_cache()
+                        refreshed_df, refresh_meta = refresh_saved_payroll_from_system(
+                            edited_saved_table, hs, he,
+                            credentials_df=credentials_live,
+                            leave_primary=leave_live
+                        )
+
+                        st.session_state[hist_refresh_key] = refreshed_df
+                        st.session_state[hist_editor_version_key] = hist_editor_version + 1
+                        progress_refresh.progress(100)
+                        status_refresh.success(
+                            f"✅ Đã cập nhật dữ liệu hệ thống cho {refresh_meta.get('updated', len(refreshed_df))} nhân viên. "
+                            "Tiền Lương và các khoản nhập tay được giữ nguyên; Thực nhận đã tính lại."
+                        )
+                        missing_profiles = refresh_meta.get('missing', [])
+                        if missing_profiles:
+                            st.warning(
+                                "⚠️ Không tìm thấy hồ sơ hệ thống của: " + ", ".join(missing_profiles)
+                                + ". Các thông tin ngân hàng/email cũ của những người này được giữ nguyên."
+                            )
+                        time.sleep(0.35)
+                        st.rerun()
+                    except Exception as e:
+                        progress_refresh.empty()
+                        status_refresh.error(f"❌ Không cập nhật được bảng lương từ hệ thống: {e}")
+
+                st.caption(
+                    "Nút cập nhật hệ thống sẽ làm mới: Vi phạm, Phí Sinh Hoạt, Tiền hỗ trợ Locker, "
+                    "Tài khoản ngân hàng, Tên ngân hàng và Email. Tiền Lương không bị thay đổi."
+                )
 
                 # Hiển thị nhanh tổng sau khi sửa để Admin kiểm tra trước khi ghi đè.
                 h1, h2, h3 = st.columns(3)
@@ -4230,6 +4381,11 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         )
                         if ok:
                             load_payroll_history.clear()
+                            try:
+                                st.session_state.pop(hist_refresh_key, None)
+                                st.session_state[hist_editor_version_key] = hist_editor_version + 1
+                            except Exception:
+                                pass
                             st.success(msg)
                             st.info(
                                 f"Bản {batch} đã được cập nhật lúc {datetime.now(VN_TZ).strftime('%H:%M:%S %d/%m/%Y')} "

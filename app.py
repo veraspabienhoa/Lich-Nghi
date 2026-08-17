@@ -3705,121 +3705,121 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
     tab_calc, tab_history = st.tabs(["🧮 Tính lương kỳ hiện tại", "🗂 Lịch sử bảng lương đã lưu"])
     with tab_calc:
         default_living_db, default_locker_db = get_payroll_default_amounts()
-        st.markdown("### ⚙️ Mức khấu trừ mặc định")
-        cfg1, cfg2, cfg3 = st.columns([3, 3, 2])
-        with cfg1:
-            payroll_default_living = st.number_input(
-                "Chi phí sinh hoạt / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
-                value=float(default_living_db), key="payroll_default_living"
-            )
-        with cfg2:
-            payroll_default_locker = st.number_input(
-                "Hỗ trợ Locker / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
-                value=float(default_locker_db), key="payroll_default_locker"
-            )
-        with cfg3:
-            st.write("")
-            if st.button("💾 Lưu mức mặc định", use_container_width=True, key="save_payroll_defaults"):
-                ok, msg = set_payroll_default_amounts(payroll_default_living, payroll_default_locker)
-                (st.success if ok else st.error)(msg)
-        st.caption("Hai mức này được áp dụng cho toàn bộ nhân viên khi tạo bảng lương mới. Mức riêng theo nhân viên bên dưới sẽ được ưu tiên hơn mức mặc định chung.")
-
-        # --- MỨC RIÊNG CHO 1 / NHIỀU NHÂN VIÊN ---
-        st.markdown("#### 👥 Mức riêng theo nhân viên")
-        payroll_emp_choices_df = df_credentials.copy() if isinstance(df_credentials, pd.DataFrame) else pd.DataFrame()
-        if not payroll_emp_choices_df.empty and 'Tên nhân viên' in payroll_emp_choices_df.columns:
-            payroll_emp_choices_df = payroll_emp_choices_df[payroll_emp_choices_df['Tên nhân viên'].astype(str).str.strip() != ''].copy()
-            payroll_emp_choices_df = payroll_emp_choices_df[~payroll_emp_choices_df['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
-                'ten nhan vien', 'ten he thong', 'username', 'user name'
-            })]
-            if 'Phân quyền' in payroll_emp_choices_df.columns:
-                _pay_roles = payroll_emp_choices_df['Phân quyền'].astype(str).str.strip().str.lower()
-                payroll_emp_choices_df = payroll_emp_choices_df[~_pay_roles.isin(['admin', 'letan'])]
-            payroll_employee_options = payroll_emp_choices_df['Tên nhân viên'].astype(str).str.strip().drop_duplicates().tolist()
-        else:
-            payroll_employee_options = []
-
-        selected_payroll_override_emps = st.multiselect(
-            "Chọn 1 hoặc nhiều nhân viên cần đặt mức riêng:",
-            options=payroll_employee_options,
-            key="payroll_override_employees",
-            filter_mode="contains",
-            help="Các nhân viên được chọn sẽ dùng mức riêng thay cho mức mặc định chung khi tạo bảng lương mới."
-        )
-
-        existing_payroll_overrides = get_payroll_employee_overrides()
-        _selected_keys = [normalize_login_name(x) for x in selected_payroll_override_emps]
-        _living_values = [existing_payroll_overrides[k]['living'] for k in _selected_keys if k in existing_payroll_overrides]
-        _locker_values = [existing_payroll_overrides[k]['locker'] for k in _selected_keys if k in existing_payroll_overrides]
-        _living_initial = _living_values[0] if _living_values and len(set(_living_values)) == 1 else float(payroll_default_living)
-        _locker_initial = _locker_values[0] if _locker_values and len(set(_locker_values)) == 1 else float(payroll_default_locker)
-        _override_sig = hashlib.md5("|".join(sorted(_selected_keys)).encode('utf-8')).hexdigest()[:10] if _selected_keys else "none"
-
-        ov1, ov2, ov3, ov4 = st.columns([3, 3, 2, 2])
-        with ov1:
-            payroll_override_living = st.number_input(
-                "Chi phí sinh hoạt riêng / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
-                value=float(_living_initial), key=f"payroll_override_living_{_override_sig}",
-                disabled=not bool(selected_payroll_override_emps)
-            )
-        with ov2:
-            payroll_override_locker = st.number_input(
-                "Hỗ trợ Locker riêng / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
-                value=float(_locker_initial), key=f"payroll_override_locker_{_override_sig}",
-                disabled=not bool(selected_payroll_override_emps)
-            )
-        with ov3:
-            st.write("")
-            if st.button(
-                "💾 Áp dụng mức riêng", use_container_width=True, key="save_payroll_employee_overrides",
-                disabled=not bool(selected_payroll_override_emps)
-            ):
-                ok, msg = set_payroll_employee_overrides(
-                    selected_payroll_override_emps, payroll_override_living, payroll_override_locker
+        with st.expander("⚙️ Mức khấu trừ mặc định", expanded=False):
+            cfg1, cfg2, cfg3 = st.columns([3, 3, 2])
+            with cfg1:
+                payroll_default_living = st.number_input(
+                    "Chi phí sinh hoạt / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
+                    value=float(default_living_db), key="payroll_default_living"
                 )
-                if ok:
-                    _apply_payroll_override_to_current_session(
+            with cfg2:
+                payroll_default_locker = st.number_input(
+                    "Hỗ trợ Locker / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
+                    value=float(default_locker_db), key="payroll_default_locker"
+                )
+            with cfg3:
+                st.write("")
+                if st.button("💾 Lưu mức mặc định", use_container_width=True, key="save_payroll_defaults"):
+                    ok, msg = set_payroll_default_amounts(payroll_default_living, payroll_default_locker)
+                    (st.success if ok else st.error)(msg)
+            st.caption("Hai mức này được áp dụng cho toàn bộ nhân viên khi tạo bảng lương mới. Mức riêng theo nhân viên bên dưới sẽ được ưu tiên hơn mức mặc định chung.")
+
+            # --- MỨC RIÊNG CHO 1 / NHIỀU NHÂN VIÊN ---
+            st.markdown("#### 👥 Mức riêng theo nhân viên")
+            payroll_emp_choices_df = df_credentials.copy() if isinstance(df_credentials, pd.DataFrame) else pd.DataFrame()
+            if not payroll_emp_choices_df.empty and 'Tên nhân viên' in payroll_emp_choices_df.columns:
+                payroll_emp_choices_df = payroll_emp_choices_df[payroll_emp_choices_df['Tên nhân viên'].astype(str).str.strip() != ''].copy()
+                payroll_emp_choices_df = payroll_emp_choices_df[~payroll_emp_choices_df['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
+                    'ten nhan vien', 'ten he thong', 'username', 'user name'
+                })]
+                if 'Phân quyền' in payroll_emp_choices_df.columns:
+                    _pay_roles = payroll_emp_choices_df['Phân quyền'].astype(str).str.strip().str.lower()
+                    payroll_emp_choices_df = payroll_emp_choices_df[~_pay_roles.isin(['admin', 'letan'])]
+                payroll_employee_options = payroll_emp_choices_df['Tên nhân viên'].astype(str).str.strip().drop_duplicates().tolist()
+            else:
+                payroll_employee_options = []
+
+            selected_payroll_override_emps = st.multiselect(
+                "Chọn 1 hoặc nhiều nhân viên cần đặt mức riêng:",
+                options=payroll_employee_options,
+                key="payroll_override_employees",
+                filter_mode="contains",
+                help="Các nhân viên được chọn sẽ dùng mức riêng thay cho mức mặc định chung khi tạo bảng lương mới."
+            )
+
+            existing_payroll_overrides = get_payroll_employee_overrides()
+            _selected_keys = [normalize_login_name(x) for x in selected_payroll_override_emps]
+            _living_values = [existing_payroll_overrides[k]['living'] for k in _selected_keys if k in existing_payroll_overrides]
+            _locker_values = [existing_payroll_overrides[k]['locker'] for k in _selected_keys if k in existing_payroll_overrides]
+            _living_initial = _living_values[0] if _living_values and len(set(_living_values)) == 1 else float(payroll_default_living)
+            _locker_initial = _locker_values[0] if _locker_values and len(set(_locker_values)) == 1 else float(payroll_default_locker)
+            _override_sig = hashlib.md5("|".join(sorted(_selected_keys)).encode('utf-8')).hexdigest()[:10] if _selected_keys else "none"
+
+            ov1, ov2, ov3, ov4 = st.columns([3, 3, 2, 2])
+            with ov1:
+                payroll_override_living = st.number_input(
+                    "Chi phí sinh hoạt riêng / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
+                    value=float(_living_initial), key=f"payroll_override_living_{_override_sig}",
+                    disabled=not bool(selected_payroll_override_emps)
+                )
+            with ov2:
+                payroll_override_locker = st.number_input(
+                    "Hỗ trợ Locker riêng / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
+                    value=float(_locker_initial), key=f"payroll_override_locker_{_override_sig}",
+                    disabled=not bool(selected_payroll_override_emps)
+                )
+            with ov3:
+                st.write("")
+                if st.button(
+                    "💾 Áp dụng mức riêng", use_container_width=True, key="save_payroll_employee_overrides",
+                    disabled=not bool(selected_payroll_override_emps)
+                ):
+                    ok, msg = set_payroll_employee_overrides(
                         selected_payroll_override_emps, payroll_override_living, payroll_override_locker
                     )
-                    st.success(msg)
-                else:
-                    st.error(msg)
-        with ov4:
-            st.write("")
-            if st.button(
-                "♻️ Dùng lại mặc định", use_container_width=True, key="clear_payroll_employee_overrides",
-                disabled=not bool(selected_payroll_override_emps)
-            ):
-                ok, msg = clear_payroll_employee_overrides(selected_payroll_override_emps)
-                if ok:
-                    _apply_payroll_override_to_current_session(
-                        selected_payroll_override_emps, payroll_default_living, payroll_default_locker
-                    )
-                    st.success(msg)
-                else:
-                    st.error(msg)
+                    if ok:
+                        _apply_payroll_override_to_current_session(
+                            selected_payroll_override_emps, payroll_override_living, payroll_override_locker
+                        )
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+            with ov4:
+                st.write("")
+                if st.button(
+                    "♻️ Dùng lại mặc định", use_container_width=True, key="clear_payroll_employee_overrides",
+                    disabled=not bool(selected_payroll_override_emps)
+                ):
+                    ok, msg = clear_payroll_employee_overrides(selected_payroll_override_emps)
+                    if ok:
+                        _apply_payroll_override_to_current_session(
+                            selected_payroll_override_emps, payroll_default_living, payroll_default_locker
+                        )
+                        st.success(msg)
+                    else:
+                        st.error(msg)
 
-        # Hiển thị danh sách nhân viên đang có mức riêng để Admin dễ kiểm tra.
-        if existing_payroll_overrides:
-            _override_rows = []
-            _display_order = {normalize_login_name(n): i for i, n in enumerate(payroll_employee_options)}
-            for _k, _v in existing_payroll_overrides.items():
-                _override_rows.append({
-                    "Tên Hệ thống": _v.get("name", _k),
-                    "Phí Sinh Hoạt riêng": int(round(_money_to_float(_v.get("living", 0)))),
-                    "Hỗ trợ Locker riêng": int(round(_money_to_float(_v.get("locker", 0)))),
-                    "__order": _display_order.get(_k, 9999),
-                })
-            _override_df = pd.DataFrame(_override_rows).sort_values(["__order", "Tên Hệ thống"]).drop(columns=["__order"])
-            with st.expander(f"📋 Danh sách mức riêng đang lưu ({len(_override_df)} nhân viên)", expanded=False):
-                st.dataframe(
-                    _override_df, width="stretch", height="content", hide_index=True,
-                    column_config={
-                        "Tên Hệ thống": st.column_config.TextColumn("Tên Hệ thống"),
-                        "Phí Sinh Hoạt riêng": st.column_config.NumberColumn("Phí Sinh Hoạt riêng", format="%.0f"),
-                        "Hỗ trợ Locker riêng": st.column_config.NumberColumn("Hỗ trợ Locker riêng", format="%.0f"),
-                    }
-                )
+            # Hiển thị danh sách nhân viên đang có mức riêng để Admin dễ kiểm tra.
+            if existing_payroll_overrides:
+                _override_rows = []
+                _display_order = {normalize_login_name(n): i for i, n in enumerate(payroll_employee_options)}
+                for _k, _v in existing_payroll_overrides.items():
+                    _override_rows.append({
+                        "Tên Hệ thống": _v.get("name", _k),
+                        "Phí Sinh Hoạt riêng": int(round(_money_to_float(_v.get("living", 0)))),
+                        "Hỗ trợ Locker riêng": int(round(_money_to_float(_v.get("locker", 0)))),
+                        "__order": _display_order.get(_k, 9999),
+                    })
+                _override_df = pd.DataFrame(_override_rows).sort_values(["__order", "Tên Hệ thống"]).drop(columns=["__order"])
+                with st.expander(f"📋 Danh sách mức riêng đang lưu ({len(_override_df)} nhân viên)", expanded=False):
+                    st.dataframe(
+                        _override_df, width="stretch", height="content", hide_index=True,
+                        column_config={
+                            "Tên Hệ thống": st.column_config.TextColumn("Tên Hệ thống"),
+                            "Phí Sinh Hoạt riêng": st.column_config.NumberColumn("Phí Sinh Hoạt riêng", format="%.0f"),
+                            "Hỗ trợ Locker riêng": st.column_config.NumberColumn("Hỗ trợ Locker riêng", format="%.0f"),
+                        }
+                    )
 
         c_period, c_source = st.columns(2)
         with c_period:

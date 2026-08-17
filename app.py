@@ -17,6 +17,7 @@ import hmac
 import json
 import zipfile
 import re
+import numbers
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -1857,15 +1858,29 @@ def _tour_norm_token(v):
 
 def prepare_bang_tour_display(df):
     """
-    Sau khi lấy dữ liệu từ file:
-    - Đưa Trạng Thái ngay sau Tên Nhân Viên.
-    - Đưa Thời gian còn lại ngay sau Trạng Thái.
-    - Chuyển DANG CHO -> Đang chờ; DANG THUC HIEN -> Đang thực hiện.
-    - Thời gian còn lại hiển thị bằng số nguyên.
-    - Nếu Thời gian còn lại <= -15 thì làm trống VALUE trên bảng web.
-      (Không ghi ngược/xóa dữ liệu trong file XLSM nguồn.)
+    Chuẩn bị dữ liệu HIỂN THỊ cho Bảng Tour sau khi đọc từ file:
+    - Tên Nhân Viên -> Trạng Thái -> Thời gian còn lại -> các cột khác.
+    - DANG CHO -> Đang chờ; DANG THUC HIEN -> Đang thực hiện.
+    - Mọi giá trị số hiển thị dạng SỐ NGUYÊN, không có phần thập phân.
+    - None / NaN / NaT / <NA> được đổi thành ô trống thật sự.
+    - Thời gian còn lại <= -15 được làm trống trên giao diện (không ghi ngược file nguồn).
     """
-    out = reorder_bang_tour_columns(df)
+    out = reorder_bang_tour_columns(df).copy()
+
+    # Ghi nhớ các dòng có thời gian <= -15 trước khi làm trống để không nhầm thành "Đang rảnh".
+    expired_indices = set()
+    remain_col = _find_tour_col(out, "Thời gian còn lại")
+    if remain_col is not None:
+        raw_remain = out[remain_col].apply(_tour_num)
+        expired_indices = set(raw_remain[raw_remain.apply(lambda x: x is not None and x <= -15)].index.tolist())
+
+        def fmt_remaining(v):
+            n = _tour_num(v)
+            if n is None or n <= -15:
+                return ""
+            return str(int(round(n)))
+
+        out[remain_col] = out[remain_col].apply(fmt_remaining)
 
     status_col = _find_tour_col(out, "Trạng thái")
     if status_col is not None:
@@ -1875,33 +1890,48 @@ def prepare_bang_tour_display(df):
                 return "Đang chờ"
             if token == "dang thuc hien":
                 return "Đang thực hiện"
-            return "" if pd.isna(v) else str(v).strip()
+            if pd.isna(v):
+                return ""
+            s = str(v).strip()
+            return "" if s.casefold() in {"none", "nan", "nat", "<na>"} else s
         out[status_col] = out[status_col].apply(fmt_status)
 
-    remain_col = _find_tour_col(out, "Thời gian còn lại")
-    if remain_col is not None:
-        def fmt_remaining(v):
-            n = _tour_num(v)
-            if n is None or n <= -15:
+    def clean_and_integer_tour_value(v):
+        # Ẩn hoàn toàn giá trị thiếu thật sự.
+        try:
+            if pd.isna(v):
                 return ""
-            return int(round(n))
-        out[remain_col] = out[remain_col].apply(fmt_remaining)
-        # Dùng nullable integer để cột vẫn là kiểu số nhưng các giá trị bị xóa hiển thị thành ô trống.
-        out[remain_col] = pd.to_numeric(out[remain_col], errors="coerce").astype("Int64")
+        except Exception:
+            pass
 
-    # ẨN CÁC CHUỖI "None" / "NaN" / "NaT" TRÊN BẢNG TOUR.
-    # Giá trị thiếu thật sự (NaN / pd.NA) vẫn giữ nguyên dtype và sẽ được Styler render thành ô trống.
-    def clean_literal_empty_tour_value(v):
-        if isinstance(v, str) and v.strip().casefold() in {"none", "nan", "nat", "<na>"}:
-            return ""
+        if isinstance(v, str):
+            s = v.strip()
+            if s.casefold() in {"none", "nan", "nat", "<na>"}:
+                return ""
+            # Nếu chuỗi chỉ là một số thì hiển thị thành số nguyên.
+            if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", s):
+                try:
+                    return str(int(round(float(s))))
+                except Exception:
+                    return s
+            return s
+
+        # Giá trị số từ openpyxl/pandas -> số nguyên hiển thị.
+        if isinstance(v, bool):
+            return v
+        try:
+            if isinstance(v, numbers.Number):
+                return str(int(round(float(v))))
+        except Exception:
+            pass
         return v
 
     for c in out.columns:
-        out[c] = out[c].apply(clean_literal_empty_tour_value)
+        out[c] = out[c].apply(clean_and_integer_tour_value)
 
     out.attrs.update(df.attrs)
+    out.attrs["_tour_expired_indices"] = expired_indices
     return out
-
 
 def calculate_bang_tour_stats(df):
     """Tính bảng thống kê số lượng cho Bảng Tour từ dữ liệu gốc vừa tải."""
@@ -1974,25 +2004,30 @@ def calculate_bang_tour_stats(df):
 
 def style_bang_tour(df):
     """
-    Tô NGUYÊN DÒNG Bảng Tour theo đúng bộ quy tắc mới của người dùng.
-
-    Thứ tự áp dụng:
-    1. Đi làm = Nghi phep -> nền trắng, chữ mờ.
-    2. Đi làm = Di lam -> nền trắng, chữ đen.
-    3. Thời gian còn lại >= 15 -> nền xanh lá.
-    4. 0 <= Thời gian còn lại < 15 -> nền vàng.
-    5. -15 < Thời gian còn lại < 0 -> nền đỏ.
-    6. Thời gian <= -15 đã được làm trống ở prepare_bang_tour_display().
-    7. Break = Break -> nền cam (ưu tiên cao nhất).
+    Tô nguyên dòng Bảng Tour theo quy tắc vận hành Vera.
+    - Nghỉ phép: nền trắng, chữ mờ.
+    - Đi làm: nền trắng, chữ đen.
+    - Thời gian >= 15: xanh lá.
+    - 0 <= thời gian < 15: vàng.
+    - -15 < thời gian < 0: đỏ.
+    - Đang rảnh: xanh nhạt + chữ đậm.
+    - Break: cam (ưu tiên cao nhất).
+    - Header: nền rgb(161,148,140) / #A1948C, chữ đen đậm.
     """
     remain_col = _find_tour_col(df, "Thời gian còn lại")
     work_col = _find_tour_col(df, "Đi làm")
+    shift_col = _find_tour_col(df, "Vào ca")
     break_col = _find_tour_col(df, "Break")
     if break_col is None:
         break_col = _find_tour_col(df, "Breaktime")
+    if shift_col is None:
+        shift_col = _find_tour_col(df, "Ca")
+
+    expired_indices = set(df.attrs.get("_tour_expired_indices", set()))
 
     def row_style(row):
         work_norm = _tour_norm_token(row.get(work_col, "")) if work_col else ""
+        shift_norm = _tour_norm_token(row.get(shift_col, "")) if shift_col else ""
         break_norm = _tour_norm_token(row.get(break_col, "")) if break_col else ""
         remain_num = _tour_num(row.get(remain_col, "")) if remain_col else None
 
@@ -2000,13 +2035,12 @@ def style_bang_tour(df):
         fg = "#000000"
         weight = "400"
 
-        # Trạng thái Đi làm / Nghỉ phép làm nền cơ sở.
         if work_norm == "nghi phep":
             bg, fg, weight = "#FFFFFF", "#A6A6A6", "400"
         elif work_norm == "di lam":
             bg, fg, weight = "#FFFFFF", "#000000", "400"
 
-        # Thời gian còn lại quyết định màu tiến độ, nhưng KHÔNG ghi đè dòng Nghỉ phép.
+        # Màu theo thời gian, không ghi đè dòng Nghỉ phép.
         if remain_num is not None and work_norm != "nghi phep":
             if remain_num >= 15:
                 bg, fg, weight = "#92D050", "#000000", "600"
@@ -2015,9 +2049,19 @@ def style_bang_tour(df):
             elif -15 < remain_num < 0:
                 bg, fg, weight = "#FF6666", "#000000", "600"
 
-        # Break là điều kiện ưu tiên cuối cùng.
+        # Đang rảnh: thời gian trống/0 + Ca 1/Ca 2 + Đi làm; loại trừ dòng <= -15 đã bị làm trống.
+        is_idle = (
+            row.name not in expired_indices
+            and work_norm == "di lam"
+            and shift_norm in {"ca 1", "ca 2"}
+            and (remain_num is None or remain_num == 0)
+        )
+        if is_idle:
+            bg, fg, weight = "#D9EAD3", "#000000", "700"
+
+        # Break ưu tiên cuối cùng.
         if break_norm == "break":
-            bg, fg, weight = "#F4B183", "#000000", "600"
+            bg, fg, weight = "#F4B183", "#000000", "700"
 
         css = (
             f"background-color:{bg};"
@@ -2028,12 +2072,11 @@ def style_bang_tour(df):
         return [css] * len(row)
 
     styler = df.style.apply(row_style, axis=1).format(na_rep="")
-
     styler = styler.set_table_styles([
         {
             "selector": "th",
             "props": [
-                ("background-color", "#D9D9D9"),
+                ("background-color", "#A1948C"),
                 ("color", "#000000"),
                 ("font-weight", "700"),
                 ("text-align", "center"),
@@ -2047,10 +2090,9 @@ def style_bang_tour(df):
     if status_col is not None:
         styler = styler.set_properties(
             subset=[status_col],
-            **{"white-space": "nowrap", "min-width": "125px", "width": "125px"}
+            **{"white-space": "nowrap", "min-width": "135px", "width": "135px"}
         )
     return styler
-
 
 def combine_leave_sources_for_daily_stats(*sources):
     """
@@ -2223,7 +2265,14 @@ if not st.session_state.logged_in:
         password_input = st.text_input("Mật khẩu", type="password", autocomplete="current-password")
         st.caption("🔐 Thiết bị này sẽ duy trì đăng nhập cho tới khi bạn bấm Đăng xuất.")
 
-        if st.form_submit_button("Đăng Nhập"):
+        # Nút lưu đăng nhập dùng token bảo mật hiện có; không lưu mật khẩu dạng chữ thường.
+        c_save_login, c_login = st.columns([2, 1])
+        with c_save_login:
+            save_credentials_submit = st.form_submit_button("💾 Lưu tên đăng nhập và mật khẩu")
+        with c_login:
+            login_submit = st.form_submit_button("Đăng Nhập")
+
+        if login_submit or save_credentials_submit:
             input_name_norm = normalize_login_name(username_input)
 
             # Tài khoản quản trị dự phòng cũ: vẫn chấp nhận HOA/thường ở tên đăng nhập.
@@ -2271,8 +2320,8 @@ if not st.session_state.logged_in:
 is_admin_letan = st.session_state.current_role in ["admin", "letan"]
 
 PAGE_SLUGS = {
-    "📅 Đăng ký & Thống kê nghỉ phép": "dang-ky-thong-ke-nghi-phep",
     "🧭 Bảng Tour": "bang-tour",
+    "📅 Đăng ký & Thống kê nghỉ phép": "dang-ky-thong-ke-nghi-phep",
     "✏️ Quản lý lịch nghỉ": "quan-ly-lich-nghi",
     "⏰ Thiết lập ca làm việc": "thiet-lap-ca",
     "👥 Danh sách nhân sự": "danh-sach-nhan-su",
@@ -2287,20 +2336,20 @@ SLUG_TO_PAGE = {v: k for k, v in PAGE_SLUGS.items()}
 
 if st.session_state.current_role == "admin":
     allowed_pages = [
-        "📅 Đăng ký & Thống kê nghỉ phép", "🧭 Bảng Tour", "✏️ Quản lý lịch nghỉ",
+        "🧭 Bảng Tour", "📅 Đăng ký & Thống kê nghỉ phép", "✏️ Quản lý lịch nghỉ",
         "⏰ Thiết lập ca làm việc", "👥 Danh sách nhân sự", "➕ Thêm nhân viên",
         "✏️ Sửa / Xóa nhân viên", "🔒 Khóa đăng nhập", "🔐 Khóa quyền đăng ký",
         "🔄 Đồng bộ dữ liệu"
     ]
 elif st.session_state.current_role == "letan":
     allowed_pages = [
-        "📅 Đăng ký & Thống kê nghỉ phép", "🧭 Bảng Tour", "✏️ Quản lý lịch nghỉ",
+        "🧭 Bảng Tour", "📅 Đăng ký & Thống kê nghỉ phép", "✏️ Quản lý lịch nghỉ",
         "⏰ Thiết lập ca làm việc", "👥 Danh sách nhân sự", "➕ Thêm nhân viên",
         "✏️ Sửa / Xóa nhân viên", "👤 Hồ sơ cá nhân"
     ]
 else:
     allowed_pages = [
-        "📅 Đăng ký & Thống kê nghỉ phép", "🧭 Bảng Tour", "✏️ Quản lý lịch nghỉ",
+        "🧭 Bảng Tour", "📅 Đăng ký & Thống kê nghỉ phép", "✏️ Quản lý lịch nghỉ",
         "👤 Hồ sơ cá nhân"
     ]
 
@@ -2671,7 +2720,7 @@ elif selected_page == "🧭 Bảng Tour":
                 {
                     "selector": "th",
                     "props": [
-                        ("background-color", "#D9D9D9"),
+                        ("background-color", "#A1948C"),
                         ("color", "#000000"),
                         ("font-weight", "700"),
                         ("text-align", "center"),
@@ -2700,8 +2749,8 @@ elif selected_page == "🧭 Bảng Tour":
                 status_col_display, width="medium"
             )
         if remain_col_display is not None:
-            tour_column_config[remain_col_display] = st.column_config.NumberColumn(
-                remain_col_display, width="small", format="%d"
+            tour_column_config[remain_col_display] = st.column_config.TextColumn(
+                remain_col_display, width="small"
             )
 
         st.dataframe(
@@ -3225,7 +3274,6 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             height="content",
             hide_index=True
         )
-        st.caption("Ô nền đỏ = đã chạm hạn mức nghỉ của ngày đó (ngày thường tối đa 5 người, cuối tuần tối đa 3; Nghỉ phát sinh tối đa 2 người và không áp dụng cuối tuần).")
     else:
         st.info("Không có dữ liệu báo nghỉ trong khoảng thời gian đã chọn ở cả hai nguồn.")
 

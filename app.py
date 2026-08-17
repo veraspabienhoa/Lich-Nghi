@@ -559,6 +559,61 @@ def gspread_update_range(sheet, range_name, values, **kwargs):
         return sheet.update(values, range_name, **kwargs)
     return sheet.update(range_name, values, **kwargs)
 
+
+def _is_google_sheets_quota_error(exc):
+    """Nhận diện lỗi quota/rate-limit của Google Sheets API."""
+    msg = str(exc).lower()
+    return (
+        ('429' in msg or 'too many requests' in msg)
+        and ('quota' in msg or 'rate' in msg or 'read requests' in msg or 'write requests' in msg)
+    )
+
+
+def _gs_call_with_backoff(func, *args, retries=5, **kwargs):
+    """
+    Gọi Google Sheets API với exponential backoff khi gặp 429.
+    Mục tiêu chính vẫn là GIẢM số request; retry chỉ là lớp bảo vệ khi quota đang tạm đầy.
+    """
+    last_exc = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if not _is_google_sheets_quota_error(exc) or attempt >= retries - 1:
+                raise
+            # 2s -> 4s -> 8s -> 16s; chỉ dùng khi thật sự gặp 429.
+            time.sleep(min(2 ** (attempt + 1), 16))
+    if last_exc is not None:
+        raise last_exc
+
+
+def _clear_payroll_config_cache():
+    """Chỉ xóa cache cấu hình lương, không xóa toàn bộ cache của ứng dụng."""
+    try:
+        _load_payroll_config_rows_cached.clear()
+    except Exception:
+        pass
+
+
+def _clear_dynamic_data_caches():
+    """
+    Xóa đúng các cache dữ liệu nghiệp vụ có thể vừa thay đổi.
+    Tuyệt đối không dùng st.cache_data.clear() vì nó làm mất mọi cache và gây bão request Google Sheets.
+    """
+    for fn_name in (
+        'load_credentials',
+        'load_backup_sheet_data',
+        'load_secondary_leave_sheet_data',
+        'load_loai_nghi_from_gsheet',
+    ):
+        try:
+            fn = globals().get(fn_name)
+            if fn is not None and hasattr(fn, 'clear'):
+                fn.clear()
+        except Exception:
+            pass
+
 # --- ĐỒNG BỘ EXCEL SANG GOOGLE SHEETS (CHỈ THÊM MỚI) ---
 def admin_sync_excel_to_gsheet():
     try:
@@ -596,7 +651,7 @@ def admin_sync_excel_to_gsheet():
         
         # Tải dữ liệu hiện tại trên GSheet
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        gsheet_data = sheet_dp.get_all_values()
+        gsheet_data = _gs_call_with_backoff(sheet_dp.get_all_values)
         
         if len(gsheet_data) > 1:
             df_gsheet = pd.DataFrame(gsheet_data[1:], columns=gsheet_data[0])
@@ -615,7 +670,7 @@ def admin_sync_excel_to_gsheet():
         values_to_append = new_rows_df.values.tolist()
         sheet_dp.append_rows(values_to_append, value_input_option='USER_ENTERED')
         
-        st.cache_data.clear()
+        _clear_dynamic_data_caches()
         return True, f"Đã thêm mới {len(values_to_append)} dòng dữ liệu từ Excel lên Sheet (không ghi đè)!"
     except Exception as e:
         return False, f"Lỗi đồng bộ: {e}"
@@ -635,13 +690,14 @@ def admin_sync_gsheet_to_excel(df_gsheet, df_excel_goc):
     return df_excel_merged, True
 
 # --- HÀM TẢI MẬT KHẨU, PHÂN QUYỀN VÀ TRẠNG THÁI ĐĂNG NHẬP ---
+@st.cache_resource(show_spinner=False)
 def ensure_credential_control_columns():
     """Tạo các cột điều khiển nếu Sheet mật khẩu cũ chưa có."""
     try:
         client = get_gspread_client()
         if not client: return
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-        header = sheet.row_values(1)
+        header = _gs_call_with_backoff(sheet.row_values, 1)
         wanted = ["Khóa đăng nhập", "Remember Token Hash", "Remember Token Expiry"]
         # Sau khi chèn J/K: R=Khóa, S=Token Hash, T=Token Expiry
         if len(header) < 20 or header[17:20] != wanted:
@@ -649,13 +705,13 @@ def ensure_credential_control_columns():
     except Exception:
         pass
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=120, show_spinner=False)
 def load_credentials():
     try:
         client = get_gspread_client()
         if client:
             sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-            rows = sheet.get_all_values()
+            rows = _gs_call_with_backoff(sheet.get_all_values)
             if len(rows) > 1:
                 data_list = []
                 for idx, row in enumerate(rows[1:], start=2):
@@ -712,7 +768,7 @@ def set_accounts_login_lock(usernames, locked=True):
         client = get_gspread_client()
         if not client: return False, "Chưa cấu hình quyền kết nối."
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-        values = sheet.get_all_values()
+        values = _gs_call_with_backoff(sheet.get_all_values)
         targets = {normalize_login_name(x) for x in usernames}
         changed = 0
         for r_idx, row in enumerate(values[1:], start=2):
@@ -722,7 +778,7 @@ def set_accounts_login_lock(usernames, locked=True):
                     sheet.update_cell(r_idx, 19, '')
                     sheet.update_cell(r_idx, 20, '')
                 changed += 1
-        st.cache_data.clear()
+        _clear_dynamic_data_caches()
         return True, f"Đã {'khóa' if locked else 'mở khóa'} {changed} tài khoản."
     except Exception as e:
         return False, f"Lỗi cập nhật khóa đăng nhập: {e}"
@@ -733,7 +789,7 @@ def create_remember_token(username, days=None):
         client = get_gspread_client()
         if not client: return None
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-        values = sheet.get_all_values()
+        values = _gs_call_with_backoff(sheet.get_all_values)
         target = normalize_login_name(username)
         for r_idx, row in enumerate(values[1:], start=2):
             if len(row) > 1 and normalize_login_name(row[1]) == target:
@@ -742,7 +798,7 @@ def create_remember_token(username, days=None):
                 sheet.update_cell(r_idx, 19, token_hash)
                 # Không đặt ngày hết hạn: token chỉ bị xóa khi Đăng xuất hoặc tài khoản bị khóa.
                 sheet.update_cell(r_idx, 20, '')
-                st.cache_data.clear()
+                _clear_dynamic_data_caches()
                 return token
     except Exception:
         pass
@@ -753,14 +809,14 @@ def revoke_remember_token(username):
         client = get_gspread_client()
         if not client: return
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-        values = sheet.get_all_values()
+        values = _gs_call_with_backoff(sheet.get_all_values)
         target = normalize_login_name(username)
         for r_idx, row in enumerate(values[1:], start=2):
             if len(row) > 1 and normalize_login_name(row[1]) == target:
                 sheet.update_cell(r_idx, 19, '')
                 sheet.update_cell(r_idx, 20, '')
                 break
-        st.cache_data.clear()
+        _clear_dynamic_data_caches()
     except Exception:
         pass
 
@@ -785,7 +841,7 @@ def update_user_profile(username, new_pass, fullname, dob, phone, email, address
         if not client: return False, "Chưa cấu hình quyền kết nối."
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
         # Tìm không phân biệt dấu / HOA thường để đồng nhất với đăng nhập.
-        values = sheet.get_all_values()
+        values = _gs_call_with_backoff(sheet.get_all_values)
         target = normalize_login_name(username)
         row_idx = None
         for i, row in enumerate(values[1:], start=2):
@@ -802,7 +858,7 @@ def update_user_profile(username, new_pass, fullname, dob, phone, email, address
             # Hai cột mới được chèn giữa I và J.
             sheet.update_cell(row_idx, 10, f"'{bank_account}" if str(bank_account).strip() else "")
             sheet.update_cell(row_idx, 11, str(bank_name))
-            st.cache_data.clear()
+            _clear_dynamic_data_caches()
             return True, "Cập nhật hồ sơ thành công!"
         return False, "Không tìm thấy tài khoản."
     except Exception as e:
@@ -814,7 +870,7 @@ def batch_update_shift_schedule(edited_df):
         client = get_gspread_client()
         if not client: return False, "Chưa cấu hình quyền kết nối."
         sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-        all_vals = sheet.get_all_values()
+        all_vals = _gs_call_with_backoff(sheet.get_all_values)
         
         shift_map = {}
         for _, r in edited_df.iterrows():
@@ -839,19 +895,19 @@ def batch_update_shift_schedule(edited_df):
         try: sheet.update('A1', all_vals)
         except: sheet.update(all_vals) 
             
-        st.cache_data.clear()
+        _clear_dynamic_data_caches()
         return True, "Đã lưu đồng loạt cấu hình Ca làm việc thành công!"
     except Exception as e:
         return False, f"Lỗi cập nhật: {e}"
 
 # --- TẢI DỮ LIỆU TỪ GOOGLE SHEET DỰ PHÒNG ---
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=30, show_spinner=False)
 def load_backup_sheet_data():
     try:
         client = get_gspread_client()
         if client:
             sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-            rows = sheet.get_all_values()
+            rows = _gs_call_with_backoff(sheet.get_all_values)
             if len(rows) > 1:
                 df_bk = pd.DataFrame(rows[1:], columns=rows[0])
                 if 'Loại nghỉ' in df_bk.columns:
@@ -866,7 +922,7 @@ def load_backup_sheet_data():
         pass
     return pd.DataFrame(columns=["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"])
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=30, show_spinner=False)
 def load_secondary_leave_sheet_data():
     """Đọc Sheet1 của Google Sheet thứ hai, chuẩn hóa về đúng A:J của lịch nghỉ."""
     expected = [
@@ -878,7 +934,7 @@ def load_secondary_leave_sheet_data():
         if not client:
             return pd.DataFrame(columns=expected)
         sheet = client.open_by_key(SHEET_LICH_NGHI_2_ID).get_worksheet(0)
-        values = sheet.get('A:J')
+        values = _gs_call_with_backoff(sheet.get, 'A:J')
         if not values or len(values) < 2:
             return pd.DataFrame(columns=expected)
 
@@ -895,13 +951,13 @@ def load_secondary_leave_sheet_data():
     except Exception:
         return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=120, show_spinner=False)
 def load_loai_nghi_from_gsheet():
     try:
         client = get_gspread_client()
         if client:
             sheet = client.open_by_key(SHEET_DU_PHONG_ID).worksheet("LoaiNghi")
-            rows = sheet.get_all_values()
+            rows = _gs_call_with_backoff(sheet.get_all_values)
             if len(rows) > 1:
                 return pd.DataFrame(rows[1:], columns=rows[0])
     except Exception:
@@ -911,7 +967,7 @@ def load_loai_nghi_from_gsheet():
 # --- GHI VÀ XÓA LỊCH ---
 def _next_data_row_a_to_j(sheet):
     """Tìm dòng kế tiếp sau last row thực tế trong vùng A:J."""
-    values = sheet.get('A:J')
+    values = _gs_call_with_backoff(sheet.get, 'A:J')
     last_non_empty = 0
     for idx, row in enumerate(values, start=1):
         if any(str(v).strip() != "" for v in row[:10]):
@@ -921,7 +977,7 @@ def _next_data_row_a_to_j(sheet):
 def _live_sheet_to_leave_df(sheet):
     """Đọc trực tiếp A:J để kiểm tra trùng/thứ tự ngay trước khi ghi."""
     try:
-        values = sheet.get('A:J')
+        values = _gs_call_with_backoff(sheet.get, 'A:J')
         if not values or len(values) < 2:
             return pd.DataFrame(columns=[
                 "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
@@ -1059,7 +1115,7 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         target_row = _next_data_row_a_to_j(sheet_dp)
         gspread_update_range(sheet_dp, f"A{target_row}:J{target_row}", [row_values], value_input_option='USER_ENTERED')
 
-        st.cache_data.clear()
+        _clear_dynamic_data_caches()
         if ordinal_note:
             extra = max(0, save_penalty - float(phat_vi_pham or 0))
             return True, f"{ordinal_note}. Phạt lũy tiến cộng thêm {extra:,.0f} VNĐ; tổng phạt {save_penalty:,.0f} VNĐ."
@@ -1098,7 +1154,7 @@ def delete_backup_row(row_index_1_based, updated_by=None):
         if affected_groups:
             rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor)
 
-        st.cache_data.clear()
+        _clear_dynamic_data_caches()
         if rebalanced:
             return True, f"Đã xóa lịch nghỉ và tự xếp lại thứ tự/phạt cho {rebalanced} bản ghi còn lại."
         return True, "Đã xóa lịch nghỉ thành công!"
@@ -1108,7 +1164,7 @@ def delete_backup_row(row_index_1_based, updated_by=None):
 
 def _find_schedule_row_index(sheet, original_row):
     """Tìm dòng Google Sheet theo Ngày + Nhân viên + Lý do (bộ ba đang được hệ thống chặn trùng)."""
-    values = sheet.get_all_values()
+    values = _gs_call_with_backoff(sheet.get_all_values)
     if len(values) < 2:
         return None
     headers = values[0]
@@ -1388,7 +1444,7 @@ def _read_leave_sheet_with_source(sheet, source_id):
         "Giờ cập nhật", "Người cập nhật"
     ]
     try:
-        values = sheet.get('A:J')
+        values = _gs_call_with_backoff(sheet.get, 'A:J')
         rows = []
         if not values or len(values) < 2:
             return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
@@ -1559,7 +1615,7 @@ def rebalance_progressive_penalty_groups(client, affected_groups, updated_by):
                 updated_physical_rows += 1
 
     if updated_physical_rows:
-        st.cache_data.clear()
+        _clear_dynamic_data_caches()
     return updated_physical_rows
 
 
@@ -1628,7 +1684,7 @@ def update_schedule_record(original_row, edited_row, updated_by):
 
         rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, updated_by)
 
-        st.cache_data.clear()
+        _clear_dynamic_data_caches()
         if rebalanced:
             return True, f"Đã cập nhật lịch nghỉ và tự xếp lại thứ tự/phạt lũy tiến cho {rebalanced} bản ghi trong nhóm bị ảnh hưởng."
         return True, "Đã cập nhật lịch nghỉ thành công."
@@ -1666,7 +1722,7 @@ def delete_schedule_records(original_rows, updated_by=None):
 
         rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor) if affected_groups else 0
 
-        st.cache_data.clear()
+        _clear_dynamic_data_caches()
         if rebalanced:
             return True, f"Đã xóa {deleted} dòng và tự xếp lại thứ tự/phạt cho {rebalanced} bản ghi còn lại."
         return True, f"Đã xóa {deleted} dòng lịch nghỉ từ đúng Google Sheet nguồn."
@@ -2260,8 +2316,12 @@ def _get_or_create_worksheet(spreadsheet, title, rows=1000, cols=30):
         return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
 
 
+@st.cache_resource(show_spinner=False)
 def _ensure_payroll_storage():
-    """Tạo sheet lưu lịch sử lương và sheet cấu hình quyền nếu chưa có."""
+    """
+    Tạo/lấy sheet lưu lương + cấu hình CHỈ MỘT LẦN cho mỗi tiến trình Streamlit.
+    V27 gọi hàm này lặp lại trong cùng một rerun, làm phát sinh nhiều request metadata/read.
+    """
     client = get_gspread_client()
     if not client:
         return None, None, "Chưa cấu hình quyền kết nối Google Sheets."
@@ -2269,13 +2329,13 @@ def _ensure_payroll_storage():
         ss = client.open_by_key(SHEET_MAT_KHAU_ID)
         ws_pay = _get_or_create_worksheet(ss, PAYROLL_STORAGE_WORKSHEET, rows=3000, cols=30)
         ws_cfg = _get_or_create_worksheet(ss, PAYROLL_CONFIG_WORKSHEET, rows=30, cols=5)
-        if not ws_pay.row_values(1):
-            gspread_update_range(ws_pay, f"A1:X1", [PAYROLL_HISTORY_HEADERS])
-        else:
-            header = ws_pay.row_values(1)
-            if header[:len(PAYROLL_HISTORY_HEADERS)] != PAYROLL_HISTORY_HEADERS:
-                gspread_update_range(ws_pay, f"A1:X1", [PAYROLL_HISTORY_HEADERS])
-        if not ws_cfg.row_values(1):
+
+        pay_header = _gs_call_with_backoff(ws_pay.row_values, 1)
+        if not pay_header or pay_header[:len(PAYROLL_HISTORY_HEADERS)] != PAYROLL_HISTORY_HEADERS:
+            gspread_update_range(ws_pay, "A1:X1", [PAYROLL_HISTORY_HEADERS])
+
+        cfg_vals = _gs_call_with_backoff(ws_cfg.get, 'A:B')
+        if not cfg_vals:
             gspread_update_range(ws_cfg, "A1:B5", [
                 ["Key", "Value"],
                 ["letan_payroll_access", "0"],
@@ -2284,34 +2344,61 @@ def _ensure_payroll_storage():
                 ["employee_payroll_overrides_json", "{}"],
             ])
         else:
-            # Bổ sung cấu hình mặc định nếu file hệ thống đã tồn tại từ bản cũ.
-            cfg_vals = ws_cfg.get('A:B')
+            # Bổ sung key thiếu chỉ ở lần khởi tạo tài nguyên, không kiểm tra lại ở mỗi rerun.
             existing_keys = {str(r[0]).strip() for r in cfg_vals[1:] if r}
-            next_row = max(2, len(cfg_vals) + 1)
             additions = []
             if "default_living_expense" not in existing_keys:
                 additions.append(["default_living_expense", "150000"])
             if "default_locker_support" not in existing_keys:
                 additions.append(["default_locker_support", "80000"])
             if "employee_payroll_overrides_json" not in existing_keys:
-                additions.append(["employee_payroll_overrides_json", "{}"] )
+                additions.append(["employee_payroll_overrides_json", "{}"])
+            if "letan_payroll_access" not in existing_keys:
+                additions.append(["letan_payroll_access", "0"])
             if additions:
+                next_row = max(2, len(cfg_vals) + 1)
                 gspread_update_range(ws_cfg, f"A{next_row}:B{next_row + len(additions) - 1}", additions)
         return ws_pay, ws_cfg, ""
     except Exception as e:
         return None, None, f"Lỗi khởi tạo vùng lưu bảng lương: {e}"
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_payroll_config_rows_cached():
+    """Một lần đọc A:B dùng chung cho quyền Lễ tân, mức mặc định và mức riêng NV."""
+    _, ws_cfg, err = _ensure_payroll_storage()
+    if err or ws_cfg is None:
+        return [], err or "Không mở được sheet cấu hình."
+    try:
+        vals = _gs_call_with_backoff(ws_cfg.get, 'A:B')
+        return vals or [], ""
+    except Exception as e:
+        return [], f"Lỗi đọc cấu hình lương: {e}"
+
+
+def _payroll_config_dict():
+    vals, err = _load_payroll_config_rows_cached()
+    cfg = {}
+    if vals:
+        for row in vals[1:]:
+            if row:
+                cfg[str(row[0]).strip()] = row[1] if len(row) > 1 else ''
+    return cfg, vals, err
+
+
+def _payroll_config_key_rows(vals):
+    rows = {}
+    for idx, row in enumerate((vals or [])[1:], start=2):
+        if row:
+            rows[str(row[0]).strip()] = idx
+    return rows
+
+
 def get_payroll_letan_enabled():
     try:
-        _, ws_cfg, err = _ensure_payroll_storage()
-        if err or ws_cfg is None:
-            return False
-        vals = ws_cfg.get('A:B')
-        for row in vals[1:]:
-            if len(row) >= 2 and str(row[0]).strip() == "letan_payroll_access":
-                return str(row[1]).strip().lower() in {"1", "true", "yes", "on", "mở", "mo"}
-        return False
+        cfg, _, _ = _payroll_config_dict()
+        value = str(cfg.get('letan_payroll_access', '0')).strip().lower()
+        return value in {"1", "true", "yes", "on", "mở", "mo"}
     except Exception:
         return False
 
@@ -2321,81 +2408,65 @@ def set_payroll_letan_enabled(enabled):
         _, ws_cfg, err = _ensure_payroll_storage()
         if err or ws_cfg is None:
             return False, err or "Không mở được sheet cấu hình."
-        vals = ws_cfg.get('A:B')
-        target_row = None
-        for idx, row in enumerate(vals[1:], start=2):
-            if len(row) >= 1 and str(row[0]).strip() == "letan_payroll_access":
-                target_row = idx
-                break
-        if target_row is None:
-            target_row = max(2, len(vals) + 1)
-            gspread_update_range(ws_cfg, f"A{target_row}:B{target_row}", [["letan_payroll_access", "1" if enabled else "0"]])
-        else:
-            ws_cfg.update_cell(target_row, 2, "1" if enabled else "0")
+        _, vals, read_err = _payroll_config_dict()
+        if read_err:
+            return False, read_err
+        key_rows = _payroll_config_key_rows(vals)
+        target_row = key_rows.get('letan_payroll_access', max(2, len(vals) + 1))
+        gspread_update_range(ws_cfg, f"A{target_row}:B{target_row}", [["letan_payroll_access", "1" if enabled else "0"]])
+        _clear_payroll_config_cache()
         return True, "Đã mở quyền xem Bảng lương cho Lễ tân." if enabled else "Đã đóng quyền xem Bảng lương của Lễ tân."
     except Exception as e:
         return False, f"Lỗi cập nhật quyền Lễ tân: {e}"
 
 
 def get_payroll_default_amounts():
-    """Đọc hai mức mặc định dùng cho mọi nhân viên/kỳ lương."""
+    """Đọc hai mức mặc định từ snapshot cấu hình đã cache."""
     living, locker = 150000.0, 80000.0
     try:
-        _, ws_cfg, err = _ensure_payroll_storage()
-        if not err and ws_cfg is not None:
-            vals = ws_cfg.get('A:B')
-            cfg = {str(r[0]).strip(): (r[1] if len(r) > 1 else '') for r in vals[1:] if r}
-            living = _money_to_float(cfg.get('default_living_expense', living)) or living
-            locker = _money_to_float(cfg.get('default_locker_support', locker)) or locker
+        cfg, _, _ = _payroll_config_dict()
+        living = _money_to_float(cfg.get('default_living_expense', living)) or living
+        locker = _money_to_float(cfg.get('default_locker_support', locker)) or locker
     except Exception:
         pass
     return float(living), float(locker)
 
 
 def set_payroll_default_amounts(living_expense, locker_support):
-    """Lưu mức mặc định để áp dụng cho các kỳ lương tiếp theo."""
     try:
         _, ws_cfg, err = _ensure_payroll_storage()
         if err or ws_cfg is None:
             return False, err or "Không mở được sheet cấu hình."
-        vals = ws_cfg.get('A:B')
-        key_rows = {}
-        for idx, row in enumerate(vals[1:], start=2):
-            if row:
-                key_rows[str(row[0]).strip()] = idx
+        _, vals, read_err = _payroll_config_dict()
+        if read_err:
+            return False, read_err
+        key_rows = _payroll_config_key_rows(vals)
+        next_row = max(2, len(vals) + 1)
+        updates = []
         for key, value in [
             ('default_living_expense', int(round(_money_to_float(living_expense)))),
             ('default_locker_support', int(round(_money_to_float(locker_support)))),
         ]:
             row_idx = key_rows.get(key)
             if row_idx is None:
-                row_idx = max(2, len(vals) + 1)
-                vals.append([key, str(value)])
-                gspread_update_range(ws_cfg, f"A{row_idx}:B{row_idx}", [[key, str(value)]])
-            else:
-                ws_cfg.update_cell(row_idx, 2, str(value))
+                row_idx = next_row
+                next_row += 1
+            updates.append((row_idx, key, str(value)))
+        # Hai write nhỏ, nhưng KHÔNG phát sinh thêm read nào.
+        for row_idx, key, value in updates:
+            gspread_update_range(ws_cfg, f"A{row_idx}:B{row_idx}", [[key, value]])
+        _clear_payroll_config_cache()
         return True, "Đã lưu mức Chi phí sinh hoạt và Hỗ trợ Locker mặc định."
     except Exception as e:
         return False, f"Lỗi lưu mức mặc định: {e}"
 
 
 def get_payroll_employee_overrides():
-    """
-    Đọc mức Chi phí sinh hoạt / Hỗ trợ Locker riêng theo nhân viên.
-    Dữ liệu được lưu gọn trong 1 ô JSON ở sheet CauHinhLuong để không phụ thuộc số dòng nhân sự.
-    Cấu trúc trả về: {normalized_username: {"name": ..., "living": ..., "locker": ...}}
-    """
+    """Đọc mức riêng từ cùng snapshot cấu hình cache, không gọi Sheets API thêm lần nữa."""
     try:
-        _, ws_cfg, err = _ensure_payroll_storage()
-        if err or ws_cfg is None:
-            return {}
-        vals = ws_cfg.get('A:B')
-        raw = "{}"
-        for row in vals[1:]:
-            if row and str(row[0]).strip() == "employee_payroll_overrides_json":
-                raw = row[1] if len(row) > 1 else "{}"
-                break
-        data = json.loads(str(raw or "{}"))
+        cfg, _, _ = _payroll_config_dict()
+        raw = cfg.get('employee_payroll_overrides_json', '{}') or '{}'
+        data = json.loads(str(raw))
         if not isinstance(data, dict):
             return {}
         cleaned = {}
@@ -2420,24 +2491,20 @@ def _write_payroll_employee_overrides(overrides):
         _, ws_cfg, err = _ensure_payroll_storage()
         if err or ws_cfg is None:
             return False, err or "Không mở được sheet cấu hình."
-        vals = ws_cfg.get('A:B')
-        target_row = None
-        for idx, row in enumerate(vals[1:], start=2):
-            if row and str(row[0]).strip() == "employee_payroll_overrides_json":
-                target_row = idx
-                break
-        if target_row is None:
-            target_row = max(2, len(vals) + 1)
-            gspread_update_range(ws_cfg, f"A{target_row}:B{target_row}", [["employee_payroll_overrides_json", "{}"]])
+        _, vals, read_err = _payroll_config_dict()
+        if read_err:
+            return False, read_err
+        key_rows = _payroll_config_key_rows(vals)
+        target_row = key_rows.get('employee_payroll_overrides_json', max(2, len(vals) + 1))
         payload = json.dumps(overrides or {}, ensure_ascii=False, separators=(",", ":"))
-        ws_cfg.update_cell(target_row, 2, payload)
+        gspread_update_range(ws_cfg, f"A{target_row}:B{target_row}", [["employee_payroll_overrides_json", payload]])
+        _clear_payroll_config_cache()
         return True, "Đã lưu mức riêng theo nhân viên."
     except Exception as e:
         return False, f"Lỗi lưu mức riêng theo nhân viên: {e}"
 
 
 def set_payroll_employee_overrides(employee_names, living_expense, locker_support):
-    """Áp dụng cùng một cặp mức riêng cho 1 hoặc nhiều nhân viên được chọn."""
     names = [str(x).strip() for x in (employee_names or []) if str(x).strip()]
     if not names:
         return False, "Vui lòng chọn ít nhất 1 nhân viên."
@@ -2454,7 +2521,6 @@ def set_payroll_employee_overrides(employee_names, living_expense, locker_suppor
 
 
 def clear_payroll_employee_overrides(employee_names):
-    """Xóa mức riêng để nhân viên quay về dùng mức mặc định chung."""
     names = [str(x).strip() for x in (employee_names or []) if str(x).strip()]
     if not names:
         return False, "Vui lòng chọn ít nhất 1 nhân viên."
@@ -2557,7 +2623,7 @@ def load_payroll_source_from_google_sheet():
         if not client:
             return pd.DataFrame(), "Chưa cấu hình quyền Google Sheets."
         ws = client.open_by_key(PAYROLL_SOURCE_SHEET_ID).worksheet(PAYROLL_SOURCE_WORKSHEET)
-        values = ws.get_all_values()
+        values = _gs_call_with_backoff(ws.get_all_values)
         if not values:
             return pd.DataFrame(), "Sheet dữ liệu lương đang trống."
         raw = pd.DataFrame(values)
@@ -2719,6 +2785,10 @@ def save_payroll_snapshot(payroll_df, start_date, end_date, source_label, saved_
             rows.append(row)
         if rows:
             ws_pay.append_rows(rows, value_input_option='USER_ENTERED')
+        try:
+            load_payroll_history.clear()
+        except Exception:
+            pass
         return True, f"Đã lưu bảng lương {len(rows)} nhân viên vào hệ thống.", batch_id
     except Exception as e:
         return False, f"Lỗi lưu bảng lương: {e}", ""
@@ -2735,7 +2805,7 @@ def overwrite_payroll_snapshot(batch_id, payroll_df, start_date, end_date, sourc
         if not batch_id:
             return False, "Thiếu Mã bản lưu cần cập nhật."
 
-        values = ws_pay.get_all_values()
+        values = _gs_call_with_backoff(ws_pay.get_all_values)
         matched_rows = []
         for row_idx, row in enumerate(values[1:], start=2):
             if row and str(row[0]).strip() == batch_id:
@@ -2767,19 +2837,22 @@ def overwrite_payroll_snapshot(batch_id, payroll_df, start_date, end_date, sourc
 
         if rows:
             ws_pay.append_rows(rows, value_input_option='USER_ENTERED')
-        st.cache_data.clear()
+        try:
+            load_payroll_history.clear()
+        except Exception:
+            pass
         return True, f"Đã ghi đè cập nhật bản lương {batch_id} cho {len(rows)} nhân viên."
     except Exception as e:
         return False, f"Lỗi ghi đè bảng lương: {e}"
 
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_payroll_history():
     try:
         ws_pay, _, err = _ensure_payroll_storage()
         if err or ws_pay is None:
             return pd.DataFrame(columns=PAYROLL_HISTORY_HEADERS)
-        values = ws_pay.get_all_values()
+        values = _gs_call_with_backoff(ws_pay.get_all_values)
         if len(values) < 2:
             return pd.DataFrame(columns=PAYROLL_HISTORY_HEADERS)
         header = values[0][:len(PAYROLL_HISTORY_HEADERS)]
@@ -3500,7 +3573,7 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
                         new_bank_account, new_bank_name, "0", "0", "0", "", "", "", "", "", ""
                     ]
                         sheet_mk.append_row(row_data)
-                        st.cache_data.clear()
+                        _clear_dynamic_data_caches()
                         st.success(f"Đã thêm thành công: {new_usr}")
                 except Exception as e:
                     st.error(f"Lỗi: {e}")
@@ -3523,7 +3596,7 @@ elif selected_page == "✏️ Sửa / Xóa nhân viên" and is_admin_letan:
                     cells = sheet_mk.findall(del_usr, in_column=2)
                     if cells:
                         sheet_mk.delete_rows(cells[0].row)
-                        st.cache_data.clear()
+                        _clear_dynamic_data_caches()
                         st.success(f"Đã xóa nhân viên: {del_usr}")
                         st.rerun()
                 except Exception as e:
@@ -4588,7 +4661,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                                     for note in save_success_notes:
                                         if "Người Thứ" in note:
                                             st.info(note)
-                                    st.cache_data.clear()
+                                    _clear_dynamic_data_caches()
 
 
 
@@ -4643,7 +4716,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
     with col_refresh:
         st.write("") 
         if st.button("🔄 Cập Nhật Dữ Liệu", use_container_width=True):
-            st.cache_data.clear()
+            _clear_dynamic_data_caches()
             st.rerun()
 
     # Lọc dữ liệu: phần thống kê/Chi tiết danh sách dùng ĐÚNG 2 Google Sheet:
@@ -5025,7 +5098,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                         for ok, msg in messages:
                             (st.success if ok else st.error)(msg)
                         if can_edit_all:
-                            st.cache_data.clear()
+                            _clear_dynamic_data_caches()
                             st.rerun()
 
             with c_delete:
@@ -5144,6 +5217,6 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
                         success_del, msg_del = delete_backup_row(real_i + 2, st.session_state.current_user)
                         if success_del:
                             st.success(f"✅ {msg_del}")
-                            st.cache_data.clear()
+                            _clear_dynamic_data_caches()
                             st.rerun()
                         else: st.error(f"❌ {msg_del}")

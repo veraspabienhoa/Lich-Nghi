@@ -9637,11 +9637,8 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                             for err in error_messages:
                                 st.error(err)
 
-    # ĐỊNH DẠNG MÀU ĐỎ KHÔNG PHÉP CHO DATAFRAME
-    def highlight_khong_phep(val):
-        if isinstance(val, str) and "không phép" in val.lower():
-            return 'color: red; font-weight: bold;'
-        return ''
+    # V67: Không áp dụng formatting condition riêng cho các loại nghỉ có chữ "Không phép".
+    # Các dòng/ô này hiển thị theo đúng định dạng chung của bảng, không đổi màu chữ/nền/bold.
 
     tab1, tab2, tab3, tab4 = st.tabs(["Tất cả danh sách", "Danh sách Nghỉ CÓ phép", "Danh sách Nghỉ PHÁT SINH", "Danh sách Nghỉ KHÔNG phép"])
 
@@ -9850,7 +9847,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             # Nhân viên: chỉ xem, không có checkbox sửa/xóa và không có Export Excel.
             export_view_df, _ = apply_table_layout_df(export_df.copy(), "leave_detail")
             st.dataframe(
-                apply_table_visual_styler(export_view_df.style.map(highlight_khong_phep), "leave_detail", list(export_view_df.columns)),
+                apply_table_visual_styler(export_view_df, "leave_detail", list(export_view_df.columns)),
                 width="stretch",
                 height="content",
                 hide_index=True,
@@ -9865,7 +9862,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             co_display = format_display_df(co_phep_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
             co_display, _ = apply_table_layout_df(co_display, "leave_detail")
             st.dataframe(
-                apply_table_visual_styler(co_display.style.map(highlight_khong_phep), "leave_detail", list(co_display.columns)),
+                apply_table_visual_styler(co_display, "leave_detail", list(co_display.columns)),
                 width="stretch", height="content", hide_index=True, row_height=layout_row_height("leave_detail"),
                 column_config=table_layout_column_config("leave_detail", list(co_display.columns))
             )
@@ -9877,7 +9874,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             ps_display = format_display_df(phat_sinh_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
             ps_display, _ = apply_table_layout_df(ps_display, "leave_detail")
             st.dataframe(
-                apply_table_visual_styler(ps_display.style.map(highlight_khong_phep), "leave_detail", list(ps_display.columns)),
+                apply_table_visual_styler(ps_display, "leave_detail", list(ps_display.columns)),
                 width="stretch", height="content", hide_index=True, row_height=layout_row_height("leave_detail"),
                 column_config=table_layout_column_config("leave_detail", list(ps_display.columns))
             )
@@ -9889,7 +9886,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             kp_display = format_display_df(khong_phep_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
             kp_display, _ = apply_table_layout_df(kp_display, "leave_detail")
             st.dataframe(
-                apply_table_visual_styler(kp_display.style.map(highlight_khong_phep), "leave_detail", list(kp_display.columns)),
+                apply_table_visual_styler(kp_display, "leave_detail", list(kp_display.columns)),
                 width="stretch", height="content", hide_index=True, row_height=layout_row_height("leave_detail"),
                 column_config=table_layout_column_config("leave_detail", list(kp_display.columns))
             )
@@ -9982,6 +9979,8 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             df_view_display = df_view_display.drop(columns=["Phạt vi phạm"])
 
         df_view_display = format_display_df(df_view_display)
+        # V67: Quản lý lịch nghỉ không tô màu/đổi màu chữ theo Lý do nghỉ chứa "Không phép".
+        # Chỉ áp dụng định dạng chung đã cấu hình cho bảng.
         df_view_display, _ = apply_table_layout_df(df_view_display, "leave_manage")
         st.dataframe(
             apply_table_visual_styler(df_view_display, "leave_manage", list(df_view_display.columns)),

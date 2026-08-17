@@ -4709,11 +4709,12 @@ def defer_violation_to_next_period(employee_name, amount, start_date, end_date, 
         if existing_row and not _is_open_violation_debt_status(existing_status):
             return False, "Khoản Vi phạm đã tạm hoãn của kỳ này đã được khấu trừ ở kỳ sau, không thể mở lại từ kỳ cũ."
         total_amount = existing_amount + amount
+        _defer_note_text = f"Trừ kỳ lương kế tiếp: {total_amount:,.0f} đ".replace(',', '.')
         row_values = [
             (existing_row - 1 if existing_row else max(1, len(vals))),
             employee_name,
             int(round(total_amount)),
-            VIOLATION_DEBT_CONTENT,
+            _defer_note_text,
             "Tạm hoãn vi phạm",
             start_date.strftime('%d/%m/%Y'),
             end_date.strftime('%d/%m/%Y'),
@@ -6999,6 +7000,32 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             money_web_cols = [c for c in payroll_internal_order if c.startswith('Tiền') or c in {'Tích lũy','Chi Phí Sinh Hoạt','Vi phạm kỳ trước','Số tiền thực nhận'}]
             for c in money_web_cols:
                 web_df[c] = web_df[c].apply(lambda v: f"{_money_to_float(v):,.0f}".replace(',', '.'))
+
+            # V53: nếu Admin đã tạm hoãn Vi phạm của kỳ này, ghi chú ngay TRONG ô Vi phạm.
+            # Dùng token rồi thay bằng HTML sau khi pandas escape bảng, để không phải tắt escaping
+            # cho các dữ liệu tên nhân viên lấy từ Google Sheet.
+            _violation_note_tokens = {}
+            try:
+                _, _web_deferred_map, _ = get_violation_debt_state(
+                    current_start, current_end, final_df['Tên Hệ thống'].astype(str).tolist()
+                )
+                if 'Tiền phạt trong tháng' in web_df.columns:
+                    for _row_pos, _row_idx in enumerate(web_df.index):
+                        _emp_name = str(final_df.loc[_row_idx, 'Tên Hệ thống']).strip() if _row_idx in final_df.index else ''
+                        _defer_amt = max(0.0, float(_money_to_float(_web_deferred_map.get(normalize_login_name(_emp_name), 0))))
+                        if _defer_amt <= 0:
+                            continue
+                        _base_violation = str(web_df.at[_row_idx, 'Tiền phạt trong tháng'])
+                        _token = f"__VERA_DEFER_NOTE_{_row_pos}__"
+                        _note_amount = f"{_defer_amt:,.0f}".replace(',', '.')
+                        _violation_note_tokens[_token] = (
+                            f"<div class='payroll-violation-value'>{_base_violation}</div>"
+                            f"<div class='payroll-violation-note'>Trừ kỳ lương kế tiếp: {_note_amount} đ</div>"
+                        )
+                        web_df.at[_row_idx, 'Tiền phạt trong tháng'] = _token
+            except Exception:
+                _violation_note_tokens = {}
+
             # V50: bảng tổng hợp trên website không hiển thị thông tin ngân hàng hoặc Email.
             # V46: ghi nhớ dòng Thực nhận <= 0 trước khi đổi định dạng/đổi tên cột để
             # có thể tô vàng toàn bộ dòng trên bảng Thống kê lương nhân viên.
@@ -7007,6 +7034,9 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             # Chỉ đổi tên cột lúc hiển thị; dữ liệu nội bộ vẫn giữ tên chuẩn để tính toán/lưu lịch sử.
             web_df = web_df.rename(columns={c: PAYROLL_DISPLAY_LABELS.get(c, c) for c in web_df.columns})
             payroll_html = web_df.to_html(index=False, escape=True, classes='vera-payroll-table')
+            # Chỉ mở HTML đối với token do hệ thống tự tạo; mọi dữ liệu Sheet khác vẫn được escape an toàn.
+            for _token, _fragment in _violation_note_tokens.items():
+                payroll_html = payroll_html.replace(_token, _fragment)
 
             # Gắn class cho từng <tr> trong <tbody> theo đúng thứ tự dòng.
             # Không phụ thuộc alternating row color nên dòng <= 0 luôn nổi bật màu vàng.
@@ -7041,6 +7071,8 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 table.vera-payroll-table{{width:100%;table-layout:fixed;border-collapse:collapse;font-size:clamp(8px,.68vw,12px);}}
                 table.vera-payroll-table th{{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 3px;border:1px solid #c9c9c9;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;line-height:1.15!important;vertical-align:middle!important;}}
                 table.vera-payroll-table td{{padding:4px 3px;border:1px solid #dedede;white-space:normal;word-break:break-word;vertical-align:middle;}}
+                table.vera-payroll-table .payroll-violation-value{{line-height:1.05;}}
+                table.vera-payroll-table .payroll-violation-note{{font-size:6px!important;line-height:1.05!important;margin-top:2px;white-space:normal!important;font-weight:400;}}
                 table.vera-payroll-table tbody tr:nth-child(even){{background:#fafafa;}}
                 table.vera-payroll-table tbody tr.payroll-nonpositive td{{background:#FFF2CC!important;}}
                 @media(max-width:800px){{table.vera-payroll-table{{font-size:7px;}}table.vera-payroll-table th,table.vera-payroll-table td{{padding:3px 1px;}}}}

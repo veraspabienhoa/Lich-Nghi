@@ -2218,26 +2218,36 @@ def build_leave_reason_catalog(source_df=None):
 
 
 def get_leave_reason_options(source_df=None, extra_values=None):
-    """Danh sách dropdown Lý do nghỉ, tự lấy từ LoaiNghi và bổ sung giá trị lịch sử đang có."""
+    """Danh sách dropdown Lý do nghỉ luôn chứa ĐÚNG chuỗi hiện có của dữ liệu lịch sử.
+
+    Streamlit SelectboxColumn không chỉ so khớp theo ý nghĩa mà yêu cầu chuỗi trong ô phải
+    khớp CHÍNH XÁC với một option. Vì danh mục LoaiNghi có thể dùng kiểu chữ khác nhau
+    (ví dụ ``Nghỉ KHÔNG phép``) trong khi dữ liệu lịch sử là ``Nghỉ không phép``, nếu chỉ
+    khử trùng theo dạng chuẩn hóa thì ô sẽ bị hiển thị trắng dù dữ liệu vẫn còn nguyên.
+
+    V69 giữ cả biến thể danh mục và biến thể chính xác đang tồn tại trong bảng. Nhờ vậy mọi
+    loại có chữ KHÔNG phép (Nghỉ/Đi trễ/Về sớm, kể cả CUỐI TUẦN) luôn hiện đúng trong editor.
+    """
     catalog = build_leave_reason_catalog(source_df)
-    # Streamlit SelectboxColumn yêu cầu giá trị hiện tại phải khớp CHÍNH XÁC
-    # với một phần tử trong options. Vì vậy luôn làm sạch biểu tượng 🔴 và khoảng trắng
-    # ở cả danh mục LoaiNghi lẫn dữ liệu lịch sử trước khi dựng dropdown.
     options = []
-    seen = set()
-    for item in [v['name'] for v in catalog.values()]:
-        clean = clean_leave_reason_display(item)
-        key = normalize_leave_reason(clean)
-        if clean and key and key not in seen:
+    seen_exact = set()
+
+    def _append_exact(value):
+        clean = clean_leave_reason_display(value)
+        if not clean or clean.casefold() in ['nan', 'none', 'nat', 'loại nghỉ', 'lý do nghỉ']:
+            return
+        # Chỉ bỏ trùng khi chuỗi sau làm sạch thực sự giống HỆT nhau. Không dùng
+        # normalize_leave_reason ở đây vì khác kiểu HOA/thường cũng làm SelectboxColumn
+        # coi là hai giá trị khác nhau.
+        if clean not in seen_exact:
             options.append(clean)
-            seen.add(key)
+            seen_exact.add(clean)
+
+    for item in [v['name'] for v in catalog.values()]:
+        _append_exact(item)
     if extra_values is not None:
         for val in extra_values:
-            clean = clean_leave_reason_display(val)
-            key = normalize_leave_reason(clean)
-            if clean and clean.lower() not in ['nan', 'none', 'nat'] and key not in seen:
-                options.append(clean)
-                seen.add(key)
+            _append_exact(val)
     return options
 
 
@@ -3550,7 +3560,7 @@ def _font_style_css(style_name):
 
 
 def neutralize_khong_phep_rows_styler(data_or_styler, reason_col="Lý do nghỉ"):
-    """V68: Các dòng có Lý do nghỉ chứa 'Không phép' luôn dùng style mặc định của bảng.
+    """V69: Các dòng có Lý do nghỉ chứa 'Không phép' luôn hiển thị rõ bằng màu chữ mặc định tối.
 
     Không tô nền, không đổi màu chữ, không bold/italic/underline. Hàm này được áp dụng
     sau cấu hình hiển thị cột để chắc chắn mọi conditional formatting cũ không còn ảnh hưởng.
@@ -3572,12 +3582,15 @@ def neutralize_khong_phep_rows_styler(data_or_styler, reason_col="Lý do nghỉ"
         reason_key = remove_vietnamese_accents(str(row.get(reason_col, ""))).casefold()
         if "khong phep" not in reason_key:
             return [""] * len(row)
+        # Ép màu chữ tối dễ đọc thay vì ``inherit``. Một số theme/Styler cũ có thể
+        # để màu kế thừa thành trắng hoặc xám quá sáng, khiến người dùng tưởng dữ liệu mất.
         neutral_css = (
             "background-color: transparent !important;"
-            "color: inherit !important;"
+            "color: #262730 !important;"
             "font-weight: normal !important;"
             "font-style: normal !important;"
             "text-decoration: none !important;"
+            "opacity: 1 !important;"
         )
         return [neutral_css] * len(row)
 
@@ -9672,7 +9685,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                             for err in error_messages:
                                 st.error(err)
 
-    # V68: Mọi dòng có Lý do nghỉ chứa "Không phép" phải hiển thị hoàn toàn theo style mặc định:
+    # V69: Mọi dòng có Lý do nghỉ chứa "Không phép" phải luôn hiển thị rõ, không bị style cũ làm trắng:
     # không tô nền, không đổi màu chữ, không bold/italic/underline. Các bảng chỉ xem dùng helper
     # neutralize_khong_phep_rows_styler(); bảng data_editor vốn không áp conditional formatting.
 
@@ -10023,7 +10036,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             df_view_display = df_view_display.drop(columns=["Phạt vi phạm"])
 
         df_view_display = format_display_df(df_view_display)
-        # V68: Quản lý lịch nghỉ: dòng chứa "Không phép" được ép trở về style mặc định của bảng.
+        # V69: Quản lý lịch nghỉ: dòng chứa "Không phép" được ép về nền thường + chữ tối dễ đọc.
         # Không nền riêng, không màu chữ riêng, không bold/italic/underline.
         df_view_display, _ = apply_table_layout_df(df_view_display, "leave_manage")
         st.dataframe(

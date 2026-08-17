@@ -7019,7 +7019,11 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             # V47: Admin có thể chủ động tạm hoãn tiền Vi phạm của kỳ hiện tại.
             # Khoản đã hoãn được lưu vào sheet NoViPham và chỉ bắt đầu trừ từ kỳ kế tiếp.
             if st.session_state.current_role == "admin":
-                with st.expander("⏭️ Tạm hoãn Vi phạm sang kỳ kế tiếp", expanded=False):
+                # V55: giữ section Tạm hoãn Vi phạm luôn mở trong lúc thao tác.
+                # Selectbox có filter_mode="contains" sẽ rerun khi gõ/chọn; nếu expanded=False
+                # thì expander tự đóng sau mỗi rerun. Để expanded=True giúp phần này không bị
+                # ẩn khi Admin đang tìm/chọn nhân viên hoặc nhập số tiền tạm hoãn.
+                with st.expander("⏭️ Tạm hoãn Vi phạm sang kỳ kế tiếp", expanded=True):
                     _leave_for_defer = load_backup_sheet_data()
                     _raw_penalty_map = _period_penalty_by_employee(current_start, current_end, _leave_for_defer, None)
                     _due_debt_map, _deferred_map, _active_debts = get_violation_debt_state(

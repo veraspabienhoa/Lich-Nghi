@@ -713,6 +713,16 @@ PAYROLL_STORAGE_WORKSHEET = "BangLuong"
 PAYROLL_CONFIG_WORKSHEET = "CauHinhLuong"
 UI_LAYOUT_WORKSHEET = "CauHinhCot"
 TICHLUY_WORKSHEET = "TichLuy"
+VIOLATION_DEBT_WORKSHEET = "NoViPham"
+VIOLATION_DEBT_HEADERS = [
+    "STT", "Tên nhân viên", "Số tiền", "Nội dung", "Loại",
+    "Kỳ phát sinh từ", "Kỳ phát sinh đến", "Bắt đầu trừ từ",
+    "Trạng thái", "Mã nguồn", "Ngày cập nhật", "Giờ cập nhật",
+    "Người cập nhật", "Kỳ đã khấu trừ"
+]
+VIOLATION_DEBT_OPEN_STATUS = "Chưa hoàn thành"
+VIOLATION_DEBT_DONE_STATUS = "Đã hoàn thành"
+VIOLATION_DEBT_CONTENT = "Chưa hoàn thành nghĩa vụ Vi phạm"
 # V41: kỳ lương cố định 01-15 / 16-cuối tháng + loại quanly khỏi TichLuy
 TICHLUY_TARGET_DEFAULT = 5000000
 TICHLUY_PERIOD_DEFAULT = 500000
@@ -4184,6 +4194,324 @@ def get_period_penalty_audit(employee_name, start_date, end_date, leave_primary=
         return pd.DataFrame(columns=['Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 'Phạt vi phạm'])
 
 
+
+def _next_official_payroll_period(start_date, end_date):
+    """Trả về kỳ lương chính thức kế tiếp (01-15 hoặc 16-cuối tháng)."""
+    cs, ce = _canonicalize_payroll_period(start_date, end_date)
+    if cs.day == 1:
+        return _official_payroll_period(cs.year, cs.month, 2)
+    if cs.month == 12:
+        return _official_payroll_period(cs.year + 1, 1, 1)
+    return _official_payroll_period(cs.year, cs.month + 1, 1)
+
+
+def _violation_debt_source_key(kind, start_date, end_date, employee_name):
+    return f"{kind}|{start_date.isoformat()}|{end_date.isoformat()}|{normalize_login_name(employee_name)}"
+
+
+@st.cache_resource(show_spinner=False)
+def _ensure_violation_debt_storage():
+    """Tạo/lấy sheet NoViPham dùng làm sổ nghĩa vụ Vi phạm chuyển kỳ."""
+    client = get_gspread_client()
+    if not client:
+        return None, "Chưa cấu hình quyền kết nối Google Sheets."
+    try:
+        ss = client.open_by_key(SHEET_MAT_KHAU_ID)
+        ws = _get_or_create_worksheet(ss, VIOLATION_DEBT_WORKSHEET, rows=3000, cols=20)
+        header = _gs_call_with_backoff(ws.row_values, 1)
+        if not header or header[:len(VIOLATION_DEBT_HEADERS)] != VIOLATION_DEBT_HEADERS:
+            gspread_update_range(ws, "A1:N1", [VIOLATION_DEBT_HEADERS])
+        return ws, ""
+    except Exception as e:
+        return None, f"Lỗi khởi tạo sheet {VIOLATION_DEBT_WORKSHEET}: {e}"
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_violation_debt_ledger():
+    """Đọc sổ nợ Vi phạm một lần, có cache để tránh quota Sheets."""
+    ws, err = _ensure_violation_debt_storage()
+    if err or ws is None:
+        return pd.DataFrame(columns=VIOLATION_DEBT_HEADERS + ['__sheet_row'])
+    try:
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        if not vals:
+            return pd.DataFrame(columns=VIOLATION_DEBT_HEADERS + ['__sheet_row'])
+        header = [str(x).strip() for x in vals[0]]
+        pos = {name: (header.index(name) if name in header else None) for name in VIOLATION_DEBT_HEADERS}
+        rows = []
+        for sheet_row, row in enumerate(vals[1:], start=2):
+            if not any(str(v).strip() for v in row):
+                continue
+            item = {name: (row[p] if p is not None and p < len(row) else '') for name, p in pos.items()}
+            item['__sheet_row'] = sheet_row
+            rows.append(item)
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=VIOLATION_DEBT_HEADERS + ['__sheet_row'])
+    except Exception:
+        return pd.DataFrame(columns=VIOLATION_DEBT_HEADERS + ['__sheet_row'])
+
+
+def _clear_violation_debt_cache():
+    try:
+        load_violation_debt_ledger.clear()
+    except Exception:
+        pass
+
+
+def _is_open_violation_debt_status(value):
+    txt = normalize_login_name(value)
+    return txt in {'', normalize_login_name(VIOLATION_DEBT_OPEN_STATUS), 'chua hoan thanh'}
+
+
+def get_violation_debt_state(start_date, end_date, employee_names=None):
+    """
+    Trả về:
+      due_map: nghĩa vụ từ kỳ trước đã tới hạn khấu trừ ở kỳ đang tính.
+      deferred_current_map: tiền Vi phạm của chính kỳ đang tính mà Admin đã chủ động hoãn.
+      active_df: các nghĩa vụ còn mở liên quan.
+
+    Lưu ý: khoản "Tạm hoãn vi phạm" của một kỳ vẫn phải được trừ khỏi Vi phạm gốc
+    của kỳ đó kể cả sau này nghĩa vụ đã được hoàn thành ở kỳ kế tiếp. Nhờ vậy khi
+    mở lại/tính lại lịch sử, số của kỳ cũ không bị thay đổi ngược trở lại.
+    """
+    d = load_violation_debt_ledger().copy()
+    if d is None or d.empty:
+        return {}, {}, pd.DataFrame(columns=VIOLATION_DEBT_HEADERS)
+
+    allowed = None
+    if employee_names is not None:
+        allowed = {normalize_login_name(x) for x in employee_names if normalize_login_name(x)}
+
+    due_map = {}
+    deferred_current_map = {}
+    active_rows = []
+    for _, r in d.iterrows():
+        emp = str(r.get('Tên nhân viên', '')).strip()
+        key = normalize_login_name(emp)
+        if not key or (allowed is not None and key not in allowed):
+            continue
+        amount = max(0.0, float(_money_to_float(r.get('Số tiền', 0))))
+        if amount <= 0:
+            continue
+        src_start = _parse_vn_date(r.get('Kỳ phát sinh từ', ''))
+        src_end = _parse_vn_date(r.get('Kỳ phát sinh đến', ''))
+        due_from = _parse_vn_date(r.get('Bắt đầu trừ từ', ''))
+        debt_type = str(r.get('Loại', '')).strip()
+
+        # Lịch sử tạm hoãn là thuộc tính của kỳ phát sinh, không phụ thuộc trạng thái
+        # nghĩa vụ ở thời điểm hiện tại.
+        if normalize_login_name(debt_type) == normalize_login_name('Tạm hoãn vi phạm') and src_start and src_end:
+            cs, ce = _canonicalize_payroll_period(src_start, src_end)
+            if cs == start_date and ce == end_date:
+                deferred_current_map[key] = deferred_current_map.get(key, 0.0) + amount
+
+        # Chỉ nghĩa vụ còn mở mới được cộng vào kỳ hiện tại.
+        if not _is_open_violation_debt_status(r.get('Trạng thái', '')):
+            continue
+        if due_from and due_from <= start_date:
+            due_map[key] = due_map.get(key, 0.0) + amount
+        active_rows.append(r.to_dict())
+
+    active_df = pd.DataFrame(active_rows) if active_rows else pd.DataFrame(columns=VIOLATION_DEBT_HEADERS)
+    return due_map, deferred_current_map, active_df
+
+def defer_violation_to_next_period(employee_name, amount, start_date, end_date, updated_by):
+    """Admin chuyển một phần/toàn bộ Vi phạm của kỳ hiện tại sang các kỳ kế tiếp."""
+    employee_name = str(employee_name).strip()
+    amount = max(0.0, float(_money_to_float(amount)))
+    if not employee_name or amount <= 0:
+        return False, "Vui lòng chọn nhân viên và nhập số tiền lớn hơn 0."
+
+    ws, err = _ensure_violation_debt_storage()
+    if err or ws is None:
+        return False, err or "Không mở được sổ nghĩa vụ Vi phạm."
+    try:
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        header = [str(x).strip() for x in (vals[0] if vals else VIOLATION_DEBT_HEADERS)]
+        if header[:len(VIOLATION_DEBT_HEADERS)] != VIOLATION_DEBT_HEADERS:
+            gspread_update_range(ws, "A1:N1", [VIOLATION_DEBT_HEADERS])
+            vals = [VIOLATION_DEBT_HEADERS] + (vals[1:] if vals else [])
+            header = VIOLATION_DEBT_HEADERS[:]
+        source_key = _violation_debt_source_key('DEFER', start_date, end_date, employee_name)
+        next_start, next_end = _next_official_payroll_period(start_date, end_date)
+        now = datetime.now(VN_TZ)
+        source_col = VIOLATION_DEBT_HEADERS.index('Mã nguồn')
+        amount_col = VIOLATION_DEBT_HEADERS.index('Số tiền')
+        existing_row = None
+        existing_amount = 0.0
+        existing_status = ''
+        status_col = VIOLATION_DEBT_HEADERS.index('Trạng thái')
+        for row_idx, row in enumerate(vals[1:], start=2):
+            key_value = row[source_col] if source_col < len(row) else ''
+            if str(key_value).strip() == source_key:
+                existing_row = row_idx
+                existing_amount = float(_money_to_float(row[amount_col] if amount_col < len(row) else 0))
+                existing_status = row[status_col] if status_col < len(row) else ''
+                break
+        if existing_row and not _is_open_violation_debt_status(existing_status):
+            return False, "Khoản Vi phạm đã tạm hoãn của kỳ này đã được khấu trừ ở kỳ sau, không thể mở lại từ kỳ cũ."
+        total_amount = existing_amount + amount
+        row_values = [
+            (existing_row - 1 if existing_row else max(1, len(vals))),
+            employee_name,
+            int(round(total_amount)),
+            VIOLATION_DEBT_CONTENT,
+            "Tạm hoãn vi phạm",
+            start_date.strftime('%d/%m/%Y'),
+            end_date.strftime('%d/%m/%Y'),
+            next_start.strftime('%d/%m/%Y'),
+            VIOLATION_DEBT_OPEN_STATUS,
+            source_key,
+            now.strftime('%d/%m/%Y'),
+            now.strftime('%H:%M:%S'),
+            str(updated_by),
+            "",
+        ]
+        if existing_row:
+            gspread_update_range(ws, f"A{existing_row}:N{existing_row}", [row_values])
+        else:
+            ws.append_row(row_values, value_input_option='USER_ENTERED')
+        _clear_violation_debt_cache()
+        return True, (
+            f"Đã chuyển thêm {amount:,.0f}đ Vi phạm của {employee_name} sang kỳ kế tiếp. "
+            f"Tổng nghĩa vụ đang hoãn từ kỳ này: {total_amount:,.0f}đ."
+        ).replace(',', '.')
+    except Exception as e:
+        return False, f"Lỗi lưu nghĩa vụ Vi phạm: {e}"
+
+
+def _upsert_negative_violation_debt(ws, vals, employee_name, amount, start_date, end_date, updated_by):
+    """Tạo/cập nhật khoản âm Thực nhận của một kỳ, không tạo trùng khi lưu lại cùng kỳ."""
+    source_key = _violation_debt_source_key('NEG', start_date, end_date, employee_name)
+    source_col = VIOLATION_DEBT_HEADERS.index('Mã nguồn')
+    next_start, _ = _next_official_payroll_period(start_date, end_date)
+    now = datetime.now(VN_TZ)
+    existing_row = None
+    existing_status = ''
+    for row_idx, row in enumerate(vals[1:], start=2):
+        key_value = row[source_col] if source_col < len(row) else ''
+        if str(key_value).strip() == source_key:
+            existing_row = row_idx
+            status_col = VIOLATION_DEBT_HEADERS.index('Trạng thái')
+            existing_status = row[status_col] if status_col < len(row) else ''
+            break
+
+    # Nếu khoản của kỳ này đã được khấu trừ xong ở kỳ sau thì không tự mở lại do chỉnh lịch sử.
+    if existing_row and not _is_open_violation_debt_status(existing_status):
+        return None
+
+    amount = max(0.0, float(_money_to_float(amount)))
+    # Không tạo dòng rỗng cho nhân viên có Thực nhận >= 0. Chỉ cập nhật về hoàn thành
+    # nếu trước đó đã tồn tại một khoản âm của chính kỳ này.
+    if amount <= 0 and not existing_row:
+        return None
+    status = VIOLATION_DEBT_OPEN_STATUS if amount > 0 else VIOLATION_DEBT_DONE_STATUS
+    row_values = [
+        (existing_row - 1 if existing_row else max(1, len(vals))),
+        str(employee_name).strip(),
+        int(round(amount)),
+        VIOLATION_DEBT_CONTENT,
+        "Âm thực nhận",
+        start_date.strftime('%d/%m/%Y'),
+        end_date.strftime('%d/%m/%Y'),
+        next_start.strftime('%d/%m/%Y'),
+        status,
+        source_key,
+        now.strftime('%d/%m/%Y'),
+        now.strftime('%H:%M:%S'),
+        str(updated_by),
+        "" if amount > 0 else f"{start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}",
+    ]
+    if existing_row:
+        gspread_update_range(ws, f"A{existing_row}:N{existing_row}", [row_values])
+        return ('updated', existing_row, row_values)
+    ws.append_row(row_values, value_input_option='USER_ENTERED')
+    vals.append([str(x) for x in row_values])
+    return ('appended', None, row_values)
+
+
+def commit_violation_debts_after_payroll(payroll_df, start_date, end_date, saved_by):
+    """
+    Khi lưu bảng lương:
+      1) Các nghĩa vụ cũ đã tới hạn và đã được đưa vào cột Vi phạm được đánh dấu hoàn thành.
+      2) Nếu Thực nhận vẫn âm, phần âm được lưu thành nghĩa vụ mới, bắt đầu trừ từ kỳ kế tiếp.
+    """
+    if payroll_df is None or payroll_df.empty:
+        return True, ""
+    ws, err = _ensure_violation_debt_storage()
+    if err or ws is None:
+        return False, err or "Không mở được sổ nghĩa vụ Vi phạm."
+    try:
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        if not vals:
+            vals = [VIOLATION_DEBT_HEADERS]
+        header = [str(x).strip() for x in vals[0]]
+        if header[:len(VIOLATION_DEBT_HEADERS)] != VIOLATION_DEBT_HEADERS:
+            gspread_update_range(ws, "A1:N1", [VIOLATION_DEBT_HEADERS])
+            header = VIOLATION_DEBT_HEADERS[:]
+            vals[0] = header
+        pos = {name: header.index(name) for name in VIOLATION_DEBT_HEADERS}
+        payroll_names = {
+            normalize_login_name(x): str(x).strip()
+            for x in payroll_df.get('Tên Hệ thống', pd.Series(dtype=str)).tolist()
+            if normalize_login_name(x)
+        }
+        now = datetime.now(VN_TZ)
+        settled_count = 0
+        # Nghĩa vụ cũ tới hạn đã được cộng vào Vi phạm của kỳ này -> đóng khoản cũ.
+        for row_idx, row in enumerate(vals[1:], start=2):
+            emp = row[pos['Tên nhân viên']] if pos['Tên nhân viên'] < len(row) else ''
+            emp_key = normalize_login_name(emp)
+            if emp_key not in payroll_names:
+                continue
+            status = row[pos['Trạng thái']] if pos['Trạng thái'] < len(row) else ''
+            if not _is_open_violation_debt_status(status):
+                continue
+            due_from = _parse_vn_date(row[pos['Bắt đầu trừ từ']] if pos['Bắt đầu trừ từ'] < len(row) else '')
+            if not due_from or due_from > start_date:
+                continue
+            # Ghi trạng thái hoàn thành + kỳ đã khấu trừ; các cột khác giữ nguyên.
+            gspread_update_range(ws, f"I{row_idx}:N{row_idx}", [[
+                VIOLATION_DEBT_DONE_STATUS,
+                row[pos['Mã nguồn']] if pos['Mã nguồn'] < len(row) else '',
+                now.strftime('%d/%m/%Y'),
+                now.strftime('%H:%M:%S'),
+                str(saved_by),
+                f"{start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}",
+            ]])
+            # Đồng bộ snapshot trong bộ nhớ để bước upsert phía sau không đọc sai trạng thái.
+            while len(row) < len(VIOLATION_DEBT_HEADERS):
+                row.append('')
+            row[pos['Trạng thái']] = VIOLATION_DEBT_DONE_STATUS
+            settled_count += 1
+
+        negative_count = 0
+        negative_total = 0.0
+        for _, r in payroll_df.iterrows():
+            emp = str(r.get('Tên Hệ thống', '')).strip()
+            if not emp:
+                continue
+            net = float(_money_to_float(r.get('Số tiền thực nhận', 0)))
+            debt_amount = abs(net) if net < 0 else 0.0
+            result = _upsert_negative_violation_debt(
+                ws, vals, emp, debt_amount, start_date, end_date, saved_by
+            )
+            if debt_amount > 0 and result is not None:
+                negative_count += 1
+                negative_total += debt_amount
+
+        _clear_violation_debt_cache()
+        msg_parts = []
+        if settled_count:
+            msg_parts.append(f"đã khấu trừ {settled_count} nghĩa vụ Vi phạm cũ")
+        if negative_count:
+            msg_parts.append(
+                f"đã chuyển {negative_total:,.0f}đ tiền âm của {negative_count} nhân viên sang kỳ kế tiếp".replace(',', '.')
+            )
+        return True, '; '.join(msg_parts)
+    except Exception as e:
+        return False, f"Lỗi cập nhật nghĩa vụ Vi phạm chuyển kỳ: {e}"
+
+
 def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_primary=None, leave_secondary=None, default_living_expense=150000, default_locker_support=80000):
     """Tổng hợp lương: chỉ cộng G khi F bắt đầu bằng 'Tip', nhóm theo tên nhân viên ở cột I."""
     if source_df is None or source_df.empty:
@@ -4219,6 +4547,9 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
         creds = creds.copy()
     creds['__key'] = creds['Tên nhân viên'].apply(normalize_login_name)
     penalty_map = _period_penalty_by_employee(start_date, end_date, leave_primary, leave_secondary)
+    due_violation_debt_map, deferred_current_violation_map, _ = get_violation_debt_state(
+        start_date, end_date, creds['Tên nhân viên'].astype(str).tolist()
+    )
     employee_overrides = get_payroll_employee_overrides()
     # Tích lũy tự động lấy từ sheet TichLuy. Nếu kỳ này đã được ghi nhận trước đó,
     # bảng lương vẫn phải HIỂN THỊ đúng số tiền của kỳ đó. Việc chống cộng trùng được
@@ -4241,7 +4572,11 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
             "Tiền Hỗ Trợ Hoàn Lại": 0.0,
             "Tích lũy": float(tichluy_map.get(k, 0)),
             "Chi Phí Sinh Hoạt": float(_money_to_float(emp_living)),
-            "Tiền phạt trong tháng": float(penalty_map.get(k, 0)),
+            # Vi phạm kỳ này - phần Admin đã hoãn + nghĩa vụ Vi phạm cũ tới hạn.
+            "Tiền phạt trong tháng": float(
+                max(0.0, _money_to_float(penalty_map.get(k, 0)) - _money_to_float(deferred_current_violation_map.get(k, 0)))
+                + _money_to_float(due_violation_debt_map.get(k, 0))
+            ),
             "Tiền ứng lương": 0.0,
             "Tiền hỗ trợ Locker": float(_money_to_float(emp_locker)),
             "Số tiền thực nhận": 0.0,
@@ -4289,6 +4624,9 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
     default_living, default_locker = get_payroll_default_amounts()
     overrides = get_payroll_employee_overrides()
     penalty_map = _period_penalty_by_employee(start_date, end_date, leave_df, None)
+    due_violation_debt_map, deferred_current_violation_map, _ = get_violation_debt_state(
+        start_date, end_date, d.get('Tên Hệ thống', pd.Series(dtype=str)).astype(str).tolist()
+    )
     tichluy_map, tichluy_info = get_tichluy_charge_map(
         start_date, end_date, d.get('Tên Hệ thống', pd.Series(dtype=str)).astype(str).tolist(),
         for_existing_snapshot=True
@@ -4310,7 +4648,10 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
             continue
 
         # Tiền phạt luôn lấy lại theo đúng kỳ của bản lương đang mở.
-        new_penalty = float(_money_to_float(penalty_map.get(key, 0)))
+        new_penalty = float(
+            max(0.0, _money_to_float(penalty_map.get(key, 0)) - _money_to_float(deferred_current_violation_map.get(key, 0)))
+            + _money_to_float(due_violation_debt_map.get(key, 0))
+        )
         if 'Tiền phạt trong tháng' in d.columns:
             d.at[idx, 'Tiền phạt trong tháng'] = new_penalty
         # Tích lũy của bản lịch sử lấy đúng số kỳ đã ghi nhận; nếu chưa ghi thì tính theo quy tắc hiện tại.
@@ -4366,7 +4707,9 @@ def recalculate_payroll_net(df):
         - d["Tích lũy"] - d["Chi Phí Sinh Hoạt"]
         - d["Tiền phạt trong tháng"] - d["Tiền ứng lương"] - d["Tiền hỗ trợ Locker"]
     )
-    d["Số tiền thực nhận"] = net.clip(lower=0)
+    # V47: KHÔNG chặn ở 0. Giá trị âm phải được hiển thị đúng để biết phần nghĩa vụ
+    # chưa thanh toán và chuyển sang kỳ lương kế tiếp.
+    d["Số tiền thực nhận"] = net
     return d
 
 
@@ -4395,6 +4738,7 @@ def save_payroll_snapshot(payroll_df, start_date, end_date, source_label, saved_
         if rows:
             ws_pay.append_rows(rows, value_input_option='USER_ENTERED')
         tl_ok, tl_msg = record_tichluy_contributions(payroll_df, start_date, end_date)
+        debt_ok, debt_msg = commit_violation_debts_after_payroll(payroll_df, start_date, end_date, saved_by)
         try:
             load_payroll_history.clear()
         except Exception:
@@ -4402,6 +4746,10 @@ def save_payroll_snapshot(payroll_df, start_date, end_date, source_label, saved_
         msg = f"Đã lưu bảng lương {len(rows)} nhân viên vào hệ thống."
         if not tl_ok:
             msg += f" ⚠️ {tl_msg}"
+        if debt_msg:
+            msg += f" · {debt_msg}"
+        if not debt_ok:
+            msg += f" ⚠️ {debt_msg}"
         return True, msg, batch_id
     except Exception as e:
         return False, f"Lỗi lưu bảng lương: {e}", ""
@@ -4451,6 +4799,7 @@ def overwrite_payroll_snapshot(batch_id, payroll_df, start_date, end_date, sourc
         if rows:
             ws_pay.append_rows(rows, value_input_option='USER_ENTERED')
         tl_ok, tl_msg = record_tichluy_contributions(payroll_df, start_date, end_date)
+        debt_ok, debt_msg = commit_violation_debts_after_payroll(payroll_df, start_date, end_date, saved_by)
         try:
             load_payroll_history.clear()
         except Exception:
@@ -4458,6 +4807,10 @@ def overwrite_payroll_snapshot(batch_id, payroll_df, start_date, end_date, sourc
         msg = f"Đã ghi đè cập nhật bản lương {batch_id} cho {len(rows)} nhân viên."
         if not tl_ok:
             msg += f" ⚠️ {tl_msg}"
+        if debt_msg:
+            msg += f" · {debt_msg}"
+        if not debt_ok:
+            msg += f" ⚠️ {debt_msg}"
         return True, msg
     except Exception as e:
         return False, f"Lỗi ghi đè bảng lương: {e}"
@@ -5894,6 +6247,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 "payroll_current_source", "payroll_unmatched", "payroll_adjustment_editor"
             ]:
                 st.session_state.pop(_k, None)
+            _clear_violation_debt_cache()
             st.session_state.payroll_process_state = "idle"
             st.session_state.payroll_process_message = "Đã xóa dữ liệu cũ · Đang tính lại từ đầu..."
 
@@ -6038,6 +6392,89 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             final_df = _filter_real_payroll_rows(final_df)
             st.session_state.payroll_current_df = final_df
 
+            # V47: Admin có thể chủ động tạm hoãn tiền Vi phạm của kỳ hiện tại.
+            # Khoản đã hoãn được lưu vào sheet NoViPham và chỉ bắt đầu trừ từ kỳ kế tiếp.
+            if st.session_state.current_role == "admin":
+                with st.expander("⏭️ Tạm hoãn Vi phạm sang kỳ kế tiếp", expanded=False):
+                    _leave_for_defer = load_backup_sheet_data()
+                    _raw_penalty_map = _period_penalty_by_employee(current_start, current_end, _leave_for_defer, None)
+                    _due_debt_map, _deferred_map, _active_debts = get_violation_debt_state(
+                        current_start, current_end, final_df['Tên Hệ thống'].astype(str).tolist()
+                    )
+                    _defer_options = []
+                    _available_by_emp = {}
+                    for _emp in final_df['Tên Hệ thống'].astype(str).tolist():
+                        _ek = normalize_login_name(_emp)
+                        _raw_current = max(0.0, float(_money_to_float(_raw_penalty_map.get(_ek, 0))))
+                        _already_deferred = max(0.0, float(_money_to_float(_deferred_map.get(_ek, 0))))
+                        _available = max(0.0, _raw_current - _already_deferred)
+                        if _available > 0:
+                            _defer_options.append(_emp)
+                            _available_by_emp[_emp] = (_raw_current, _already_deferred, _available)
+
+                    if _defer_options:
+                        _defer_emp = st.selectbox(
+                            "Nhân viên", _defer_options, filter_mode="contains", key="payroll_defer_violation_emp"
+                        )
+                        _raw_current, _already_deferred, _available = _available_by_emp[_defer_emp]
+                        c_a, c_b, c_c = st.columns(3)
+                        c_a.metric("Vi phạm gốc kỳ này", f"{_raw_current:,.0f} đ".replace(',', '.'))
+                        c_b.metric("Đã tạm hoãn", f"{_already_deferred:,.0f} đ".replace(',', '.'))
+                        c_c.metric("Còn có thể hoãn", f"{_available:,.0f} đ".replace(',', '.'))
+                        _step = 50000.0 if _available >= 50000 else max(1.0, _available)
+                        _defer_amount = st.number_input(
+                            "Số tiền Vi phạm muốn chuyển sang kỳ kế tiếp",
+                            min_value=0.0, max_value=float(_available), value=float(_available), step=float(_step),
+                            format="%.0f", key=f"payroll_defer_violation_amount_{normalize_login_name(_defer_emp)}"
+                        )
+                        if st.button("💾 Lưu nghĩa vụ Vi phạm sang kỳ kế tiếp", use_container_width=True, key="save_deferred_violation"):
+                            ok, msg = defer_violation_to_next_period(
+                                _defer_emp, _defer_amount, current_start, current_end, st.session_state.current_user
+                            )
+                            if ok:
+                                # Cập nhật ngay bảng đang mở; lần Tính lại sau sẽ đọc lại ledger và cho cùng kết quả.
+                                _tmp = st.session_state.payroll_current_df.copy()
+                                _mask = _tmp['Tên Hệ thống'].apply(normalize_login_name).eq(normalize_login_name(_defer_emp))
+                                if _mask.any():
+                                    _idx = _tmp.index[_mask][0]
+                                    _tmp.at[_idx, 'Tiền phạt trong tháng'] = max(
+                                        0.0,
+                                        float(_money_to_float(_tmp.at[_idx, 'Tiền phạt trong tháng'])) - float(_money_to_float(_defer_amount))
+                                    )
+                                    _tmp = recalculate_payroll_net(_tmp)
+                                    st.session_state.payroll_current_df = _tmp
+                                st.session_state.pop('payroll_adjustment_editor', None)
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                    else:
+                        st.info("Không còn khoản Vi phạm của kỳ hiện tại có thể tạm hoãn.")
+
+                    # Hiển thị các nghĩa vụ đang mở để Admin kiểm soát số tiền sẽ chuyển kỳ.
+                    _, _, _all_active = get_violation_debt_state(
+                        current_start, current_end, final_df['Tên Hệ thống'].astype(str).tolist()
+                    )
+                    if isinstance(_all_active, pd.DataFrame) and not _all_active.empty:
+                        _show_cols = [c for c in [
+                            'Tên nhân viên','Số tiền','Nội dung','Loại','Kỳ phát sinh từ','Kỳ phát sinh đến','Bắt đầu trừ từ','Trạng thái'
+                        ] if c in _all_active.columns]
+                        _debt_show = _all_active[_show_cols].copy()
+                        if 'Số tiền' in _debt_show.columns:
+                            _debt_show['Số tiền'] = _debt_show['Số tiền'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
+                        st.caption("Nghĩa vụ Vi phạm đang mở")
+                        st.dataframe(_debt_show, hide_index=True, width="stretch", height="content")
+
+            # Thông báo rõ các dòng âm: khi Admin lưu bảng lương, phần âm sẽ chuyển thành nghĩa vụ Vi phạm kỳ sau.
+            _negative_rows = final_df[final_df['Số tiền thực nhận'].apply(_money_to_float) < 0]
+            if not _negative_rows.empty:
+                _negative_total = abs(_negative_rows['Số tiền thực nhận'].apply(_money_to_float).sum())
+                st.warning(
+                    f"Có {len(_negative_rows)} nhân viên Thực nhận âm, tổng phần chưa hoàn thành "
+                    f"{_negative_total:,.0f} đ. Khi lưu bảng lương, hệ thống sẽ lưu thành '{VIOLATION_DEBT_CONTENT}' "
+                    "và tự trừ từ kỳ lương kế tiếp.".replace(',', '.')
+                )
+
             total_salary = final_df['Tiền Lương'].sum()
             total_penalty = final_df['Tiền phạt trong tháng'].sum()
             total_net = final_df['Số tiền thực nhận'].sum()
@@ -6143,7 +6580,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 )
                 st.caption(
                     f"Có {len(employees_email)} nhân viên có Email hợp lệ và Thực nhận > 0. "
-                    "Nhân viên có Thực nhận = 0 sẽ tự động không được gửi mail."
+                    "Nhân viên có Thực nhận ≤ 0 sẽ tự động không được gửi mail."
                 )
                 if st.button("🚀 Gửi bảng lương cho nhân viên đã chọn", use_container_width=True):
                     if not selected_email_emps:

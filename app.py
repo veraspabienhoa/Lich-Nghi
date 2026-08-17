@@ -2227,6 +2227,23 @@ PAYROLL_ADJUSTMENT_COLUMNS = [
     "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
     "Tiền ứng lương", "Tiền hỗ trợ Locker"
 ]
+
+# Tiêu đề hiển thị chuẩn cho toàn bộ bảng lương (web + Excel).
+PAYROLL_DISPLAY_LABELS = {
+    "TT": "TT",
+    "Tên Hệ thống": "Tên Hệ thống",
+    "Tiền Lương": "Tiền Lương",
+    "Tiền Hỗ Trợ Hoàn Lại": "Hỗ Trợ Hoàn Lại",
+    "Tích lũy": "Tích lũy",
+    "Chi Phí Sinh Hoạt": "Phí Sinh Hoạt",
+    "Tiền phạt trong tháng": "Vi phạm",
+    "Tiền ứng lương": "Tiền ứng",
+    "Tiền hỗ trợ Locker": "Tiền hỗ trợ Locker",
+    "Số tiền thực nhận": "Thực nhận",
+    "Số tài khoản ngân hàng": "Tài khoản ngân hàng",
+    "Tên ngân hàng": "Tên ngân hàng",
+    "Email": "Email",
+}
 PAYROLL_HISTORY_HEADERS = [
     "Mã bản lưu", "Từ ngày", "Đến ngày", "Ngày lưu", "Giờ lưu", "Người lưu", "Nguồn dữ liệu",
     "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
@@ -2657,22 +2674,8 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
     ws['B2'] = f"Từ ngày {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}"
     ws['B2'].font = Font(name='Arial', size=11, bold=True)
 
-    # Tên hiển thị ở dòng tiêu đề Excel theo mẫu bảng lương rút gọn.
-    header_labels = {
-        "TT": "TT",
-        "Tên Hệ thống": "Tên Hệ thống",
-        "Tiền Lương": "Tiền Lương",
-        "Tiền Hỗ Trợ Hoàn Lại": "Hỗ Trợ Hoàn Lại",
-        "Tích lũy": "Tích lũy",
-        "Chi Phí Sinh Hoạt": "Phí Sinh Hoạt",
-        "Tiền phạt trong tháng": "Vi phạm",
-        "Tiền ứng lương": "Tiền ứng",
-        "Tiền hỗ trợ Locker": "Tiền hỗ trợ Locker",
-        "Số tiền thực nhận": "Thực nhận",
-        "Số tài khoản ngân hàng": "Tài khoản ngân hàng",
-        "Tên ngân hàng": "Tên ngân hàng",
-        "Email": "Email",
-    }
+    # Dùng bộ tiêu đề chuẩn thống nhất với bảng lương trên web.
+    header_labels = PAYROLL_DISPLAY_LABELS
     for c, h in enumerate(export_cols, start=1):
         display_header = header_labels.get(h, h)
         cell = ws.cell(row=3, column=c, value=display_header)
@@ -3561,13 +3564,15 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             ]
             editor_df = current[editor_cols].copy()
             col_cfg = {
-                "TT": st.column_config.NumberColumn("TT", format="%d", disabled=True, width="small"),
-                "Tên Hệ thống": st.column_config.TextColumn("Tên Hệ thống", disabled=True, width="small"),
-                "Tiền Lương": st.column_config.NumberColumn("Tiền Lương", format="%.0f", disabled=True, width="small"),
-                "Tiền phạt trong tháng": st.column_config.NumberColumn("Tiền phạt", format="%.0f", disabled=True, width="small"),
+                "TT": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["TT"], format="%d", disabled=True, width="small"),
+                "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS["Tên Hệ thống"], disabled=True, width="small"),
+                "Tiền Lương": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền Lương"], format="%.0f", disabled=True, width="small"),
+                "Tiền phạt trong tháng": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền phạt trong tháng"], format="%.0f", disabled=True, width="small"),
             }
             for c in PAYROLL_ADJUSTMENT_COLUMNS:
-                col_cfg[c] = st.column_config.NumberColumn(c, min_value=0.0, step=50000.0, format="%.0f", width="small")
+                col_cfg[c] = st.column_config.NumberColumn(
+                    PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%.0f", width="small"
+                )
             edited = st.data_editor(
                 editor_df, key="payroll_adjustment_editor", width="stretch", height="content", hide_index=True,
                 column_config=col_cfg, disabled=["TT", "Tên Hệ thống", "Tiền Lương", "Tiền phạt trong tháng"]
@@ -3592,7 +3597,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             display_cols = [
                 "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
                 "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
-                "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng"
+                "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
             ]
             st.markdown("### 📋 Bảng lương tổng hợp")
             # HTML table dùng width:100% + table-layout:fixed để không tạo thanh cuộn ngang/dọc.
@@ -3601,6 +3606,8 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             for c in money_web_cols:
                 web_df[c] = web_df[c].apply(lambda v: f"{_money_to_float(v):,.0f}".replace(',', '.'))
             web_df['Số tài khoản ngân hàng'] = web_df['Số tài khoản ngân hàng'].astype(str).str.replace("'", "", regex=False).replace({'nan':'','None':''})
+            # Chỉ đổi tên cột lúc hiển thị; dữ liệu nội bộ vẫn giữ tên chuẩn để tính toán/lưu lịch sử.
+            web_df = web_df.rename(columns={c: PAYROLL_DISPLAY_LABELS.get(c, c) for c in web_df.columns})
             payroll_html = web_df.to_html(index=False, escape=True, classes='vera-payroll-table')
             st.markdown(
                 """<style>
@@ -3752,11 +3759,12 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 hist_display_cols = [c for c in [
                     "TT","Tên Hệ thống","Tiền Lương","Tiền Hỗ Trợ Hoàn Lại","Tích lũy",
                     "Chi Phí Sinh Hoạt","Tiền phạt trong tháng","Tiền ứng lương","Tiền hỗ trợ Locker",
-                    "Số tiền thực nhận","Số tài khoản ngân hàng","Tên ngân hàng"
+                    "Số tiền thực nhận","Số tài khoản ngân hàng","Tên ngân hàng","Email"
                 ] if c in saved_table.columns]
                 hist_web = saved_table[hist_display_cols].copy()
                 for c in [x for x in hist_display_cols if x.startswith('Tiền') or x in {'Tích lũy','Chi Phí Sinh Hoạt','Số tiền thực nhận'}]:
                     hist_web[c] = hist_web[c].apply(lambda v: f"{_money_to_float(v):,.0f}".replace(',', '.'))
+                hist_web = hist_web.rename(columns={c: PAYROLL_DISPLAY_LABELS.get(c, c) for c in hist_web.columns})
                 hist_html = hist_web.to_html(index=False, escape=True, classes='vera-payroll-table')
                 st.markdown(f"<div class='vera-payroll-wrap'>{hist_html}</div>", unsafe_allow_html=True)
                 try:

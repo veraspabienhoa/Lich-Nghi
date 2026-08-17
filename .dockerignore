@@ -1,0 +1,12 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.xlsx
+*.xlsm
+*.xlsb
+.env
+.streamlit/secrets.toml
+venv
+.venv

@@ -1030,7 +1030,7 @@ def set_employee_employment_status(employee_name, status, updated_by):
     if status not in EMPLOYMENT_STATUS_OPTIONS:
         return False, "Trạng thái không hợp lệ."
     try:
-        creds = load_credentials()
+        creds = load_credentials_recent()
         target_key = normalize_login_name(employee_name)
         role = ''
         if isinstance(creds, pd.DataFrame) and not creds.empty:
@@ -1079,6 +1079,7 @@ def _clear_dynamic_data_caches():
     """
     for fn_name in (
         'load_credentials',
+        'load_credentials_recent',
         'load_backup_sheet_data',
         'load_secondary_leave_sheet_data',
         'load_loai_nghi_from_gsheet',
@@ -1240,11 +1241,13 @@ def load_credentials():
         'Remember Token Hash', 'Remember Token Expiry'
     ])
 
-def load_credentials_fresh_for_email():
-    """Đọc hồ sơ nhân sự MỚI NHẤT trực tiếp từ Sheet1 trước mỗi tác vụ gửi email.
+@st.cache_data(ttl=10, show_spinner=False)
+def load_credentials_recent():
+    """Ảnh chụp Sheet1 gần thời gian thực cho TOÀN BỘ trường hồ sơ.
 
-    Chỉ xóa cache load_credentials (không xóa cache toàn hệ thống) để tránh dùng Email cũ
-    đã nằm trong bảng lương/lịch sử hoặc cache Streamlit.
+    TTL 10 giây giúp các trang luôn nhận dữ liệu nguồn rất mới nhưng vẫn tránh lặp
+    request Google Sheets trên từng thao tác gõ/chọn của Streamlit. Mọi tác vụ quan trọng
+    như gửi email vẫn dùng load_credentials_fresh() để đọc trực tiếp ngay lúc bấm.
     """
     try:
         load_credentials.clear()
@@ -1252,19 +1255,96 @@ def load_credentials_fresh_for_email():
         pass
     return load_credentials()
 
-def latest_email_from_credentials(credentials_df, username):
-    """Lấy Email mới nhất theo Tên Hệ thống, so khớp không dấu/không phân biệt hoa thường."""
+def load_credentials_fresh():
+    """Đọc trực tiếp hồ sơ nhân sự mới nhất từ Sheet1 cho tác vụ cần dữ liệu tuyệt đối mới."""
+    try:
+        load_credentials.clear()
+    except Exception:
+        pass
+    try:
+        load_credentials_recent.clear()
+    except Exception:
+        pass
+    return load_credentials()
+
+def load_credentials_fresh_for_email():
+    """Giữ tương thích tên hàm cũ; thực tế làm mới TOÀN BỘ hồ sơ, không chỉ Email."""
+    return load_credentials_fresh()
+
+def latest_credential_row_from_credentials(credentials_df, username):
+    """Lấy dòng hồ sơ mới nhất theo Tên Hệ thống, so khớp không dấu/không phân biệt hoa thường."""
     if not isinstance(credentials_df, pd.DataFrame) or credentials_df.empty:
-        return ""
-    if 'Tên nhân viên' not in credentials_df.columns or 'Email' not in credentials_df.columns:
-        return ""
+        return None
+    if 'Tên nhân viên' not in credentials_df.columns:
+        return None
     target = normalize_login_name(username)
     matched = credentials_df[
         credentials_df['Tên nhân viên'].astype(str).apply(normalize_login_name) == target
     ]
     if matched.empty:
+        return None
+    return matched.iloc[-1]
+
+def latest_email_from_credentials(credentials_df, username):
+    """Lấy Email mới nhất theo Tên Hệ thống."""
+    row = latest_credential_row_from_credentials(credentials_df, username)
+    if row is None:
         return ""
-    return str(matched.iloc[-1].get('Email', '')).strip()
+    return str(row.get('Email', '')).strip()
+
+PAYROLL_PROFILE_SOURCE_MAP = {
+    'Họ và tên': 'Họ và tên đầy đủ',
+    'Email': 'Email',
+    'Số tài khoản ngân hàng': 'Số tài khoản ngân hàng',
+    'Tên ngân hàng': 'Tên ngân hàng',
+}
+
+def apply_latest_profile_fields_to_payroll(payroll_df, credentials_df=None, only_current_nhanvien=False):
+    """Đồng bộ mọi trường hồ sơ của bảng lương từ Sheet1 nguồn.
+
+    Các khoản tiền nghiệp vụ vẫn giữ nguyên. Những trường hồ sơ đang dùng trong bảng
+    lương/export/email (Họ tên, Email, tài khoản và tên ngân hàng) luôn lấy theo nguồn.
+    Khi only_current_nhanvien=True, vai trò mới nhất cũng được dùng để chỉ giữ tài khoản
+    hiện vẫn có role `nhanvien`.
+    """
+    if payroll_df is None or not isinstance(payroll_df, pd.DataFrame) or payroll_df.empty:
+        return payroll_df.copy() if isinstance(payroll_df, pd.DataFrame) else pd.DataFrame()
+    d = payroll_df.copy()
+    creds = credentials_df if isinstance(credentials_df, pd.DataFrame) else load_credentials_recent()
+    if creds is None or creds.empty or 'Tên nhân viên' not in creds.columns or 'Tên Hệ thống' not in d.columns:
+        return d
+
+    cred_map = {}
+    for _, cr in creds.iterrows():
+        key = normalize_login_name(cr.get('Tên nhân viên', ''))
+        if key:
+            cred_map[key] = cr
+
+    keep_mask = []
+    for idx, rr in d.iterrows():
+        key = normalize_login_name(rr.get('Tên Hệ thống', ''))
+        cr = cred_map.get(key)
+        keep = True
+        if cr is not None:
+            for dest, src in PAYROLL_PROFILE_SOURCE_MAP.items():
+                if dest not in d.columns:
+                    d[dest] = ''
+                val = str(cr.get(src, '')).strip()
+                if dest == 'Số tài khoản ngân hàng':
+                    val = val.replace("'", '')
+                d.at[idx, dest] = val
+            if only_current_nhanvien:
+                keep = str(cr.get('Phân quyền', '')).strip().lower() == 'nhanvien'
+        elif only_current_nhanvien:
+            keep = False
+        keep_mask.append(bool(keep))
+
+    if only_current_nhanvien and len(keep_mask) == len(d):
+        d = d.loc[keep_mask].copy()
+        if 'TT' in d.columns:
+            d = d.reset_index(drop=True)
+            d['TT'] = range(1, len(d) + 1)
+    return d
 
 def set_accounts_login_lock(usernames, locked=True):
     try:
@@ -3650,7 +3730,7 @@ def load_tichluy_tracking():
         rows = []
         # Dùng cache tài khoản hiện có để ẩn hoàn toàn quanly/letan/locker/tapvu/admin khỏi
         # nghiệp vụ TichLuy, kể cả khi sheet cũ vẫn còn dòng từ phiên bản trước.
-        role_map = _credential_role_map(load_credentials())
+        role_map = _credential_role_map(load_credentials_recent())
         for sheet_row, row in enumerate(values[1:], start=2):
             if not any(str(v).strip() for v in row):
                 continue
@@ -3900,7 +3980,7 @@ def get_tichluy_charge_map(start_date, end_date, employee_names=None, for_existi
 
 def _credential_role_map(credentials_df=None):
     """Tên đăng nhập chuẩn hóa -> vai trò, dùng chung để lọc danh sách nghiệp vụ."""
-    credentials_df = load_credentials() if credentials_df is None else credentials_df
+    credentials_df = load_credentials_recent() if credentials_df is None else credentials_df
     result = {}
     if credentials_df is None or credentials_df.empty:
         return result
@@ -3969,7 +4049,7 @@ def sync_tichluy_roles_and_stt(credentials_df=None):
     - cột A được đánh lại từ dòng 2: 1,2,3... theo đúng thứ tự dòng hiện tại.
     """
     try:
-        credentials_df = load_credentials() if credentials_df is None else credentials_df
+        credentials_df = load_credentials_recent() if credentials_df is None else credentials_df
         role_map = _credential_role_map(credentials_df)
         ws, err = _ensure_tichluy_sheet()
         if err or ws is None:
@@ -4176,7 +4256,7 @@ def record_tichluy_contributions(payroll_df, start_date, end_date):
         header = values[0]
         pos = _tichluy_header_positions(header)
         rows_by_key = {}
-        role_map = _credential_role_map(load_credentials())
+        role_map = _credential_role_map(load_credentials_recent())
         name_pos = pos.get('Tên nhân viên', 0)
         for r_idx, row in enumerate(values[1:], start=2):
             if name_pos < len(row) and str(row[name_pos]).strip():
@@ -5225,7 +5305,7 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
         return pd.DataFrame(columns=PAYROLL_COLUMNS), {"updated": 0, "missing": []}
 
     d = payroll_df.copy()
-    creds = credentials_df.copy() if isinstance(credentials_df, pd.DataFrame) else load_credentials()
+    creds = credentials_df.copy() if isinstance(credentials_df, pd.DataFrame) else load_credentials_recent()
     leave_df = leave_primary.copy() if isinstance(leave_primary, pd.DataFrame) else load_backup_sheet_data()
 
     # Khi mở lại/tính lại bảng lương, bổ sung các nhân viên còn thiếu vào TichLuy trước.
@@ -5298,6 +5378,7 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
 
     d = recalculate_payroll_net(d)
     d = _filter_real_payroll_rows(d)
+    d = apply_latest_profile_fields_to_payroll(d, creds, only_current_nhanvien=False)
     return d, {
         "updated": updated,
         "missing": sorted(set(missing)),
@@ -5547,27 +5628,13 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
 
     d = recalculate_payroll_net(payroll_df).copy()
 
-    # V46: luôn làm mới Họ và Tên từ hồ sơ Sheet1 cột E trước khi xuất Excel.
-    # Nhờ vậy cả Export trực tiếp và file tổng hợp gửi cho Lễ tân đều dùng cùng
-    # thông tin Họ và Tên mới nhất, kể cả các bản lịch sử cũ chưa lưu trường này.
+    # V60: trước khi export, đồng bộ TOÀN BỘ trường hồ sơ đang dùng trong file
+    # (Họ và Tên, tài khoản ngân hàng, tên ngân hàng, Email nội bộ) từ Sheet1 nguồn.
+    # Export vẫn không hiển thị Email theo yêu cầu.
     try:
-        _export_creds = load_credentials()
-        if isinstance(_export_creds, pd.DataFrame) and not _export_creds.empty and 'Tên nhân viên' in _export_creds.columns:
-            _fullname_map = {}
-            for _, _cr in _export_creds.iterrows():
-                _k = normalize_login_name(_cr.get('Tên nhân viên', ''))
-                if _k:
-                    _fullname_map[_k] = str(_cr.get('Họ và tên đầy đủ', '')).strip()
-            if 'Họ và tên' not in d.columns:
-                d['Họ và tên'] = ''
-            if 'Tên Hệ thống' in d.columns:
-                for _idx, _rr in d.iterrows():
-                    _k = normalize_login_name(_rr.get('Tên Hệ thống', ''))
-                    _full = _fullname_map.get(_k, '')
-                    if _full:
-                        d.at[_idx, 'Họ và tên'] = _full
+        _export_creds = load_credentials_recent()
+        d = apply_latest_profile_fields_to_payroll(d, _export_creds, only_current_nhanvien=False)
     except Exception:
-        # Nếu Google Sheets tạm thời lỗi, vẫn cho phép export bằng dữ liệu đã có trong bảng lương.
         pass
 
     # V45/V50: File Excel export KHÔNG xuất Email. Giữ Họ và Tên nhân viên ở cột M
@@ -5963,7 +6030,7 @@ def send_payroll_summary_email(sender_email, sender_password, to_email, recipien
 
 # Tải dữ liệu
 ensure_credential_control_columns()
-df_credentials = load_credentials() 
+df_credentials = load_credentials_recent() 
 df_backup = load_backup_sheet_data()
 df_leave_secondary = load_secondary_leave_sheet_data()
 df_loai_nghi_gsheet = load_loai_nghi_from_gsheet()
@@ -7073,11 +7140,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 # V44: luôn lấy hồ sơ/Phân quyền MỚI NHẤT trước mỗi lần tính lương.
                 # Điều này bảo đảm người vừa đổi từ nhanvien -> letan/quanly/locker/tapvu
                 # bị loại ngay khỏi bảng lương, không chờ cache load_credentials hết hạn.
-                try:
-                    load_credentials.clear()
-                except Exception:
-                    pass
-                credentials_live = load_credentials()
+                credentials_live = load_credentials_fresh()
                 df_credentials = credentials_live
                 nhanvien_live_count = 0
                 if isinstance(credentials_live, pd.DataFrame) and not credentials_live.empty and 'Phân quyền' in credentials_live.columns:
@@ -7145,6 +7208,10 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             # vào session rồi rerun để toàn bộ thống kê/export/email phía trên cập nhật đồng bộ.
             final_df = recalculate_payroll_net(current.copy())
             final_df = _filter_real_payroll_rows(final_df)
+            # V60: đồng bộ mọi trường hồ sơ theo Sheet1 nguồn và áp dụng role hiện tại.
+            final_df = apply_latest_profile_fields_to_payroll(
+                final_df, load_credentials_recent(), only_current_nhanvien=True
+            )
             st.session_state.payroll_current_df = final_df
 
             # V47: Admin có thể chủ động tạm hoãn tiền Vi phạm của kỳ hiện tại.
@@ -7509,7 +7576,12 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                                 progress.progress((idx + 1) / len(selected_email_emps))
                                 continue
                             row = matched_pay.iloc[0].copy()
-                            to_email = latest_email_from_credentials(live_email_creds, emp)
+                            _live_row_df = apply_latest_profile_fields_to_payroll(
+                                pd.DataFrame([row]), live_email_creds, only_current_nhanvien=False
+                            )
+                            if not _live_row_df.empty:
+                                row = _live_row_df.iloc[0].copy()
+                            to_email = str(row.get('Email', '')).strip() or latest_email_from_credentials(live_email_creds, emp)
                             if not to_email or '@' not in to_email:
                                 errors.append(f"{emp}: Email mới nhất trong Sheet1 không hợp lệ hoặc đang để trống.")
                                 progress.progress((idx + 1) / len(selected_email_emps))
@@ -7730,6 +7802,11 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 )
                 saved_table = payroll_history_to_table(saved)
                 saved_table = _filter_real_payroll_rows(saved_table)
+                # V60: hồ sơ của bản lịch sử lấy từ Sheet1 gần nhất ngay khi mở.
+                _history_live_creds = load_credentials_recent()
+                saved_table = apply_latest_profile_fields_to_payroll(
+                    saved_table, _history_live_creds, only_current_nhanvien=False
+                )
 
                 # Nếu Admin vừa bấm "Cập nhật bảng lương từ hệ thống", dùng bản đã làm mới
                 # làm dữ liệu nền cho editor ở lần rerun kế tiếp. Mỗi batch có state riêng.
@@ -7740,18 +7817,22 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         refreshed_state_df = st.session_state.get(hist_refresh_key)
                         if isinstance(refreshed_state_df, pd.DataFrame) and not refreshed_state_df.empty:
                             saved_table = _filter_real_payroll_rows(refreshed_state_df.copy())
+                            saved_table = apply_latest_profile_fields_to_payroll(
+                                saved_table, _history_live_creds, only_current_nhanvien=False
+                            )
                     except Exception:
                         pass
 
-                # Không hiển thị/tính dòng Lễ tân kể cả với bản lịch sử cũ.
+                # V60: role cũng lấy theo Sheet1 gần nhất; bảng lương nhân viên chỉ áp dụng `nhanvien`.
                 try:
-                    letan_keys = set(
-                        df_credentials.loc[
-                            df_credentials['Phân quyền'].astype(str).str.strip().str.lower().isin(['letan', 'quanly']), 'Tên nhân viên'
-                        ].apply(normalize_login_name).tolist()
-                    )
-                    if 'Tên Hệ thống' in saved_table.columns and letan_keys:
-                        saved_table = saved_table[~saved_table['Tên Hệ thống'].apply(normalize_login_name).isin(letan_keys)].copy()
+                    _current_role_map = _credential_role_map(_history_live_creds)
+                    if 'Tên Hệ thống' in saved_table.columns and _current_role_map:
+                        saved_table = saved_table[
+                            saved_table['Tên Hệ thống'].astype(str).apply(
+                                lambda _n: _current_role_map.get(normalize_login_name(_n), 'nhanvien') == 'nhanvien'
+                            )
+                        ].copy()
+                        saved_table = _filter_real_payroll_rows(saved_table)
                 except Exception:
                     pass
 
@@ -7765,7 +7846,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 # Nút được đặt ngay phía trên tiêu đề Mở lại và chỉnh sửa bản lương theo yêu cầu.
                 st.caption(
                     "Nút cập nhật hệ thống sẽ làm mới: Tích lũy, Vi phạm, Phí Sinh Hoạt, Tiền hỗ trợ Locker, "
-                    "Tài khoản ngân hàng, Tên ngân hàng và Email. Tiền Lương không bị thay đổi."
+                    "Họ và Tên, Tài khoản ngân hàng, Tên ngân hàng, Email và vai trò hiện tại. Tiền Lương không bị thay đổi."
                 )
                 if st.button(
                     "🔄 Cập nhật bảng lương từ hệ thống",
@@ -7777,11 +7858,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     try:
                         status_refresh.info("⏳ Đang tải hồ sơ nhân viên mới nhất...")
                         progress_refresh.progress(20)
-                        try:
-                            load_credentials.clear()
-                        except Exception:
-                            pass
-                        credentials_live = load_credentials()
+                        credentials_live = load_credentials_fresh()
 
                         status_refresh.info("⏳ Đang tải tiền phạt trong kỳ từ hệ thống lịch nghỉ...")
                         progress_refresh.progress(45)
@@ -7927,17 +8004,19 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         pass
 
                     st.markdown("**👁 Bảng xem trước sau chỉnh sửa**")
+                    # V60: không thụt lề HTML; Markdown sẽ không còn hiểu thành code block.
+                    _hist_preview_css = (
+                        "<style>"
+                        ".vera-history-preview-wrap{width:100%;overflow-x:auto;margin:4px 0 10px 0;}"
+                        "table.vera-history-payroll-preview{width:100%;border-collapse:collapse;table-layout:auto;font-size:12px;}"
+                        "table.vera-history-payroll-preview th{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 4px;border:1px solid #c9c9c9;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;}"
+                        "table.vera-history-payroll-preview td{background:#fff!important;color:#000!important;padding:4px;border:1px solid #dedede;white-space:normal;word-break:break-word;}"
+                        "table.vera-history-payroll-preview tbody tr:nth-child(even) td{background:#fafafa!important;}"
+                        "table.vera-history-payroll-preview tbody tr.history-nonpositive td{background:#FFF2CC!important;color:#000!important;}"
+                        "</style>"
+                    )
                     st.markdown(
-                        """
-                        <style>
-                        .vera-history-preview-wrap{width:100%;overflow-x:auto;margin:4px 0 10px 0;}
-                        table.vera-history-payroll-preview{width:100%;border-collapse:collapse;table-layout:auto;font-size:12px;}
-                        table.vera-history-payroll-preview th{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 4px;border:1px solid #c9c9c9;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;}
-                        table.vera-history-payroll-preview td{background:#fff;color:#000;padding:4px;border:1px solid #dedede;white-space:normal;word-break:break-word;}
-                        table.vera-history-payroll-preview tbody tr:nth-child(even) td{background:#fafafa;}
-                        table.vera-history-payroll-preview tbody tr.history-nonpositive td{background:#FFF2CC!important;color:#000!important;}
-                        </style>
-                        """ + f"<div class='vera-history-preview-wrap'>{_hist_html}</div>",
+                        _hist_preview_css + f"<div class='vera-history-preview-wrap'>{_hist_html}</div>",
                         unsafe_allow_html=True,
                     )
                 except Exception:
@@ -8050,7 +8129,12 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                                     hist_errors.append(f"{emp}: Không tìm thấy dữ liệu bảng lương.")
                                 else:
                                     row = matched_emp.iloc[0].copy()
-                                    to_email = latest_email_from_credentials(hist_live_email_creds, emp)
+                                    _hist_live_row_df = apply_latest_profile_fields_to_payroll(
+                                        pd.DataFrame([row]), hist_live_email_creds, only_current_nhanvien=False
+                                    )
+                                    if not _hist_live_row_df.empty:
+                                        row = _hist_live_row_df.iloc[0].copy()
+                                    to_email = str(row.get('Email', '')).strip() or latest_email_from_credentials(hist_live_email_creds, emp)
                                     if not to_email or '@' not in to_email:
                                         hist_errors.append(f"{emp}: Email mới nhất trong Sheet1 không hợp lệ hoặc đang để trống.")
                                     else:

@@ -2656,7 +2656,7 @@ def to_excel(df):
 # ==========================================================
 PAYROLL_COLUMNS = [
     "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
-    "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
+    "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương",
     "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Email",
     "Số tài khoản ngân hàng", "Tên ngân hàng", "Số dòng Tip"
 ]
@@ -2674,6 +2674,7 @@ PAYROLL_DISPLAY_LABELS = {
     "Tích lũy": "Tích lũy",
     "Chi Phí Sinh Hoạt": "Phí Sinh Hoạt",
     "Tiền phạt trong tháng": "Vi phạm",
+    "Vi phạm kỳ trước": "Vi phạm kỳ trước",
     "Tiền ứng lương": "Tiền ứng",
     "Tiền hỗ trợ Locker": "Tiền hỗ trợ Locker",
     "Số tiền thực nhận": "Thực nhận",
@@ -2686,7 +2687,7 @@ PAYROLL_HISTORY_HEADERS = [
     "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
     "Hỗ trợ dạy nghề", "Học phí", "Tích lũy", "Chi Phí Sinh Hoạt",
     "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker", "Số tiền thực nhận",
-    "Email", "Số tài khoản ngân hàng", "Tên ngân hàng", "Số dòng Tip"
+    "Email", "Số tài khoản ngân hàng", "Tên ngân hàng", "Số dòng Tip", "Vi phạm kỳ trước"
 ]
 
 
@@ -2715,12 +2716,12 @@ TABLE_LAYOUT_STATIC_COLUMNS = {
     ],
     "payroll_current": [
         "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy",
-        "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
+        "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương",
         "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
     ],
     "payroll_history": [
         "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy",
-        "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
+        "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương",
         "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
     ],
     "leave_detail": [
@@ -3176,7 +3177,7 @@ def _ensure_payroll_storage():
 
         pay_header = _gs_call_with_backoff(ws_pay.row_values, 1)
         if not pay_header or pay_header[:len(PAYROLL_HISTORY_HEADERS)] != PAYROLL_HISTORY_HEADERS:
-            gspread_update_range(ws_pay, "A1:X1", [PAYROLL_HISTORY_HEADERS])
+            gspread_update_range(ws_pay, "A1:Y1", [PAYROLL_HISTORY_HEADERS])
 
         cfg_vals = _gs_call_with_backoff(ws_cfg.get, 'A:B')
         if not cfg_vals:
@@ -4611,8 +4612,9 @@ def _upsert_negative_violation_debt(ws, vals, employee_name, amount, start_date,
 def commit_violation_debts_after_payroll(payroll_df, start_date, end_date, saved_by):
     """
     Khi lưu bảng lương:
-      1) Các nghĩa vụ cũ đã tới hạn và đã được đưa vào cột Vi phạm được đánh dấu hoàn thành.
-      2) Nếu Thực nhận vẫn âm, phần âm được lưu thành nghĩa vụ mới, bắt đầu trừ từ kỳ kế tiếp.
+      1) Các nghĩa vụ cũ đã tới hạn và đã được đưa vào cột "Vi phạm kỳ trước" được đánh dấu hoàn thành.
+      2) Nếu Thực nhận âm và Admin KHÔNG chủ động tạm hoãn người đó, phần âm được tự lưu thành nghĩa vụ mới.
+      3) Nếu Admin đã chủ động tạm hoãn Vi phạm của người đó trong kỳ, không tự tạo thêm nợ âm để tránh trùng.
     """
     if payroll_df is None or payroll_df.empty:
         return True, ""
@@ -4663,13 +4665,38 @@ def commit_violation_debts_after_payroll(payroll_df, start_date, end_date, saved
             row[pos['Trạng thái']] = VIOLATION_DEBT_DONE_STATUS
             settled_count += 1
 
+        # V50: xác định nhân viên Admin đã chủ động tạm hoãn Vi phạm của CHÍNH kỳ này.
+        # Những người này không được tự tạo thêm một khoản "Âm thực nhận" khác, tránh ghi nợ kép.
+        manual_adjusted_keys = set()
+        for row in vals[1:]:
+            emp = row[pos['Tên nhân viên']] if pos['Tên nhân viên'] < len(row) else ''
+            emp_key = normalize_login_name(emp)
+            debt_type = row[pos['Loại']] if pos['Loại'] < len(row) else ''
+            if normalize_login_name(debt_type) != normalize_login_name('Tạm hoãn vi phạm'):
+                continue
+            src_start = _parse_vn_date(row[pos['Kỳ phát sinh từ']] if pos['Kỳ phát sinh từ'] < len(row) else '')
+            src_end = _parse_vn_date(row[pos['Kỳ phát sinh đến']] if pos['Kỳ phát sinh đến'] < len(row) else '')
+            if src_start and src_end:
+                cs, ce = _canonicalize_payroll_period(src_start, src_end)
+                if cs == start_date and ce == end_date and emp_key:
+                    manual_adjusted_keys.add(emp_key)
+
         negative_count = 0
         negative_total = 0.0
+        auto_negative_names = []
         for _, r in payroll_df.iterrows():
             emp = str(r.get('Tên Hệ thống', '')).strip()
-            if not emp:
+            emp_key = normalize_login_name(emp)
+            if not emp_key:
                 continue
             net = float(_money_to_float(r.get('Số tiền thực nhận', 0)))
+
+            if emp_key in manual_adjusted_keys:
+                # Nếu trước đó đã từng lưu tự động phần âm của cùng kỳ rồi sau đó Admin mới
+                # chủ động tạm hoãn, đóng khoản tự động cũ để không tồn tại song song hai nghĩa vụ.
+                _upsert_negative_violation_debt(ws, vals, emp, 0.0, start_date, end_date, saved_by)
+                continue
+
             debt_amount = abs(net) if net < 0 else 0.0
             result = _upsert_negative_violation_debt(
                 ws, vals, emp, debt_amount, start_date, end_date, saved_by
@@ -4677,6 +4704,7 @@ def commit_violation_debts_after_payroll(payroll_df, start_date, end_date, saved
             if debt_amount > 0 and result is not None:
                 negative_count += 1
                 negative_total += debt_amount
+                auto_negative_names.append(emp)
 
         _clear_violation_debt_cache()
         msg_parts = []
@@ -4684,7 +4712,8 @@ def commit_violation_debts_after_payroll(payroll_df, start_date, end_date, saved
             msg_parts.append(f"đã khấu trừ {settled_count} nghĩa vụ Vi phạm cũ")
         if negative_count:
             msg_parts.append(
-                f"đã chuyển {negative_total:,.0f}đ tiền âm của {negative_count} nhân viên sang kỳ kế tiếp".replace(',', '.')
+                (f"đã tự lưu {negative_total:,.0f}đ phần Thực nhận âm của {negative_count} nhân viên "
+                 f"không được Admin điều chỉnh sang kỳ kế tiếp: {', '.join(auto_negative_names)}").replace(',', '.')
             )
         return True, '; '.join(msg_parts)
     except Exception as e:
@@ -4751,11 +4780,11 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
             "Tiền Hỗ Trợ Hoàn Lại": 0.0,
             "Tích lũy": float(tichluy_map.get(k, 0)),
             "Chi Phí Sinh Hoạt": float(_money_to_float(emp_living)),
-            # Vi phạm kỳ này - phần Admin đã hoãn + nghĩa vụ Vi phạm cũ tới hạn.
+            # V50: tách riêng Vi phạm phát sinh trong kỳ và nghĩa vụ Vi phạm từ kỳ trước.
             "Tiền phạt trong tháng": float(
                 max(0.0, _money_to_float(penalty_map.get(k, 0)) - _money_to_float(deferred_current_violation_map.get(k, 0)))
-                + _money_to_float(due_violation_debt_map.get(k, 0))
             ),
+            "Vi phạm kỳ trước": float(_money_to_float(due_violation_debt_map.get(k, 0))),
             "Tiền ứng lương": 0.0,
             "Tiền hỗ trợ Locker": float(_money_to_float(emp_locker)),
             "Số tiền thực nhận": 0.0,
@@ -4779,7 +4808,8 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
     các khoản nhập tay và Tiền Lương đã lưu.
 
     Tự cập nhật:
-    - Tiền phạt trong kỳ từ Google Sheet lịch nghỉ chính 1Kz0...
+    - Vi phạm trong kỳ từ Google Sheet lịch nghỉ chính 1Kz0...
+    - Vi phạm kỳ trước từ sổ NoViPham đã tới hạn khấu trừ
     - Tích lũy theo sheet TichLuy và quy tắc kỳ lương
     - Phí Sinh Hoạt / Hỗ trợ Locker theo mức mặc định hoặc mức riêng hiện hành
     - Tài khoản ngân hàng / Tên ngân hàng / Email từ hồ sơ nhân viên
@@ -4829,10 +4859,12 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
         # Tiền phạt luôn lấy lại theo đúng kỳ của bản lương đang mở.
         new_penalty = float(
             max(0.0, _money_to_float(penalty_map.get(key, 0)) - _money_to_float(deferred_current_violation_map.get(key, 0)))
-            + _money_to_float(due_violation_debt_map.get(key, 0))
         )
         if 'Tiền phạt trong tháng' in d.columns:
             d.at[idx, 'Tiền phạt trong tháng'] = new_penalty
+        if 'Vi phạm kỳ trước' not in d.columns:
+            d['Vi phạm kỳ trước'] = 0.0
+        d.at[idx, 'Vi phạm kỳ trước'] = float(_money_to_float(due_violation_debt_map.get(key, 0)))
         # Tích lũy của bản lịch sử lấy đúng số kỳ đã ghi nhận; nếu chưa ghi thì tính theo quy tắc hiện tại.
         if 'Tích lũy' in d.columns:
             d.at[idx, 'Tích lũy'] = float(_money_to_float(tichluy_map.get(key, d.at[idx, 'Tích lũy'])))
@@ -4875,7 +4907,7 @@ def recalculate_payroll_net(df):
     d = df.copy()
     money_cols = [
         "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy",
-        "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker"
+        "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker"
     ]
     for col in money_cols:
         if col not in d.columns:
@@ -4884,7 +4916,8 @@ def recalculate_payroll_net(df):
     net = (
         d["Tiền Lương"] + d["Tiền Hỗ Trợ Hoàn Lại"]
         - d["Tích lũy"] - d["Chi Phí Sinh Hoạt"]
-        - d["Tiền phạt trong tháng"] - d["Tiền ứng lương"] - d["Tiền hỗ trợ Locker"]
+        - d["Tiền phạt trong tháng"] - d["Vi phạm kỳ trước"]
+        - d["Tiền ứng lương"] - d["Tiền hỗ trợ Locker"]
     )
     # V47: KHÔNG chặn ở 0. Giá trị âm phải được hiển thị đúng để biết phần nghĩa vụ
     # chưa thanh toán và chuyển sang kỳ lương kế tiếp.
@@ -4911,7 +4944,8 @@ def save_payroll_snapshot(payroll_df, start_date, end_date, source_label, saved_
                 float(_money_to_float(r.get('Tiền phạt trong tháng', 0))), float(_money_to_float(r.get('Tiền ứng lương', 0))),
                 float(_money_to_float(r.get('Tiền hỗ trợ Locker', 0))), float(_money_to_float(r.get('Số tiền thực nhận', 0))),
                 str(r.get('Email', '')), "'" + str(r.get('Số tài khoản ngân hàng', '')).replace("'", ""),
-                str(r.get('Tên ngân hàng', '')), int(_money_to_float(r.get('Số dòng Tip', 0)))
+                str(r.get('Tên ngân hàng', '')), int(_money_to_float(r.get('Số dòng Tip', 0))),
+                float(_money_to_float(r.get('Vi phạm kỳ trước', 0)))
             ]
             rows.append(row)
         if rows:
@@ -4972,7 +5006,8 @@ def overwrite_payroll_snapshot(batch_id, payroll_df, start_date, end_date, sourc
                 float(_money_to_float(r.get('Tiền phạt trong tháng', 0))), float(_money_to_float(r.get('Tiền ứng lương', 0))),
                 float(_money_to_float(r.get('Tiền hỗ trợ Locker', 0))), float(_money_to_float(r.get('Số tiền thực nhận', 0))),
                 str(r.get('Email', '')), "'" + str(r.get('Số tài khoản ngân hàng', '')).replace("'", ""),
-                str(r.get('Tên ngân hàng', '')), int(_money_to_float(r.get('Số dòng Tip', 0)))
+                str(r.get('Tên ngân hàng', '')), int(_money_to_float(r.get('Số dòng Tip', 0))),
+                float(_money_to_float(r.get('Vi phạm kỳ trước', 0)))
             ])
 
         if rows:
@@ -5088,7 +5123,7 @@ def load_payroll_history():
 def payroll_history_to_table(history_df):
     cols = [c for c in PAYROLL_COLUMNS if c in history_df.columns]
     d = history_df[cols].copy()
-    for col in [c for c in PAYROLL_COLUMNS if c.startswith('Tiền') or c in {'Tích lũy','Chi Phí Sinh Hoạt','Số tiền thực nhận'}]:
+    for col in [c for c in PAYROLL_COLUMNS if c.startswith('Tiền') or c in {'Tích lũy','Chi Phí Sinh Hoạt','Vi phạm kỳ trước','Số tiền thực nhận'}]:
         if col in d.columns: d[col] = pd.to_numeric(d[col], errors='coerce').fillna(0)
     if 'TT' in d.columns: d['TT'] = pd.to_numeric(d['TT'], errors='coerce').fillna(0).astype(int)
     if 'Số dòng Tip' in d.columns: d['Số dòng Tip'] = pd.to_numeric(d['Số dòng Tip'], errors='coerce').fillna(0).astype(int)
@@ -5127,11 +5162,13 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
         # Nếu Google Sheets tạm thời lỗi, vẫn cho phép export bằng dữ liệu đã có trong bảng lương.
         pass
 
-    # V45/V46: File Excel export KHÔNG xuất Email. Cột cuối thay bằng Họ và Tên nhân viên.
+    # V45/V50: File Excel export KHÔNG xuất Email. Giữ Họ và Tên nhân viên ở cột M
+    # như cấu trúc đã chốt trước đó; cột Vi phạm kỳ trước được bổ sung sau cùng (cột N).
     export_cols = [
         "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
         "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
-        "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Họ và tên"
+        "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Họ và tên",
+        "Vi phạm kỳ trước"
     ]
     for c in export_cols:
         if c not in d.columns:
@@ -5171,7 +5208,7 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
     thin = Side(style='thin', color='A6A6A6')
 
     start_row = 4
-    money_cols = {"Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker", "Số tiền thực nhận"}
+    money_cols = {"Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker", "Số tiền thực nhận"}
     non_positive_fill = PatternFill('solid', fgColor='FFF2CC')
     for i, (_, r) in enumerate(d.iterrows(), start=start_row):
         for j, col in enumerate(export_cols, start=1):
@@ -5278,6 +5315,7 @@ def build_employee_payroll_excel_bytes(employee_row, start_date, end_date, viola
         ('Tích lũy', 'Tích lũy'),
         ('Chi Phí Sinh Hoạt', 'Chi Phí Sinh Hoạt'),
         ('Tiền phạt trong tháng', 'Tiền phạt trong tháng'),
+        ('Vi phạm kỳ trước', 'Vi phạm kỳ trước'),
         ('Tiền ứng lương', 'Tiền ứng lương'),
         ('Tiền hỗ trợ Locker', 'Tiền hỗ trợ Locker'),
         ('Số tiền thực nhận', 'Số tiền thực nhận'),
@@ -5420,7 +5458,7 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
         subject = f"Bảng lương {emp} - {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}"
         money_fields = [
             "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
-            "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker", "Số tiền thực nhận"
+            "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker", "Số tiền thực nhận"
         ]
         html_rows = "".join(
             f"<tr><td style='padding:6px;border:1px solid #ddd'>{field}</td><td style='padding:6px;border:1px solid #ddd;text-align:right'>{_money_to_float(employee_row.get(field,0)):,.0f} VNĐ</td></tr>"
@@ -6642,14 +6680,19 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             _negative_rows = final_df[final_df['Số tiền thực nhận'].apply(_money_to_float) < 0]
             if not _negative_rows.empty:
                 _negative_total = abs(_negative_rows['Số tiền thực nhận'].apply(_money_to_float).sum())
+                _negative_details = [
+                    f"{str(_r.get('Tên Hệ thống','')).strip()}: {_money_to_float(_r.get('Số tiền thực nhận',0)):,.0f} đ".replace(',', '.')
+                    for _, _r in _negative_rows.iterrows()
+                ]
                 st.warning(
                     f"Có {len(_negative_rows)} nhân viên Thực nhận âm, tổng phần chưa hoàn thành "
-                    f"{_negative_total:,.0f} đ. Khi lưu bảng lương, hệ thống sẽ lưu thành '{VIOLATION_DEBT_CONTENT}' "
-                    "và tự trừ từ kỳ lương kế tiếp.".replace(',', '.')
+                    f"{_negative_total:,.0f} đ. Khi lưu bảng lương, những nhân viên Admin KHÔNG chủ động tạm hoãn "
+                    f"sẽ được tự lưu thành '{VIOLATION_DEBT_CONTENT}' và trừ từ kỳ lương kế tiếp.".replace(',', '.')
                 )
+                st.markdown("**Nhân viên Thực nhận âm:** " + " · ".join(_negative_details))
 
             total_salary = final_df['Tiền Lương'].sum()
-            total_penalty = final_df['Tiền phạt trong tháng'].sum()
+            total_penalty = final_df['Tiền phạt trong tháng'].apply(_money_to_float).sum() + final_df.get('Vi phạm kỳ trước', pd.Series(0, index=final_df.index)).apply(_money_to_float).sum()
             total_net = final_df['Số tiền thực nhận'].sum()
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Nhân viên", len(final_df))
@@ -6659,18 +6702,18 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
 
             display_cols = [
                 "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
-                "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
-                "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
+                "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương",
+                "Tiền hỗ trợ Locker", "Số tiền thực nhận"
             ]
             st.markdown("### 📋 Bảng lương tổng hợp")
             # HTML table dùng width:100% + table-layout:fixed để không tạo thanh cuộn ngang/dọc.
             web_df = final_df[display_cols].copy()
             web_df, payroll_web_widths = apply_table_layout_df(web_df, "payroll_current")
             payroll_internal_order = list(web_df.columns)
-            money_web_cols = [c for c in payroll_internal_order if c.startswith('Tiền') or c in {'Tích lũy','Chi Phí Sinh Hoạt','Số tiền thực nhận'}]
+            money_web_cols = [c for c in payroll_internal_order if c.startswith('Tiền') or c in {'Tích lũy','Chi Phí Sinh Hoạt','Vi phạm kỳ trước','Số tiền thực nhận'}]
             for c in money_web_cols:
                 web_df[c] = web_df[c].apply(lambda v: f"{_money_to_float(v):,.0f}".replace(',', '.'))
-            web_df['Số tài khoản ngân hàng'] = web_df['Số tài khoản ngân hàng'].astype(str).str.replace("'", "", regex=False).replace({'nan':'','None':''})
+            # V50: bảng tổng hợp trên website không hiển thị thông tin ngân hàng hoặc Email.
             # V46: ghi nhớ dòng Thực nhận <= 0 trước khi đổi định dạng/đổi tên cột để
             # có thể tô vàng toàn bộ dòng trên bảng Thống kê lương nhân viên.
             _web_non_positive_mask = final_df['Số tiền thực nhận'].apply(_money_to_float).le(0).tolist()
@@ -6847,7 +6890,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 st.caption("Bảng này được ẩn mặc định. Chỉ mở khi cần chỉnh các khoản cho bảng lương hiện tại.")
                 editor_cols = [
                     "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
-                    "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker"
+                    "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker"
                 ]
                 editor_source = st.session_state.get('payroll_current_df')
                 if isinstance(editor_source, pd.DataFrame) and not editor_source.empty:
@@ -6859,6 +6902,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS["Tên Hệ thống"], disabled=True, width=layout_width("payroll_current", "Tên Hệ thống", "small")),
                         "Tiền Lương": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền Lương"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền Lương", "small")),
                         "Tiền phạt trong tháng": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền phạt trong tháng"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền phạt trong tháng", "small")),
+                        "Vi phạm kỳ trước": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Vi phạm kỳ trước"], format="%,d", disabled=True, width=layout_width("payroll_current", "Vi phạm kỳ trước", "small")),
                         "Tích lũy": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tích lũy"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tích lũy", "small")),
                     }
                     for c in [x for x in PAYROLL_ADJUSTMENT_COLUMNS if x != "Tích lũy"]:
@@ -6870,7 +6914,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         editor_df, key="payroll_adjustment_editor", width="stretch", height="content", hide_index=True,
                         row_height=layout_row_height("payroll_current"),
                         column_config=col_cfg,
-                        disabled=["TT", "Tên Hệ thống", "Tiền Lương", "Tích lũy", "Tiền phạt trong tháng"]
+                        disabled=["TT", "Tên Hệ thống", "Tiền Lương", "Tích lũy", "Tiền phạt trong tháng", "Vi phạm kỳ trước"]
                     )
 
                     adjusted_df = editor_source.copy()
@@ -7083,7 +7127,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
 
                 history_edit_cols = [c for c in [
                     "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy",
-                    "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker",
+                    "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker",
                     "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
                 ] if c in saved_table.columns]
                 hist_editor_df = saved_table[history_edit_cols].copy()
@@ -7099,12 +7143,12 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 }
                 for c in [
                     "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
-                    "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker"
+                    "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker"
                 ]:
                     if c in hist_editor_df.columns:
                         hist_col_cfg[c] = st.column_config.NumberColumn(
                             PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%,d", width=layout_width("payroll_history", c, "small"),
-                            disabled=(c == "Tích lũy")
+                            disabled=(c in {"Tích lũy", "Vi phạm kỳ trước"})
                         )
 
                 hist_editor_version = int(st.session_state.get(hist_editor_version_key, 0) or 0)
@@ -7114,7 +7158,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     width="stretch", height="content", hide_index=True,
                     row_height=layout_row_height("payroll_history"),
                     column_config=hist_col_cfg,
-                    disabled=[c for c in ["TT", "Tên Hệ thống", "Tích lũy", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"] if c in hist_editor_df.columns]
+                    disabled=[c for c in ["TT", "Tên Hệ thống", "Tích lũy", "Vi phạm kỳ trước", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"] if c in hist_editor_df.columns]
                 )
 
                 edited_saved_table = saved_table.copy()

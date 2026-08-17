@@ -510,7 +510,7 @@ online_users_count = len(active_users)
 online_users_list = list(active_users.keys())
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Vera-Spa", page_icon="📅", layout="wide", initial_sidebar_state="auto")
+st.set_page_config(page_title="Vera Spa Tam Hiệp Đồng Nai", page_icon="📅", layout="wide", initial_sidebar_state="auto")
 
 # --- JAVASCRIPT: NHỚ ĐĂNG NHẬP + ĐÓNG DROPDOWN KHI BẤM RA NGOÀI ---
 components.html("""
@@ -881,11 +881,11 @@ FRONTDESK_MANAGEABLE_ROLES = {"nhanvien", "locker", "tapvu"}
 FEATURE_PERMISSION_WORKSHEET = "PhanQuyenChucNang"
 FEATURE_PERMISSION_HEADERS = ["Phạm vi", "Đối tượng", "Chức năng", "Cho phép", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"]
 FEATURE_DEFINITIONS = {
-    "tour": "🧭 Bảng Tour",
+    "tour": "🧭 Bảng tour",
     "payroll": "💰 Bảng lương",
     "payroll_history": "🗂 Lịch sử bảng lương",
     "payroll_email": "📧 Gửi email bảng lương",
-    "leave": "📅 Đăng ký & Thống kê nghỉ phép",
+    "leave": "📅 Đăng ký nghỉ phép",
     "leave_manage": "✏️ Quản lý lịch nghỉ",
     "shift": "⏰ Thiết lập ca làm việc",
     "staff_list": "👥 Danh sách nhân sự",
@@ -924,11 +924,11 @@ EMPLOYMENT_STATUS_ACTIVE = "Đang làm việc"
 EMPLOYMENT_STATUS_TEMP = "Nghỉ việc tạm thời"
 EMPLOYMENT_STATUS_LEFT = "Đã nghỉ việc hẳn"
 EMPLOYMENT_STATUS_OPTIONS = [EMPLOYMENT_STATUS_ACTIVE, EMPLOYMENT_STATUS_TEMP, EMPLOYMENT_STATUS_LEFT]
-DEFAULT_LEAVE_PAGE = "📅 Đăng ký & Thống kê nghỉ phép"
+DEFAULT_LEAVE_PAGE = "📅 Đăng ký nghỉ phép"
 DEFAULT_LEAVE_PAGE_SLUG = "dang-ky-thong-ke-nghi-phep"
 
 def _set_default_page_after_login(role):
-    """Lễ tân/Quản lý/Nhân viên luôn mở trang Đăng ký & Thống kê nghỉ phép sau đăng nhập."""
+    """Lễ tân/Quản lý/Nhân viên luôn mở trang Đăng ký nghỉ phép sau đăng nhập."""
     role_norm = str(role or '').strip().lower()
     if role_norm in {"letan", "quanly", "nhanvien", "leader"}:
         st.session_state.app_page = DEFAULT_LEAVE_PAGE
@@ -2229,6 +2229,26 @@ def build_leave_reason_catalog(source_df=None):
     return catalog
 
 
+def add_source_leave_type_column(df):
+    """V72: thêm cột hiển thị `Loại nghỉ` lấy trực tiếp từ giá trị cột C nguồn.
+
+    Hệ thống hiện dùng tên nội bộ `Lý do nghỉ` cho cột C của sheet 1Kz0... để giữ
+    tương thích nghiệp vụ cũ. Cột `Loại nghỉ` mới là bản chụp nguồn/read-only, được
+    đặt ngay sau `Lý do nghỉ` trong Chi tiết danh sách và Quản lý lịch nghỉ.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return df
+    d = df.copy()
+    if 'Lý do nghỉ' not in d.columns:
+        return d
+    source_values = d['Lý do nghỉ'].copy()
+    if 'Loại nghỉ' in d.columns:
+        d = d.drop(columns=['Loại nghỉ'])
+    pos = d.columns.get_loc('Lý do nghỉ') + 1
+    d.insert(pos, 'Loại nghỉ', source_values)
+    return d
+
+
 def get_leave_reason_options(source_df=None, extra_values=None):
     """Danh sách dropdown Lý do nghỉ luôn chứa ĐÚNG chuỗi hiện có của dữ liệu lịch sử.
 
@@ -2878,7 +2898,7 @@ def _excel_col_letter(idx):
 
 @st.cache_data(ttl=15, show_spinner=False)
 def load_bang_tour_input():
-    """Đọc sheet Input từ file Bảng Tour dạng .XLSM trên Google Drive."""
+    """Đọc sheet Input từ file Bảng tour dạng .XLSM trên Google Drive."""
     temp_file = f"temp_bangtour_{os.getpid()}_{int(time.time())}.xlsm"
     try:
         download_file_from_google_drive(BANG_TOUR_FILE_ID, temp_file)
@@ -2932,7 +2952,7 @@ def load_bang_tour_input():
     except ValueError as e:
         return pd.DataFrame(), f"Không đọc được sheet Input trong file XLSM: {e}"
     except Exception as e:
-        return pd.DataFrame(), f"Lỗi tải/đọc Bảng Tour XLSM: {e}"
+        return pd.DataFrame(), f"Lỗi tải/đọc Bảng tour XLSM: {e}"
     finally:
         try:
             if os.path.exists(temp_file):
@@ -3009,7 +3029,7 @@ def _tour_norm_token(v):
 
 def prepare_bang_tour_display(df):
     """
-    Chuẩn bị dữ liệu HIỂN THỊ cho Bảng Tour sau khi đọc từ file:
+    Chuẩn bị dữ liệu HIỂN THỊ cho Bảng tour sau khi đọc từ file:
     - Tên Nhân Viên -> Trạng Thái -> Thời gian còn lại -> các cột khác.
     - DANG CHO -> Đang chờ; DANG THUC HIEN -> Đang thực hiện.
     - Mọi giá trị số hiển thị dạng SỐ NGUYÊN, không có phần thập phân.
@@ -3085,7 +3105,7 @@ def prepare_bang_tour_display(df):
     return out
 
 def calculate_bang_tour_stats(df):
-    """Tính bảng thống kê số lượng cho Bảng Tour từ dữ liệu gốc vừa tải."""
+    """Tính bảng thống kê số lượng cho Bảng tour từ dữ liệu gốc vừa tải."""
     if df.empty:
         return pd.DataFrame(columns=["Chỉ số", "Số lượng"])
 
@@ -3155,7 +3175,7 @@ def calculate_bang_tour_stats(df):
 
 def style_bang_tour(df):
     """
-    Tô nguyên dòng Bảng Tour theo quy tắc vận hành Vera.
+    Tô nguyên dòng Bảng tour theo quy tắc vận hành Vera.
     - Nghỉ phép: nền trắng, chữ mờ.
     - Đi làm: nền trắng, chữ đen.
     - Thời gian >= 15: xanh lá.
@@ -3730,7 +3750,7 @@ def render_admin_theme_config_panel():
 # V37: thứ tự + độ rộng + độ cao dòng + font + kiểu chữ + căn lề + wrap text
 # ==========================================================
 TABLE_LAYOUT_LABELS = {
-    "tour_main": "Bảng Tour",
+    "tour_main": "Bảng tour",
     "staff_list": "Danh sách nhân sự",
     "payroll_current": "Bảng lương",
     "payroll_history": "Bảng lương đã lưu / chỉnh sửa",
@@ -3753,11 +3773,11 @@ TABLE_LAYOUT_STATIC_COLUMNS = {
         "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
     ],
     "leave_detail": [
-        "Chọn", "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+        "Chọn", "Ngày", "Tên nhân viên", "Lý do nghỉ", "Loại nghỉ", "Chi tiết", "Số ngày tính",
         "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
     ],
     "leave_manage": [
-        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Loại nghỉ", "Chi tiết", "Số ngày tính",
         "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
     ],
 }
@@ -3874,6 +3894,11 @@ def get_table_layout(table_key, available_columns):
     cfg = layouts.get(str(table_key), {})
     saved_order = [str(c) for c in cfg.get("order", []) if str(c) in available]
     order = saved_order + [c for c in available if c not in saved_order]
+    # V72: cột Loại nghỉ là bản chụp trực tiếp cột C của sheet lịch nghỉ.
+    # Nếu cấu hình cột cũ chưa biết cột mới, vẫn ép vị trí mặc định ngay sau Lý do nghỉ.
+    if str(table_key) in {"leave_detail", "leave_manage"} and "Loại nghỉ" in order and "Lý do nghỉ" in order:
+        order = [c for c in order if c != "Loại nghỉ"]
+        order.insert(order.index("Lý do nghỉ") + 1, "Loại nghỉ")
     saved_widths = cfg.get("widths", {}) if isinstance(cfg.get("widths", {}), dict) else {}
     widths = {}
     for c in available:
@@ -6135,6 +6160,17 @@ def commit_violation_debts_after_payroll(payroll_df, start_date, end_date, saved
         return False, f"Lỗi cập nhật nghĩa vụ Vi phạm chuyển kỳ: {e}"
 
 
+def is_payroll_period_2(start_date, end_date):
+    """Kỳ 2 cố định: ngày 16 đến ngày cuối cùng của cùng một tháng."""
+    try:
+        s = pd.to_datetime(start_date).date()
+        e = pd.to_datetime(end_date).date()
+        last_day = calendar.monthrange(s.year, s.month)[1]
+        return s.year == e.year and s.month == e.month and s.day == 16 and e.day == last_day
+    except Exception:
+        return False
+
+
 def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_primary=None, leave_secondary=None, default_living_expense=150000, default_locker_support=80000, leader_responsibility_allowance=0):
     """Tổng hợp lương: chỉ cộng G khi F bắt đầu bằng 'Tip', nhóm theo tên nhân viên ở cột I."""
     if source_df is None or source_df.empty:
@@ -6181,6 +6217,9 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
         start_date, end_date, creds['Tên nhân viên'].astype(str).tolist(), for_existing_snapshot=True
     )
 
+    # V72: Tiền trách nhiệm Leader chỉ được tự động cộng ở Kỳ 2 (16 -> cuối tháng).
+    leader_allowance_active = is_payroll_period_2(start_date, end_date)
+
     rows = []
     for idx, (_, c) in enumerate(creds.iterrows(), start=1):
         k = c['__key']
@@ -6193,8 +6232,11 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
             "Tên Hệ thống": str(c.get('Tên nhân viên', '')).strip(),
             "Họ và tên": str(c.get('Họ và tên đầy đủ', '')).strip(),
             "Tiền Lương": float(salary_map.get(k, 0)),
-            # Leader được cộng tiền trách nhiệm vào đúng cột Hỗ Trợ Hoàn Lại.
-            "Tiền Hỗ Trợ Hoàn Lại": float(_money_to_float(leader_responsibility_allowance)) if _emp_role == 'leader' else 0.0,
+            # V72: Leader chỉ được cộng tiền trách nhiệm vào Hỗ Trợ Hoàn Lại ở Kỳ 2 hằng tháng.
+            "Tiền Hỗ Trợ Hoàn Lại": (
+                float(_money_to_float(leader_responsibility_allowance))
+                if _emp_role == 'leader' and leader_allowance_active else 0.0
+            ),
             "Tích lũy": float(tichluy_map.get(k, 0)),
             "Chi Phí Sinh Hoạt": float(_money_to_float(emp_living)),
             # V50: tách riêng Vi phạm phát sinh trong kỳ và nghĩa vụ Vi phạm từ kỳ trước.
@@ -6249,6 +6291,7 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
     # Dùng cùng snapshot cấu hình để tránh phát sinh nhiều request Google Sheets.
     default_living, default_locker = get_payroll_default_amounts()
     leader_allowance = get_leader_responsibility_allowance()
+    leader_allowance_active = is_payroll_period_2(start_date, end_date)
     overrides = get_payroll_employee_overrides()
     penalty_map = _period_penalty_by_employee(start_date, end_date, leave_df, None)
     due_violation_debt_map, deferred_current_violation_map, _ = get_violation_debt_state(
@@ -6301,8 +6344,10 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
         if cr is None:
             missing.append(emp_name)
         else:
-            # Nếu là Leader, bảo đảm Hỗ Trợ Hoàn Lại có tối thiểu mức tiền trách nhiệm hiện hành.
-            if str(cr.get('Phân quyền', '')).strip().lower() == 'leader' and 'Tiền Hỗ Trợ Hoàn Lại' in d.columns:
+            # V72: chỉ tự động bảo đảm Tiền trách nhiệm Leader trong Kỳ 2.
+            # Kỳ 1 tuyệt đối không tự cộng khoản trách nhiệm vào Hỗ Trợ Hoàn Lại.
+            if (leader_allowance_active and str(cr.get('Phân quyền', '')).strip().lower() == 'leader'
+                    and 'Tiền Hỗ Trợ Hoàn Lại' in d.columns):
                 d.at[idx, 'Tiền Hỗ Trợ Hoàn Lại'] = max(
                     float(_money_to_float(d.at[idx, 'Tiền Hỗ Trợ Hoàn Lại'])), float(_money_to_float(leader_allowance))
                 )
@@ -7133,9 +7178,9 @@ if st.session_state.current_role == "tapvu" and not any(has_feature_access(_f) f
 is_admin_letan = st.session_state.current_role in ["admin", "letan", "quanly"]
 
 PAGE_SLUGS = {
-    "🧭 Bảng Tour": "bang-tour",
+    "🧭 Bảng tour": "bang-tour",
     "💰 Bảng lương": "bang-luong",
-    "📅 Đăng ký & Thống kê nghỉ phép": "dang-ky-thong-ke-nghi-phep",
+    "📅 Đăng ký nghỉ phép": "dang-ky-thong-ke-nghi-phep",
     "✏️ Quản lý lịch nghỉ": "quan-ly-lich-nghi",
     "⏰ Thiết lập ca làm việc": "thiet-lap-ca",
     "👥 Danh sách nhân sự": "danh-sach-nhan-su",
@@ -7154,9 +7199,9 @@ SLUG_TO_PAGE = {v: k for k, v in PAGE_SLUGS.items()}
 payroll_letan_enabled = get_payroll_letan_enabled()
 
 PAGE_FEATURE_KEYS = {
-    "🧭 Bảng Tour": "tour",
+    "🧭 Bảng tour": "tour",
     "💰 Bảng lương": "payroll",
-    "📅 Đăng ký & Thống kê nghỉ phép": "leave",
+    "📅 Đăng ký nghỉ phép": "leave",
     "✏️ Quản lý lịch nghỉ": "leave_manage",
     "⏰ Thiết lập ca làm việc": "shift",
     "👥 Danh sách nhân sự": "staff_list",
@@ -7323,6 +7368,106 @@ def render_global_unsaved_changes_guard(page_labels):
 
 render_global_unsaved_changes_guard(allowed_pages)
 
+# V72 - NÚT LƯU NỔI TOÀN HỆ THỐNG.
+# Khi trang có nút Lưu/Save đang khả dụng, một nút nổi cố định sẽ luôn hiện ở góc dưới.
+# Nó tự nhắm tới nút Lưu gần vùng đang xem nhất, nên dùng được cho cả form và data_editor.
+components.html(r"""
+<script>
+(function () {
+  try {
+    const win = window.parent;
+    const doc = win.document;
+    const FLOAT_ID = 'vera-global-floating-save-v72';
+    const STYLE_ID = 'vera-global-floating-save-style-v72';
+
+    if (!doc.getElementById(STYLE_ID)) {
+      const style = doc.createElement('style');
+      style.id = STYLE_ID;
+      style.textContent = `
+        #${FLOAT_ID} {
+          position: fixed; right: 20px; bottom: 18px; z-index: 2147483000;
+          display: none; align-items: center; justify-content: center;
+          max-width: min(420px, calc(100vw - 32px)); min-height: 46px;
+          padding: 10px 18px; border-radius: 12px; border: 1px solid #D9D9D9;
+          background: #ffffff; color: #262730; font: 700 16px Roboto, Arial, sans-serif;
+          box-shadow: 0 8px 28px rgba(0,0,0,.18); cursor: pointer;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        #${FLOAT_ID}:hover { transform: translateY(-2px); box-shadow: 0 10px 32px rgba(0,0,0,.22); }
+        @media (max-width: 768px) {
+          #${FLOAT_ID} { right: 10px; left: 10px; bottom: 12px; max-width: none; width: calc(100vw - 20px); font-size: 15px; }
+        }
+      `;
+      doc.head.appendChild(style);
+    }
+
+    let floater = doc.getElementById(FLOAT_ID);
+    if (!floater) {
+      floater = doc.createElement('button');
+      floater.id = FLOAT_ID;
+      floater.type = 'button';
+      floater.setAttribute('aria-label', 'Lưu thay đổi');
+      doc.body.appendChild(floater);
+    }
+
+    let currentTarget = null;
+    function isSaveButton(btn) {
+      if (!btn || btn.id === FLOAT_ID || btn.disabled) return false;
+      const txt = (btn.innerText || btn.textContent || '').trim();
+      const low = txt.toLocaleLowerCase('vi-VN');
+      if (!(low.includes('lưu') || low.includes('save') || txt.includes('💾'))) return false;
+      const style = win.getComputedStyle(btn);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      if (!btn.offsetParent) return false;
+      return true;
+    }
+
+    function refreshTarget() {
+      const buttons = Array.from(doc.querySelectorAll('button')).filter(isSaveButton);
+      if (!buttons.length) {
+        currentTarget = null; floater.style.display = 'none'; return;
+      }
+      const center = win.innerHeight / 2;
+      let best = null, bestScore = Number.POSITIVE_INFINITY;
+      for (const btn of buttons) {
+        const r = btn.getBoundingClientRect();
+        const btnCenter = (r.top + r.bottom) / 2;
+        let score = Math.abs(btnCenter - center);
+        // Ưu tiên nút đang nằm trong viewport hiện tại.
+        if (r.bottom < 0 || r.top > win.innerHeight) score += win.innerHeight * 0.75;
+        if (score < bestScore) { bestScore = score; best = btn; }
+      }
+      currentTarget = best;
+      if (!best) { floater.style.display = 'none'; return; }
+      let label = (best.innerText || best.textContent || '💾 Lưu thay đổi').trim();
+      if (label.length > 52) label = '💾 Lưu thay đổi';
+      floater.textContent = label || '💾 Lưu thay đổi';
+      floater.disabled = !!best.disabled;
+      floater.style.display = 'flex';
+    }
+
+    floater.onclick = function () {
+      refreshTarget();
+      if (currentTarget && !currentTarget.disabled) currentTarget.click();
+    };
+
+    if (!win.__veraFloatingSaveBoundV72) {
+      win.__veraFloatingSaveBoundV72 = true;
+      let timer = null;
+      const schedule = () => { clearTimeout(timer); timer = setTimeout(refreshTarget, 70); };
+      win.addEventListener('scroll', schedule, {passive:true});
+      win.addEventListener('resize', schedule, {passive:true});
+      const observer = new MutationObserver(schedule);
+      observer.observe(doc.body, {childList:true, subtree:true});
+      win.__veraFloatingSaveObserverV72 = observer;
+      win.__veraFloatingSaveIntervalV72 = win.setInterval(refreshTarget, 800);
+    }
+    refreshTarget();
+  } catch (e) { console.debug('Vera floating save:', e); }
+})();
+</script>
+""", height=0, width=0)
+
 
 def open_app_page(page_name):
     if page_name not in allowed_pages:
@@ -7354,7 +7499,7 @@ st.write("")
 col_title, col_logout = st.columns([8, 2])
 with col_title:
     st.markdown("""
-        <div class='custom-main-title'>WELCOME TO VERA-SPA</div>
+        <div class='custom-main-title'>VERA SPA TAM HIỆP ĐỒNG NAI</div>
     """, unsafe_allow_html=True)
 with col_logout:
     if st.button("🚪 Đăng xuất", use_container_width=True):
@@ -8171,7 +8316,7 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                         )
                     with cfg3:
                         payroll_leader_allowance = st.number_input(
-                            "Tiền trách nhiệm Leader / kỳ", min_value=0.0, step=50000.0, format="%.0f",
+                            "Tiền trách nhiệm Leader / Kỳ 2", min_value=0.0, step=50000.0, format="%.0f",
                             value=float(leader_allowance_db), key="payroll_leader_allowance",
                             help="Khoản này tự động cộng vào cột Hỗ Trợ Hoàn Lại của tài khoản Leader khi tính lương."
                         )
@@ -8186,7 +8331,7 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                                 st.error(" | ".join([m for o, m in [(ok1,msg1),(ok2,msg2)] if not o]))
                     st.caption(
                         "Nhân viên/Leader dùng Phí Sinh Hoạt và Locker theo mức mặc định hoặc mức riêng. "
-                        "Leader được cộng thêm Tiền trách nhiệm vào Hỗ Trợ Hoàn Lại."
+                        "Leader chỉ được cộng Tiền trách nhiệm vào Hỗ Trợ Hoàn Lại ở Kỳ 2 (ngày 16 đến cuối tháng)."
                     )
 
                     st.markdown("#### 👥 Mức riêng theo Nhân viên / Leader")
@@ -9502,12 +9647,12 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                                                             st.error(msg)
                                         else:
                                             st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
-elif selected_page == "🧭 Bảng Tour":
-    st.subheader("🧭 Bảng Tour")
+elif selected_page == "🧭 Bảng tour":
+    st.subheader("🧭 Bảng tour")
 
     c_refresh, _ = st.columns([2, 8])
     with c_refresh:
-        if st.button("🔄 Làm mới Bảng Tour", use_container_width=True):
+        if st.button("🔄 Làm mới Bảng tour", use_container_width=True):
             load_bang_tour_input.clear()
             st.rerun()
 
@@ -9519,7 +9664,7 @@ elif selected_page == "🧭 Bảng Tour":
     else:
         # Bảng thống kê dùng dữ liệu GỐC vừa đọc, trước khi làm trống thời gian <= -15.
         tour_stats_df = calculate_bang_tour_stats(df_tour)
-        st.markdown("### 📊 Thống kê Bảng Tour")
+        st.markdown("### 📊 Thống kê Bảng tour")
         def style_tour_stats_row(row):
             if str(row.get("Chỉ số", "")).strip() == "Có thể lên tour":
                 return ["background-color:#92D050;color:#000000;font-weight:700;"] * len(row)
@@ -9583,7 +9728,7 @@ elif selected_page == "🧭 Bảng Tour":
             "≥15 phút = xanh; 0–<15 = vàng; -15–<0 = đỏ; ≤-15 làm trống thời gian; Break = cam."
         )
 
-elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
+elif selected_page == "📅 Đăng ký nghỉ phép":
     st.subheader("➕ Đăng ký lịch nghỉ")
     all_users = get_leave_eligible_employee_names(df_credentials, df_nv_excel)
     if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and system_status["lock_nv"]:
@@ -10106,7 +10251,9 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
 
     st.markdown("---")
 
-    export_df = format_display_df(filtered_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
+    export_source_df = filtered_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore').copy()
+    export_source_df = add_source_leave_type_column(export_source_df)
+    export_df = format_display_df(export_source_df)
     df_for_excel = export_df.copy()
     if st.session_state.current_role == "admin" and not df_for_excel.empty:
         tong_cong_row = pd.Series(index=df_for_excel.columns, dtype=object)
@@ -10209,6 +10356,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             # Admin/Lễ tân/Quản lý: checkbox chọn 1 hoặc nhiều dòng và sửa trực tiếp tại bảng.
             raw_detail_full = filtered_df.copy().reset_index(drop=True)
             raw_detail = raw_detail_full.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore').copy()
+            raw_detail = add_source_leave_type_column(raw_detail)
             if 'Lý do nghỉ' in raw_detail.columns:
                 raw_detail['Lý do nghỉ'] = raw_detail['Lý do nghỉ'].apply(clean_leave_reason_display)
 
@@ -10244,6 +10392,8 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                 "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
             ]
             disabled_cols = [c for c in derived_cols if c in editor_df.columns]
+            if "Loại nghỉ" in editor_df.columns:
+                disabled_cols.append("Loại nghỉ")
             if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and "Tên nhân viên" in editor_df.columns:
                 disabled_cols.append("Tên nhân viên")
 
@@ -10264,6 +10414,12 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                     "Lý do nghỉ", options=reason_options, required=True,
                     width=layout_width("leave_detail", "Lý do nghỉ", "medium"),
                     help="Bấm vào ô để mở dropdown rồi gõ tên loại nghỉ để tìm nhanh. Danh sách lấy từ sheet LoaiNghi."
+                )
+            if "Loại nghỉ" in editor_df.columns:
+                detail_col_config["Loại nghỉ"] = st.column_config.TextColumn(
+                    "Loại nghỉ", disabled=True,
+                    width=layout_width("leave_detail", "Loại nghỉ", "medium"),
+                    help="Giá trị nguồn trực tiếp từ cột C của Google Sheet lịch nghỉ."
                 )
             if "Số ngày tính" in editor_df.columns:
                 detail_col_config["Số ngày tính"] = st.column_config.NumberColumn(
@@ -10295,7 +10451,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                     column_config=detail_col_config, key=editor_key
                 )
                 st.caption(
-                    "Sửa trực tiếp nhiều dòng rồi bấm Lưu một lần. Cột Lý do nghỉ là dropdown có thể gõ để tìm. "
+                    "Sửa trực tiếp nhiều dòng rồi bấm Lưu một lần. Cột Lý do nghỉ là dropdown có thể gõ để tìm; cột Loại nghỉ là dữ liệu nguồn cột C và chỉ đọc. "
                     "Checkbox Chọn chỉ dùng khi muốn xóa dòng."
                 )
                 _d_save, _d_delete = st.columns(2)
@@ -10389,7 +10545,8 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         if co_phep_df.empty:
             st.info("Trống.")
         else:
-            co_display = format_display_df(co_phep_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
+            co_display_source = add_source_leave_type_column(co_phep_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore').copy())
+            co_display = format_display_df(co_display_source)
             co_display, _ = apply_table_layout_df(co_display, "leave_detail")
             st.dataframe(
                 neutralize_khong_phep_rows_styler(
@@ -10403,7 +10560,8 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         if phat_sinh_df.empty:
             st.info("Trống.")
         else:
-            ps_display = format_display_df(phat_sinh_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
+            ps_display_source = add_source_leave_type_column(phat_sinh_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore').copy())
+            ps_display = format_display_df(ps_display_source)
             ps_display, _ = apply_table_layout_df(ps_display, "leave_detail")
             st.dataframe(
                 neutralize_khong_phep_rows_styler(
@@ -10417,7 +10575,8 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         if khong_phep_df.empty:
             st.success("Không có ai!")
         else:
-            kp_display = format_display_df(khong_phep_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore'))
+            kp_display_source = add_source_leave_type_column(khong_phep_df.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore').copy())
+            kp_display = format_display_df(kp_display_source)
             kp_display, _ = apply_table_layout_df(kp_display, "leave_detail")
             st.dataframe(
                 neutralize_khong_phep_rows_styler(
@@ -10511,6 +10670,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
     else:
         manage_raw_full = df_backup_view.reset_index(drop=True).copy()
         manage_visible = manage_raw_full.drop(columns=['__source_sheet_id', '__source_row'], errors='ignore').copy()
+        manage_visible = add_source_leave_type_column(manage_visible)
         if st.session_state.current_role != "admin" and "Phạt vi phạm" in manage_visible.columns:
             manage_visible = manage_visible.drop(columns=["Phạt vi phạm"])
         if 'Lý do nghỉ' in manage_visible.columns:
@@ -10537,6 +10697,11 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
                 width=layout_width('leave_manage', 'Lý do nghỉ', 'medium'),
                 help='Click vào ô để mở dropdown. Có thể gõ trực tiếp tên loại nghỉ để tìm trong danh sách.'
             )
+        if 'Loại nghỉ' in manage_visible.columns:
+            manage_col_config['Loại nghỉ'] = st.column_config.TextColumn(
+                'Loại nghỉ', disabled=True, width=layout_width('leave_manage', 'Loại nghỉ', 'medium'),
+                help='Giá trị nguồn trực tiếp từ cột C của Google Sheet lịch nghỉ.'
+            )
         if 'Số ngày tính' in manage_visible.columns:
             manage_col_config['Số ngày tính'] = st.column_config.NumberColumn('Số ngày tính', format='%.1f', disabled=True)
         if 'Số ngày phép cộng dồn' in manage_visible.columns:
@@ -10547,7 +10712,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             if _c in manage_visible.columns:
                 manage_col_config[_c] = st.column_config.TextColumn(_c, disabled=True)
 
-        manage_derived = [c for c in ['Số ngày tính','Số ngày phép cộng dồn','Phạt vi phạm','Ngày cập nhật','Giờ cập nhật','Người cập nhật'] if c in manage_visible.columns]
+        manage_derived = [c for c in ['Loại nghỉ','Số ngày tính','Số ngày phép cộng dồn','Phạt vi phạm','Ngày cập nhật','Giờ cập nhật','Người cập nhật'] if c in manage_visible.columns]
         if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and 'Tên nhân viên' in manage_visible.columns:
             manage_derived.append('Tên nhân viên')
         manage_locked = st.session_state.current_role in EMPLOYEE_LIKE_ROLES and system_status['lock_nv']
@@ -10565,7 +10730,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
                 key='leave_manage_batch_editor_v70'
             )
             st.caption(
-                "Sửa trực tiếp nhiều dòng rồi bấm Lưu một lần. Dropdown Lý do nghỉ hỗ trợ gõ để tìm. "
+                "Sửa trực tiếp nhiều dòng rồi bấm Lưu một lần. Dropdown Lý do nghỉ hỗ trợ gõ để tìm; cột Loại nghỉ là dữ liệu nguồn cột C và chỉ đọc. "
                 "Checkbox Chọn chỉ dùng cho thao tác Xóa."
             )
             _m_save, _m_delete = st.columns(2)
@@ -10580,6 +10745,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
 
         manage_edit_only = manage_editor.drop(columns=['Chọn'], errors='ignore').reset_index(drop=True)
         manage_original_visible = manage_raw_full.drop(columns=['__source_sheet_id','__source_row'], errors='ignore').copy()
+        manage_original_visible = add_source_leave_type_column(manage_original_visible)
         if st.session_state.current_role != 'admin' and 'Phạt vi phạm' in manage_original_visible.columns:
             manage_original_visible = manage_original_visible.drop(columns=['Phạt vi phạm'])
         if 'Lý do nghỉ' in manage_original_visible.columns:

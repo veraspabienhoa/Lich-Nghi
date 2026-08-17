@@ -736,6 +736,185 @@ LEAVE_EXCLUDED_ROLES = {"letan", "locker", "tapvu"}
 TICHLUY_EXCLUDED_ROLES = {"admin", "letan", "quanly", "locker", "tapvu"}
 FRONTDESK_ROLES = {"letan", "quanly"}
 
+# V48: Thông báo sinh nhật đầu tháng.
+BIRTHDAY_NOTICE_WORKSHEET = "ThongBaoSinhNhat"
+BIRTHDAY_VIEWER_ROLES = {"admin", "quanly", "letan"}
+BIRTHDAY_EMPLOYEE_ROLES = {"nhanvien", "letan", "locker"}
+BIRTHDAY_NOTICE_DAYS = {1, 2, 3, 4, 5}
+BIRTHDAY_NOTICE_MAX_LOGINS_PER_DAY = 3
+DEFAULT_LEAVE_PAGE = "📅 Đăng ký & Thống kê nghỉ phép"
+DEFAULT_LEAVE_PAGE_SLUG = "dang-ky-thong-ke-nghi-phep"
+
+def _set_default_page_after_login(role):
+    """Lễ tân/Quản lý/Nhân viên luôn mở trang Đăng ký & Thống kê nghỉ phép sau đăng nhập."""
+    role_norm = str(role or '').strip().lower()
+    if role_norm in {"letan", "quanly", "nhanvien"}:
+        st.session_state.app_page = DEFAULT_LEAVE_PAGE
+        try:
+            st.query_params["page"] = DEFAULT_LEAVE_PAGE_SLUG
+        except Exception:
+            pass
+
+def _parse_birthday_date(value):
+    """Đọc ngày sinh từ dd/mm/yyyy, dd-mm-yyyy, serial Excel; chấp nhận cả dd/mm."""
+    parsed = _parse_vn_date(value)
+    if parsed is not None:
+        return parsed
+    text = str(value or '').strip()
+    if not text:
+        return None
+    for fmt in ('%d/%m', '%d-%m'):
+        try:
+            tmp = datetime.strptime(text, fmt)
+            return date(2000, tmp.month, tmp.day)
+        except Exception:
+            pass
+    return None
+
+def get_month_birthdays(credentials_df, month=None):
+    """Danh sách sinh nhật trong tháng của nhanvien/letan/locker, sắp theo ngày sinh."""
+    if credentials_df is None or credentials_df.empty:
+        return []
+    month = int(month or get_vn_today().month)
+    rows = []
+    for _, r in credentials_df.iterrows():
+        role = str(r.get('Phân quyền', '')).strip().lower()
+        if role not in BIRTHDAY_EMPLOYEE_ROLES:
+            continue
+        dob = _parse_birthday_date(r.get('Ngày sinh', ''))
+        if dob is None or dob.month != month:
+            continue
+        system_name = str(r.get('Tên nhân viên', '')).strip()
+        full_name = str(r.get('Họ và tên đầy đủ', '')).strip()
+        display_name = full_name or system_name
+        if not display_name:
+            continue
+        rows.append({
+            'Tên nhân viên': system_name,
+            'Họ và tên': display_name,
+            'Ngày sinh': f"{dob.day:02d}/{dob.month:02d}",
+            'Ngày': dob.day,
+            'Vai trò': role,
+        })
+    rows.sort(key=lambda x: (x['Ngày'], normalize_login_name(x['Họ và tên'])))
+    return rows
+
+def _get_birthday_notice_worksheet():
+    client = get_gspread_client()
+    if not client:
+        return None
+    ss = client.open_by_key(SHEET_MAT_KHAU_ID)
+    ws = _get_or_create_worksheet(ss, BIRTHDAY_NOTICE_WORKSHEET, rows=1000, cols=6)
+    header = _gs_call_with_backoff(ws.row_values, 1)
+    wanted = ["Tài khoản", "Ngày", "Số lần đăng nhập", "Tạm tắt hôm nay"]
+    if header[:4] != wanted:
+        gspread_update_range(ws, 'A1:D1', [wanted])
+    return ws
+
+def register_birthday_notice_login(username):
+    """Tăng bộ đếm đúng 1 lần cho một lần đăng nhập; trả về (count, muted)."""
+    today_key = get_vn_today().isoformat()
+    user_key = normalize_login_name(username)
+    try:
+        ws = _get_birthday_notice_worksheet()
+        if ws is None:
+            return 1, False
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        found_row = None
+        count = 0
+        muted = False
+        for idx, row in enumerate(vals[1:], start=2):
+            if len(row) < 2:
+                continue
+            if normalize_login_name(row[0]) == user_key and str(row[1]).strip() == today_key:
+                found_row = idx
+                try:
+                    count = int(float(str(row[2]).strip() or '0')) if len(row) > 2 else 0
+                except Exception:
+                    count = 0
+                muted = str(row[3]).strip().casefold() in {'1','true','yes','x','tat','tắt'} if len(row) > 3 else False
+                break
+        count += 1
+        if found_row:
+            gspread_update_range(ws, f'C{found_row}', [[count]])
+        else:
+            _gs_call_with_backoff(ws.append_row, [str(username), today_key, count, ''], value_input_option='USER_ENTERED')
+        return count, muted
+    except Exception:
+        # Nếu Google Sheets tạm lỗi, vẫn cho hiện thông báo trong phiên hiện tại.
+        return 1, False
+
+def mute_birthday_notice_today(username):
+    """Tạm tắt thông báo sinh nhật cho tài khoản hiện tại đến hết ngày hôm nay."""
+    today_key = get_vn_today().isoformat()
+    user_key = normalize_login_name(username)
+    try:
+        ws = _get_birthday_notice_worksheet()
+        if ws is None:
+            return False, "Không kết nối được Google Sheets."
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        found_row = None
+        count = 0
+        for idx, row in enumerate(vals[1:], start=2):
+            if len(row) >= 2 and normalize_login_name(row[0]) == user_key and str(row[1]).strip() == today_key:
+                found_row = idx
+                try:
+                    count = int(float(str(row[2]).strip() or '0')) if len(row) > 2 else 0
+                except Exception:
+                    count = 0
+                break
+        if found_row:
+            gspread_update_range(ws, f'D{found_row}', [["1"]])
+        else:
+            _gs_call_with_backoff(ws.append_row, [str(username), today_key, max(1, count), '1'], value_input_option='USER_ENTERED')
+        return True, "Đã tạm tắt thông báo sinh nhật đến hết hôm nay."
+    except Exception as e:
+        return False, f"Không thể tạm tắt thông báo: {e}"
+
+def render_birthday_login_notice(credentials_df):
+    """Hiện thông báo trong ngày 1-5, tối đa ở 3 lần đăng nhập đầu mỗi ngày."""
+    role = str(st.session_state.get('current_role', '')).strip().lower()
+    if role not in BIRTHDAY_VIEWER_ROLES:
+        st.session_state.birthday_login_event = False
+        return
+    today = get_vn_today()
+    if today.day not in BIRTHDAY_NOTICE_DAYS:
+        st.session_state.birthday_login_event = False
+        return
+    birthdays = get_month_birthdays(credentials_df, today.month)
+    if not birthdays:
+        st.session_state.birthday_login_event = False
+        return
+    # Chỉ tăng số lần khi đây thực sự là một phiên vừa đăng nhập.
+    if st.session_state.get('birthday_login_event', False):
+        count, muted = register_birthday_notice_login(st.session_state.get('current_user', ''))
+        st.session_state.birthday_notice_count_today = count
+        st.session_state.birthday_notice_muted_today = muted
+        st.session_state.birthday_login_event = False
+    count = int(st.session_state.get('birthday_notice_count_today', 999) or 999)
+    muted = bool(st.session_state.get('birthday_notice_muted_today', False))
+    if muted or count > BIRTHDAY_NOTICE_MAX_LOGINS_PER_DAY:
+        return
+
+    role_labels = {'nhanvien': 'Nhân viên', 'letan': 'Lễ tân', 'locker': 'Locker'}
+    lines = []
+    for b in birthdays:
+        role_label = role_labels.get(b['Vai trò'], b['Vai trò'])
+        lines.append(f"🎂 **{b['Họ và tên']}** — {b['Ngày sinh']} — {role_label}")
+    st.info("🎉 **SINH NHẬT TRONG THÁNG %02d**\n\n%s" % (today.month, "\n\n".join(lines)))
+    c_notice, c_mute = st.columns([4, 1])
+    with c_notice:
+        st.caption(f"Thông báo này xuất hiện trong ngày 01–05 và tối đa ở 3 lần đăng nhập đầu mỗi ngày. Hôm nay: lần {count}/3.")
+    with c_mute:
+        if st.button("🔕 Tạm tắt hôm nay", use_container_width=True, key=f"mute_birthday_{today.isoformat()}"):
+            ok, msg = mute_birthday_notice_today(st.session_state.get('current_user', ''))
+            if ok:
+                st.session_state.birthday_notice_muted_today = True
+                st.toast(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
 @st.cache_resource
 def get_gspread_client():
     try:
@@ -5358,6 +5537,8 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.current_user = ""
     st.session_state.current_role = ""
+if "birthday_login_event" not in st.session_state:
+    st.session_state.birthday_login_event = False
 
 # Tự đăng nhập bằng token đã nhớ (không lưu mật khẩu ở localStorage).
 if not st.session_state.logged_in:
@@ -5367,12 +5548,15 @@ if not st.session_state.logged_in:
             st.session_state.logged_in = True
             st.session_state.current_user = "Quản Trị Viên"
             st.session_state.current_role = "admin"
+            st.session_state.birthday_login_event = True
         else:
             remembered_row = validate_remember_token(remembered_token, df_credentials) if remembered_token else None
             if remembered_row is not None:
                 st.session_state.logged_in = True
                 st.session_state.current_user = str(remembered_row['Tên nhân viên']).strip()
                 st.session_state.current_role = str(remembered_row.get('Phân quyền', 'nhanvien')).strip().lower()
+                st.session_state.birthday_login_event = True
+                _set_default_page_after_login(st.session_state.current_role)
             elif remembered_token:
                 # Token bị khóa/sai/đã thu hồi -> xóa khỏi trình duyệt.
                 st.query_params['forget_login'] = '1'
@@ -5412,6 +5596,7 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.current_user = "Quản Trị Viên"
                 st.session_state.current_role = "admin"
+                st.session_state.birthday_login_event = True
                 # Admin dự phòng cũng được duy trì đăng nhập cho tới khi bấm Đăng xuất.
                 st.query_params['remember_token'] = _fallback_admin_remember_token()
                 st.rerun()
@@ -5431,6 +5616,8 @@ if not st.session_state.logged_in:
                             st.session_state.logged_in = True
                             st.session_state.current_user = db_name
                             st.session_state.current_role = str(row.get('Phân quyền', 'nhanvien')).strip().lower()
+                            st.session_state.birthday_login_event = True
+                            _set_default_page_after_login(st.session_state.current_role)
                             user_found = True
                             break
 
@@ -5464,6 +5651,9 @@ if st.session_state.current_role == "tapvu":
             st.session_state.logged_in = False
             st.session_state.current_user = ""
             st.session_state.current_role = ""
+            st.session_state.birthday_login_event = False
+            st.session_state.pop("birthday_notice_count_today", None)
+            st.session_state.pop("birthday_notice_muted_today", None)
             st.session_state.pop("app_page", None)
             st.query_params['forget_login'] = '1'
             try: del st.query_params['remember_token']
@@ -5528,7 +5718,8 @@ requested_page = SLUG_TO_PAGE.get(requested_slug)
 if requested_page in allowed_pages:
     st.session_state.app_page = requested_page
 elif st.session_state.get("app_page") not in allowed_pages:
-    st.session_state.app_page = allowed_pages[0]
+    preferred_default = DEFAULT_LEAVE_PAGE if st.session_state.current_role in {"letan", "quanly", "nhanvien"} and DEFAULT_LEAVE_PAGE in allowed_pages else allowed_pages[0]
+    st.session_state.app_page = preferred_default
 selected_page = st.session_state.app_page
 
 
@@ -5583,6 +5774,9 @@ with col_logout:
         st.session_state.logged_in = False
         st.session_state.current_user = ""
         st.session_state.current_role = ""
+        st.session_state.birthday_login_event = False
+        st.session_state.pop("birthday_notice_count_today", None)
+        st.session_state.pop("birthday_notice_muted_today", None)
         st.session_state.pop("app_page", None)
         st.query_params['forget_login'] = '1'
         try: del st.query_params['remember_token']
@@ -5590,6 +5784,9 @@ with col_logout:
         try: del st.query_params['page']
         except Exception: pass
         st.rerun()
+
+# V48: Thông báo sinh nhật đầu tháng cho Admin/Quản lý/Lễ tân.
+render_birthday_login_notice(df_credentials)
 
 # Nhân viên: thanh nút điều hướng ngay trên nội dung, phù hợp điện thoại.
 if st.session_state.current_role in ["nhanvien", "locker"]:

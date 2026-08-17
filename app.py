@@ -43,6 +43,18 @@ def normalize_login_name(value):
     """Tên đăng nhập: không phân biệt dấu, HOA/thường; không ép kiểu số."""
     return " ".join(remove_vietnamese_accents(str(value)).strip().split()).casefold()
 
+def sort_employee_names(values):
+    """Sắp xếp tên nhân viên A→Z, bỏ trùng theo chuẩn không dấu/không phân biệt hoa thường."""
+    by_key = {}
+    for value in values or []:
+        name = str(value or "").strip()
+        if not name:
+            continue
+        key = normalize_login_name(name)
+        if key and key not in by_key:
+            by_key[key] = name
+    return sorted(by_key.values(), key=lambda x: normalize_login_name(x))
+
 def password_matches(input_password, stored_password):
     """Mật khẩu được so sánh đúng ký tự, có phân biệt HOA/thường và chấp nhận ký tự đặc biệt/0 đầu."""
     return hmac.compare_digest(str(input_password), str(stored_password))
@@ -732,14 +744,53 @@ TICHLUY_HEADERS = [
 ]
 
 # Các bộ phận không tham gia đăng ký lịch nghỉ / Tích lũy.
+# Leader được xem như Nhân viên trong các nghiệp vụ nghỉ phép, Tích lũy và Bảng lương.
 LEAVE_EXCLUDED_ROLES = {"letan", "locker", "tapvu"}
 TICHLUY_EXCLUDED_ROLES = {"admin", "letan", "quanly", "locker", "tapvu"}
 FRONTDESK_ROLES = {"letan", "quanly"}
+EMPLOYEE_LIKE_ROLES = {"nhanvien", "leader"}
+PAYROLL_ELIGIBLE_ROLES = {"nhanvien", "leader"}
+ALL_ACCOUNT_ROLES = ["nhanvien", "leader", "quanly", "letan", "locker", "tapvu", "admin"]
+FRONTDESK_MANAGEABLE_ROLES = {"nhanvien", "locker", "tapvu"}
+
+# Phân quyền theo từng chức năng: Admin có thể cấu hình theo vai trò và ghi đè theo từng tài khoản.
+FEATURE_PERMISSION_WORKSHEET = "PhanQuyenChucNang"
+FEATURE_PERMISSION_HEADERS = ["Phạm vi", "Đối tượng", "Chức năng", "Cho phép", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"]
+FEATURE_DEFINITIONS = {
+    "tour": "🧭 Bảng Tour",
+    "payroll": "💰 Bảng lương",
+    "payroll_history": "🗂 Lịch sử bảng lương",
+    "payroll_email": "📧 Gửi email bảng lương",
+    "leave": "📅 Đăng ký & Thống kê nghỉ phép",
+    "leave_manage": "✏️ Quản lý lịch nghỉ",
+    "shift": "⏰ Thiết lập ca làm việc",
+    "staff_list": "👥 Danh sách nhân sự",
+    "employee_add": "➕ Thêm nhân viên",
+    "employee_edit": "✏️ Chỉnh sửa hồ sơ nhân viên",
+    "employment_status": "🏷️ Trạng thái làm việc",
+    "employee_delete": "🗑️ Xóa nhân viên",
+    "account_lock": "🔒 Khóa đăng nhập",
+    "registration_lock": "🔐 Khóa quyền đăng ký",
+    "sync": "🔄 Đồng bộ dữ liệu",
+    "column_config": "⚙️ Cấu hình cột",
+    "profile": "👤 Hồ sơ cá nhân",
+    "birthday": "🎂 Kiểm tra sinh nhật",
+    "permission_admin": "🔐 Phân quyền chức năng",
+}
+DEFAULT_ROLE_FEATURES = {
+    "admin": set(FEATURE_DEFINITIONS),
+    "quanly": {"tour", "leave", "leave_manage", "shift", "staff_list", "employee_add", "employee_edit", "employment_status", "employee_delete", "profile", "birthday"},
+    "letan": {"tour", "leave", "leave_manage", "shift", "staff_list", "employee_add", "employee_edit", "employment_status", "employee_delete", "profile", "birthday"},
+    "leader": {"tour", "leave", "leave_manage", "profile", "birthday"},
+    "nhanvien": {"tour", "leave", "leave_manage", "profile", "birthday"},
+    "locker": {"tour", "profile", "birthday"},
+    "tapvu": {"birthday"},
+}
 
 # V48: Thông báo sinh nhật đầu tháng.
 BIRTHDAY_NOTICE_WORKSHEET = "ThongBaoSinhNhat"
 BIRTHDAY_VIEWER_ROLES = {"admin", "quanly", "letan"}
-BIRTHDAY_EMPLOYEE_ROLES = {"nhanvien", "letan", "locker"}
+BIRTHDAY_EMPLOYEE_ROLES = {"nhanvien", "leader", "letan", "locker"}
 BIRTHDAY_NOTICE_DAYS = {1, 2, 3, 4, 5}
 BIRTHDAY_NOTICE_MAX_LOGINS_PER_DAY = 3
 # V51: Trạng thái làm việc của nhân viên được lưu riêng, không thay đổi cấu trúc Sheet1.
@@ -755,7 +806,7 @@ DEFAULT_LEAVE_PAGE_SLUG = "dang-ky-thong-ke-nghi-phep"
 def _set_default_page_after_login(role):
     """Lễ tân/Quản lý/Nhân viên luôn mở trang Đăng ký & Thống kê nghỉ phép sau đăng nhập."""
     role_norm = str(role or '').strip().lower()
-    if role_norm in {"letan", "quanly", "nhanvien"}:
+    if role_norm in {"letan", "quanly", "nhanvien", "leader"}:
         st.session_state.app_page = DEFAULT_LEAVE_PAGE
         try:
             st.query_params["page"] = DEFAULT_LEAVE_PAGE_SLUG
@@ -903,7 +954,7 @@ def render_birthday_login_notice(credentials_df):
     if muted or count > BIRTHDAY_NOTICE_MAX_LOGINS_PER_DAY:
         return
 
-    role_labels = {'nhanvien': 'Nhân viên', 'letan': 'Lễ tân', 'locker': 'Locker'}
+    role_labels = {'nhanvien': 'Nhân viên', 'leader': 'Leader', 'letan': 'Lễ tân', 'locker': 'Locker'}
     lines = []
     for b in birthdays:
         role_label = role_labels.get(b['Vai trò'], b['Vai trò'])
@@ -934,7 +985,7 @@ def render_manual_birthday_check(credentials_df, key_prefix="birthday_manual"):
     if not birthdays:
         st.info(f"Tháng {today.month:02d} hiện chưa có sinh nhật của Nhân viên/Lễ tân/Locker trong hồ sơ.")
         return
-    role_labels = {'nhanvien': 'Nhân viên', 'letan': 'Lễ tân', 'locker': 'Locker'}
+    role_labels = {'nhanvien': 'Nhân viên', 'leader': 'Leader', 'letan': 'Lễ tân', 'locker': 'Locker'}
     st.markdown(f"#### 🎉 Sinh nhật tháng {today.month:02d}")
     for b in birthdays:
         st.markdown(f"- 🎂 **{b['Họ và tên']}** — {b['Ngày sinh']} — {role_labels.get(b['Vai trò'], b['Vai trò'])}")
@@ -1037,8 +1088,8 @@ def set_employee_employment_status(employee_name, status, updated_by):
             hit = creds[creds['Tên nhân viên'].apply(normalize_login_name) == target_key]
             if not hit.empty:
                 role = str(hit.iloc[0].get('Phân quyền', '')).strip().lower()
-        if role != 'nhanvien':
-            return False, "Chỉ có thể cập nhật trạng thái nghỉ việc cho tài khoản vai trò nhanvien."
+        if role not in EMPLOYEE_LIKE_ROLES:
+            return False, "Chỉ có thể cập nhật trạng thái nghỉ việc cho tài khoản Nhân viên hoặc Leader."
         ws = _get_employment_status_worksheet()
         if ws is None:
             return False, "Không kết nối được Google Sheets."
@@ -1064,6 +1115,118 @@ def set_employee_employment_status(employee_name, status, updated_by):
         return False, f"Lỗi cập nhật trạng thái nhân sự: {e}"
 
 
+
+def _get_feature_permission_worksheet():
+    client = get_gspread_client()
+    if not client:
+        return None
+    ss = client.open_by_key(SHEET_MAT_KHAU_ID)
+    ws = _get_or_create_worksheet(ss, FEATURE_PERMISSION_WORKSHEET, rows=1000, cols=len(FEATURE_PERMISSION_HEADERS))
+    header = _gs_call_with_backoff(ws.row_values, 1)
+    if header[:len(FEATURE_PERMISSION_HEADERS)] != FEATURE_PERMISSION_HEADERS:
+        gspread_update_range(ws, "A1:G1", [FEATURE_PERMISSION_HEADERS])
+    return ws
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_feature_permissions():
+    """Trả về (role_overrides, account_overrides). Account override ưu tiên hơn role."""
+    role_cfg, account_cfg = {}, {}
+    try:
+        ws = _get_feature_permission_worksheet()
+        if ws is None:
+            return role_cfg, account_cfg
+        values = _gs_call_with_backoff(ws.get_all_values)
+        for row in values[1:]:
+            if len(row) < 4:
+                continue
+            scope = normalize_login_name(row[0])
+            target = str(row[1]).strip()
+            feature = str(row[2]).strip()
+            if feature not in FEATURE_DEFINITIONS or not target:
+                continue
+            allowed = str(row[3]).strip().casefold() in {'1','true','yes','on','x','co','có'}
+            if scope in {'role','vai tro','vai trò'}:
+                role_cfg[(target.strip().lower(), feature)] = allowed
+            elif scope in {'account','tai khoan','tài khoản'}:
+                account_cfg[(normalize_login_name(target), feature)] = allowed
+    except Exception:
+        pass
+    return role_cfg, account_cfg
+
+def _clear_feature_permission_cache():
+    try:
+        load_feature_permissions.clear()
+    except Exception:
+        pass
+
+def has_feature_access(feature, role=None, username=None):
+    """Kiểm tra quyền theo thứ tự: Admin -> tài khoản -> vai trò -> mặc định hệ thống."""
+    feature = str(feature or '').strip()
+    if feature not in FEATURE_DEFINITIONS:
+        return False
+    role = str(role if role is not None else st.session_state.get('current_role', '')).strip().lower()
+    username = str(username if username is not None else st.session_state.get('current_user', '')).strip()
+    if role == 'admin':
+        return True
+    role_cfg, account_cfg = load_feature_permissions()
+    account_key = (normalize_login_name(username), feature)
+    if normalize_login_name(username) and account_key in account_cfg:
+        return bool(account_cfg[account_key])
+    role_key = (role, feature)
+    if role_key in role_cfg:
+        return bool(role_cfg[role_key])
+    return feature in DEFAULT_ROLE_FEATURES.get(role, set())
+
+def _rewrite_feature_permission_scope(scope, target, allowed_features, updated_by, inherit=False):
+    """Ghi lại toàn bộ cấu hình của 1 vai trò/tài khoản bằng một lần rewrite sheet."""
+    try:
+        ws = _get_feature_permission_worksheet()
+        if ws is None:
+            return False, 'Không kết nối được Google Sheets.'
+        values = _gs_call_with_backoff(ws.get_all_values)
+        keep = [FEATURE_PERMISSION_HEADERS]
+        scope_norm = normalize_login_name(scope)
+        target_norm = normalize_login_name(target) if scope_norm == 'account' else str(target).strip().lower()
+        for row in values[1:]:
+            if len(row) < 2:
+                continue
+            row_scope = normalize_login_name(row[0])
+            row_target = normalize_login_name(row[1]) if row_scope == 'account' else str(row[1]).strip().lower()
+            if row_scope == scope_norm and row_target == target_norm:
+                continue
+            rr = list(row[:7]) + [''] * max(0, 7-len(row))
+            keep.append(rr[:7])
+        if not inherit:
+            now = datetime.now(VN_TZ)
+            allowed_set = set(allowed_features or [])
+            for key in FEATURE_DEFINITIONS:
+                keep.append([
+                    scope, str(target).strip(), key, '1' if key in allowed_set else '0',
+                    now.strftime('%d/%m/%Y'), now.strftime('%H:%M:%S'), str(updated_by).strip()
+                ])
+        _gs_call_with_backoff(ws.clear)
+        end_row = max(1, len(keep))
+        gspread_update_range(ws, f'A1:G{end_row}', keep)
+        _clear_feature_permission_cache()
+        return True, 'Đã lưu phân quyền chức năng.' if not inherit else 'Đã xóa quyền riêng; tài khoản sẽ dùng quyền theo vai trò.'
+    except Exception as e:
+        return False, f'Lỗi lưu phân quyền: {e}'
+
+def save_role_feature_permissions(role, allowed_features, updated_by):
+    role = str(role or '').strip().lower()
+    if role == 'admin':
+        return False, 'Quyền Admin luôn được giữ đầy đủ để tránh tự khóa hệ thống.'
+    return _rewrite_feature_permission_scope('role', role, allowed_features, updated_by, inherit=False)
+
+def save_account_feature_permissions(username, allowed_features, updated_by, inherit=False):
+    if not str(username or '').strip():
+        return False, 'Vui lòng chọn tài khoản.'
+    return _rewrite_feature_permission_scope('account', str(username).strip(), allowed_features, updated_by, inherit=inherit)
+
+def get_effective_feature_keys_for_role(role):
+    role = str(role or '').strip().lower()
+    return [k for k in FEATURE_DEFINITIONS if has_feature_access(k, role=role, username='')]
+
 def _clear_payroll_config_cache():
     """Chỉ xóa cache cấu hình lương, không xóa toàn bộ cache của ứng dụng."""
     try:
@@ -1084,6 +1247,7 @@ def _clear_dynamic_data_caches():
         'load_secondary_leave_sheet_data',
         'load_loai_nghi_from_gsheet',
         'load_tichluy_tracking',
+        'load_feature_permissions',
     ):
         try:
             fn = globals().get(fn_name)
@@ -1305,7 +1469,7 @@ def apply_latest_profile_fields_to_payroll(payroll_df, credentials_df=None, only
     Các khoản tiền nghiệp vụ vẫn giữ nguyên. Những trường hồ sơ đang dùng trong bảng
     lương/export/email (Họ tên, Email, tài khoản và tên ngân hàng) luôn lấy theo nguồn.
     Khi only_current_nhanvien=True, vai trò mới nhất cũng được dùng để chỉ giữ tài khoản
-    hiện vẫn có role `nhanvien`.
+    hiện vẫn có role `nhanvien` hoặc `leader`.
     """
     if payroll_df is None or not isinstance(payroll_df, pd.DataFrame) or payroll_df.empty:
         return payroll_df.copy() if isinstance(payroll_df, pd.DataFrame) else pd.DataFrame()
@@ -1334,7 +1498,7 @@ def apply_latest_profile_fields_to_payroll(payroll_df, credentials_df=None, only
                     val = val.replace("'", '')
                 d.at[idx, dest] = val
             if only_current_nhanvien:
-                keep = str(cr.get('Phân quyền', '')).strip().lower() == 'nhanvien'
+                keep = str(cr.get('Phân quyền', '')).strip().lower() in PAYROLL_ELIGIBLE_ROLES
         elif only_current_nhanvien:
             keep = False
         keep_mask.append(bool(keep))
@@ -1418,7 +1582,7 @@ def validate_remember_token(token, credentials_df):
     return None
 
 # --- CẬP NHẬT THÔNG TIN CÁ NHÂN ---
-def update_user_profile(username, new_pass, fullname, dob, phone, email, address, bank_account="", bank_name=""):
+def update_user_profile(username, new_pass, fullname, dob, phone, email, address, bank_account="", bank_name="", new_role=None):
     try:
         client = get_gspread_client()
         if not client: return False, "Chưa cấu hình quyền kết nối."
@@ -1433,6 +1597,8 @@ def update_user_profile(username, new_pass, fullname, dob, phone, email, address
                 break
         if row_idx:
             if new_pass: sheet.update_cell(row_idx, 3, str(new_pass))
+            if new_role is not None and str(new_role).strip():
+                sheet.update_cell(row_idx, 4, str(new_role).strip().lower())
             sheet.update_cell(row_idx, 5, str(fullname))
             sheet.update_cell(row_idx, 6, str(dob))
             sheet.update_cell(row_idx, 7, f"'{phone}")
@@ -1442,6 +1608,11 @@ def update_user_profile(username, new_pass, fullname, dob, phone, email, address
             sheet.update_cell(row_idx, 10, f"'{bank_account}" if str(bank_account).strip() else "")
             sheet.update_cell(row_idx, 11, str(bank_name))
             _clear_dynamic_data_caches()
+            if new_role is not None and str(new_role).strip():
+                try:
+                    sync_tichluy_roles_and_stt(load_credentials_fresh())
+                except Exception:
+                    pass
             return True, "Cập nhật hồ sơ thành công!"
         return False, "Không tìm thấy tài khoản."
     except Exception as e:
@@ -1486,24 +1657,36 @@ def batch_update_shift_schedule(edited_df):
 # --- TẢI DỮ LIỆU TỪ GOOGLE SHEET DỰ PHÒNG ---
 @st.cache_data(ttl=30, show_spinner=False)
 def load_backup_sheet_data():
+    """Đọc trực tiếp A:J của sheet lịch nghỉ chính, không phụ thuộc tên header và luôn giữ source row."""
+    expected = [
+        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+        "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
+    ]
     try:
         client = get_gspread_client()
-        if client:
-            sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-            rows = _gs_call_with_backoff(sheet.get_all_values)
-            if len(rows) > 1:
-                df_bk = pd.DataFrame(rows[1:], columns=rows[0])
-                if 'Loại nghỉ' in df_bk.columns:
-                    df_bk.rename(columns={'Loại nghỉ': 'Lý do nghỉ'}, inplace=True)
-                    
-                # Bỏ các cột rỗng tên và trùng tên (Fix lỗi PyArrow)
-                df_bk = df_bk.loc[:, df_bk.columns.astype(str).str.strip() != '']
-                df_bk = df_bk.loc[:, ~df_bk.columns.duplicated(keep='first')]
-                
-                return df_bk
+        if not client:
+            return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
+        sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        values = _gs_call_with_backoff(sheet.get, 'A:J')
+        if not values or len(values) < 2:
+            # Một số phiên bản gspread / thay đổi định dạng sheet có thể trả rỗng/chỉ header cho range.
+            # Fallback get_all_values bảo đảm Chi tiết danh sách không bị trắng.
+            values = _gs_call_with_backoff(sheet.get_all_values)
+            values = [list(r[:10]) for r in values]
+        if not values or len(values) < 2:
+            return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
+        rows = []
+        for sheet_row, row in enumerate(values[1:], start=2):
+            r = list(row[:10]) + [""] * max(0, 10 - len(row))
+            if not any(str(v).strip() for v in r):
+                continue
+            item = dict(zip(expected, r[:10]))
+            item['__source_sheet_id'] = SHEET_DU_PHONG_ID
+            item['__source_row'] = sheet_row
+            rows.append(item)
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
     except Exception:
-        pass
-    return pd.DataFrame(columns=["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"])
+        return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_secondary_leave_sheet_data():
@@ -1518,6 +1701,11 @@ def load_secondary_leave_sheet_data():
             return pd.DataFrame(columns=expected)
         sheet = client.open_by_key(SHEET_LICH_NGHI_2_ID).get_worksheet(0)
         values = _gs_call_with_backoff(sheet.get, 'A:J')
+        if not values or len(values) < 2:
+            # Một số phiên bản gspread / thay đổi định dạng sheet có thể trả rỗng/chỉ header cho range.
+            # Fallback get_all_values bảo đảm Chi tiết danh sách không bị trắng.
+            values = _gs_call_with_backoff(sheet.get_all_values)
+            values = [list(r[:10]) for r in values]
         if not values or len(values) < 2:
             return pd.DataFrame(columns=expected)
 
@@ -2771,11 +2959,13 @@ def combine_leave_sources_for_daily_stats(*sources):
             if col not in d.columns:
                 d[col] = ""
         d = d[expected + meta_cols].copy()
-        d['Ngày'] = pd.to_datetime(d['Ngày'], errors='coerce', dayfirst=True).dt.date
-        d = d.dropna(subset=['Ngày'])
-        d['Số ngày tính'] = pd.to_numeric(d['Số ngày tính'], errors='coerce').fillna(0)
-        d['Số ngày phép cộng dồn'] = pd.to_numeric(d['Số ngày phép cộng dồn'], errors='coerce').fillna(0)
-        d['Phạt vi phạm'] = pd.to_numeric(d['Phạt vi phạm'], errors='coerce').fillna(0)
+        # Đọc từng ô để không làm mất các dòng có ngày dạng serial Excel/Google Sheets
+        # hoặc dữ liệu ngày bị trộn dd/mm/yyyy, dd-mm-yyyy, yyyy-mm-dd.
+        d['Ngày'] = d['Ngày'].apply(_parse_vn_date)
+        d = d[d['Ngày'].notna()].copy()
+        for _money_col in ['Số ngày tính', 'Số ngày phép cộng dồn']:
+            d[_money_col] = d[_money_col].apply(lambda _v: _parse_leave_number(_v, 0.0, money=False))
+        d['Phạt vi phạm'] = d['Phạt vi phạm'].apply(lambda _v: _parse_leave_number(_v, 0.0, money=True))
         prepared.append(d)
 
     if not prepared:
@@ -2857,7 +3047,7 @@ def to_excel(df):
 
 
 # ==========================================================
-# THỐNG KÊ LƯƠNG - ADMIN; LỄ TÂN CHỈ ĐƯỢC XEM KHI ADMIN MỞ QUYỀN, KHÔNG CÓ DÒNG LƯƠNG
+# BẢNG LƯƠNG - quyền truy cập được quản lý theo vai trò/tài khoản
 # ==========================================================
 PAYROLL_COLUMNS = [
     "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
@@ -3205,7 +3395,7 @@ def table_layout_html_css(table_key, columns, selector):
         )
         # Tiêu đề luôn wrap để không bị mất chữ khi cột nhỏ.
         css.append(
-            f"{selector} th:nth-child({idx}){{white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;}}"
+            f"{selector} th:nth-child({idx}){{white-space:nowrap!important;overflow-wrap:normal!important;word-break:normal!important;}}"
         )
     return "\n".join(css)
 
@@ -3386,12 +3576,13 @@ def _ensure_payroll_storage():
 
         cfg_vals = _gs_call_with_backoff(ws_cfg.get, 'A:B')
         if not cfg_vals:
-            gspread_update_range(ws_cfg, "A1:B5", [
+            gspread_update_range(ws_cfg, "A1:B6", [
                 ["Key", "Value"],
                 ["letan_payroll_access", "0"],
                 ["default_living_expense", "150000"],
                 ["default_locker_support", "80000"],
                 ["employee_payroll_overrides_json", "{}"],
+                ["leader_responsibility_allowance", "0"],
             ])
         else:
             # Bổ sung key thiếu chỉ ở lần khởi tạo tài nguyên, không kiểm tra lại ở mỗi rerun.
@@ -3405,6 +3596,8 @@ def _ensure_payroll_storage():
                 additions.append(["employee_payroll_overrides_json", "{}"])
             if "letan_payroll_access" not in existing_keys:
                 additions.append(["letan_payroll_access", "0"])
+            if "leader_responsibility_allowance" not in existing_keys:
+                additions.append(["leader_responsibility_allowance", "0"])
             if additions:
                 next_row = max(2, len(cfg_vals) + 1)
                 gspread_update_range(ws_cfg, f"A{next_row}:B{next_row + len(additions) - 1}", additions)
@@ -3510,6 +3703,30 @@ def set_payroll_default_amounts(living_expense, locker_support):
     except Exception as e:
         return False, f"Lỗi lưu mức mặc định: {e}"
 
+
+def get_leader_responsibility_allowance():
+    try:
+        cfg, _, _ = _payroll_config_dict()
+        return float(_money_to_float(cfg.get('leader_responsibility_allowance', 0)))
+    except Exception:
+        return 0.0
+
+def set_leader_responsibility_allowance(amount):
+    try:
+        _, ws_cfg, err = _ensure_payroll_storage()
+        if err or ws_cfg is None:
+            return False, err or "Không mở được sheet cấu hình."
+        _, vals, read_err = _payroll_config_dict()
+        if read_err:
+            return False, read_err
+        key_rows = _payroll_config_key_rows(vals)
+        target_row = key_rows.get('leader_responsibility_allowance', max(2, len(vals) + 1))
+        value = int(round(_money_to_float(amount)))
+        gspread_update_range(ws_cfg, f"A{target_row}:B{target_row}", [["leader_responsibility_allowance", str(value)]])
+        _clear_payroll_config_cache()
+        return True, f"Đã lưu tiền trách nhiệm Leader: {value:,.0f} đ".replace(',', '.')
+    except Exception as e:
+        return False, f"Lỗi lưu tiền trách nhiệm Leader: {e}"
 
 def get_payroll_employee_overrides():
     """Đọc mức riêng từ cùng snapshot cấu hình cache, không gọi Sheets API thêm lần nữa."""
@@ -5203,7 +5420,7 @@ def commit_violation_debts_after_payroll(payroll_df, start_date, end_date, saved
         return False, f"Lỗi cập nhật nghĩa vụ Vi phạm chuyển kỳ: {e}"
 
 
-def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_primary=None, leave_secondary=None, default_living_expense=150000, default_locker_support=80000):
+def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_primary=None, leave_secondary=None, default_living_expense=150000, default_locker_support=80000, leader_responsibility_allowance=0):
     """Tổng hợp lương: chỉ cộng G khi F bắt đầu bằng 'Tip', nhóm theo tên nhân viên ở cột I."""
     if source_df is None or source_df.empty:
         return pd.DataFrame(columns=PAYROLL_COLUMNS), []
@@ -5225,14 +5442,14 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
         'ten nhan vien', 'ten he thong', 'username', 'user name'
     })].copy()
 
-    # V40: Tính lương chỉ áp dụng cho tài khoản có vai trò chính xác là ``nhanvien``.
+    # Tính lương áp dụng cho Nhân viên và Leader. Leader có quyền nghiệp vụ giống Nhân viên.
     # Letan / quanly / locker / tapvu / admin không tạo dòng trong bảng lương mới.
     # Giữ tập khóa của toàn bộ tài khoản để Tip thuộc bộ phận bị loại không bị báo nhầm là
     # "không khớp tài khoản hệ thống".
     all_credential_keys = set(creds['Tên nhân viên'].apply(normalize_login_name).tolist())
     if 'Phân quyền' in creds.columns:
         roles = creds['Phân quyền'].astype(str).str.strip().str.lower()
-        creds = creds[roles.eq('nhanvien')].copy()
+        creds = creds[roles.isin(PAYROLL_ELIGIBLE_ROLES)].copy()
     else:
         # Sheet cũ chưa có cột phân quyền được xem là nhân viên để bảo toàn tương thích.
         creds = creds.copy()
@@ -5255,12 +5472,14 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
         emp_override = employee_overrides.get(k, {})
         emp_living = emp_override.get("living", default_living_expense)
         emp_locker = emp_override.get("locker", default_locker_support)
+        _emp_role = str(c.get('Phân quyền', 'nhanvien')).strip().lower()
         rows.append({
             "TT": idx,
             "Tên Hệ thống": str(c.get('Tên nhân viên', '')).strip(),
             "Họ và tên": str(c.get('Họ và tên đầy đủ', '')).strip(),
             "Tiền Lương": float(salary_map.get(k, 0)),
-            "Tiền Hỗ Trợ Hoàn Lại": 0.0,
+            # Leader được cộng tiền trách nhiệm vào đúng cột Hỗ Trợ Hoàn Lại.
+            "Tiền Hỗ Trợ Hoàn Lại": float(_money_to_float(leader_responsibility_allowance)) if _emp_role == 'leader' else 0.0,
             "Tích lũy": float(tichluy_map.get(k, 0)),
             "Chi Phí Sinh Hoạt": float(_money_to_float(emp_living)),
             # V50: tách riêng Vi phạm phát sinh trong kỳ và nghĩa vụ Vi phạm từ kỳ trước.
@@ -5314,6 +5533,7 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
 
     # Dùng cùng snapshot cấu hình để tránh phát sinh nhiều request Google Sheets.
     default_living, default_locker = get_payroll_default_amounts()
+    leader_allowance = get_leader_responsibility_allowance()
     overrides = get_payroll_employee_overrides()
     penalty_map = _period_penalty_by_employee(start_date, end_date, leave_df, None)
     due_violation_debt_map, deferred_current_violation_map, _ = get_violation_debt_state(
@@ -5366,6 +5586,11 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
         if cr is None:
             missing.append(emp_name)
         else:
+            # Nếu là Leader, bảo đảm Hỗ Trợ Hoàn Lại có tối thiểu mức tiền trách nhiệm hiện hành.
+            if str(cr.get('Phân quyền', '')).strip().lower() == 'leader' and 'Tiền Hỗ Trợ Hoàn Lại' in d.columns:
+                d.at[idx, 'Tiền Hỗ Trợ Hoàn Lại'] = max(
+                    float(_money_to_float(d.at[idx, 'Tiền Hỗ Trợ Hoàn Lại'])), float(_money_to_float(leader_allowance))
+                )
             if 'Số tài khoản ngân hàng' in d.columns:
                 d.at[idx, 'Số tài khoản ngân hàng'] = str(cr.get('Số tài khoản ngân hàng', '')).strip().replace("'", "")
             if 'Tên ngân hàng' in d.columns:
@@ -6030,7 +6255,11 @@ def send_payroll_summary_email(sender_email, sender_password, to_email, recipien
 
 # Tải dữ liệu
 ensure_credential_control_columns()
-df_credentials = load_credentials_recent() 
+df_credentials = load_credentials_recent()
+if isinstance(df_credentials, pd.DataFrame) and not df_credentials.empty and 'Tên nhân viên' in df_credentials.columns:
+    df_credentials = df_credentials.assign(
+        __employee_sort=df_credentials['Tên nhân viên'].astype(str).apply(normalize_login_name)
+    ).sort_values('__employee_sort', kind='stable').drop(columns='__employee_sort').reset_index(drop=True)
 df_backup = load_backup_sheet_data()
 df_leave_secondary = load_secondary_leave_sheet_data()
 df_loai_nghi_gsheet = load_loai_nghi_from_gsheet()
@@ -6148,7 +6377,7 @@ if not st.session_state.logged_in:
 
 # Vai trò tạp vụ không được hiển thị bất kỳ dữ liệu/chức năng nghiệp vụ nào.
 # Chỉ giữ nút Đăng xuất để tài khoản không bị kẹt phiên đăng nhập.
-if st.session_state.current_role == "tapvu":
+if st.session_state.current_role == "tapvu" and not any(has_feature_access(_f) for _f in ["tour", "payroll", "leave", "leave_manage", "shift", "staff_list", "employee_add", "employee_edit", "profile"]):
     st.markdown("""
         <style>
             [data-testid="collapsedControl"] { display: none !important; }
@@ -6186,7 +6415,7 @@ is_admin_letan = st.session_state.current_role in ["admin", "letan", "quanly"]
 
 PAGE_SLUGS = {
     "🧭 Bảng Tour": "bang-tour",
-    "💰 Thống kê lương": "thong-ke-luong",
+    "💰 Bảng lương": "bang-luong",
     "📅 Đăng ký & Thống kê nghỉ phép": "dang-ky-thong-ke-nghi-phep",
     "✏️ Quản lý lịch nghỉ": "quan-ly-lich-nghi",
     "⏰ Thiết lập ca làm việc": "thiet-lap-ca",
@@ -6197,45 +6426,61 @@ PAGE_SLUGS = {
     "🔐 Khóa quyền đăng ký": "khoa-quyen-dang-ky",
     "🔄 Đồng bộ dữ liệu": "dong-bo-du-lieu",
     "⚙️ Cấu hình cột": "cau-hinh-cot",
+    "🔐 Phân quyền chức năng": "phan-quyen-chuc-nang",
     "👤 Hồ sơ cá nhân": "ho-so-ca-nhan",
 }
 SLUG_TO_PAGE = {v: k for k, v in PAGE_SLUGS.items()}
 
 payroll_letan_enabled = get_payroll_letan_enabled()
 
-if st.session_state.current_role == "admin":
-    allowed_pages = [
-        "🧭 Bảng Tour", "💰 Thống kê lương", "📅 Đăng ký & Thống kê nghỉ phép", "✏️ Quản lý lịch nghỉ",
-        "⏰ Thiết lập ca làm việc", "👥 Danh sách nhân sự", "➕ Thêm nhân viên",
-        "✏️ Sửa / Xóa nhân viên", "🔒 Khóa đăng nhập", "🔐 Khóa quyền đăng ký",
-        "🔄 Đồng bộ dữ liệu", "⚙️ Cấu hình cột"
-    ]
-elif st.session_state.current_role in ["letan", "quanly"]:
-    allowed_pages = [
-        "🧭 Bảng Tour", "📅 Đăng ký & Thống kê nghỉ phép", "✏️ Quản lý lịch nghỉ",
-        "⏰ Thiết lập ca làm việc", "👥 Danh sách nhân sự", "➕ Thêm nhân viên",
-        "✏️ Sửa / Xóa nhân viên", "👤 Hồ sơ cá nhân"
-    ]
-    if payroll_letan_enabled:
-        allowed_pages.insert(1, "💰 Thống kê lương")
-elif st.session_state.current_role == "locker":
-    # Locker chỉ được xem Bảng Tour và tự cập nhật hồ sơ; không hiện các bảng/chức năng đính kèm khác.
-    allowed_pages = ["🧭 Bảng Tour", "👤 Hồ sơ cá nhân"]
-else:
-    allowed_pages = [
-        "🧭 Bảng Tour", "📅 Đăng ký & Thống kê nghỉ phép", "✏️ Quản lý lịch nghỉ",
-        "👤 Hồ sơ cá nhân"
-    ]
+PAGE_FEATURE_KEYS = {
+    "🧭 Bảng Tour": "tour",
+    "💰 Bảng lương": "payroll",
+    "📅 Đăng ký & Thống kê nghỉ phép": "leave",
+    "✏️ Quản lý lịch nghỉ": "leave_manage",
+    "⏰ Thiết lập ca làm việc": "shift",
+    "👥 Danh sách nhân sự": "staff_list",
+    "➕ Thêm nhân viên": "employee_add",
+    "✏️ Sửa / Xóa nhân viên": "employee_edit",
+    "🔒 Khóa đăng nhập": "account_lock",
+    "🔐 Khóa quyền đăng ký": "registration_lock",
+    "🔄 Đồng bộ dữ liệu": "sync",
+    "⚙️ Cấu hình cột": "column_config",
+    "🔐 Phân quyền chức năng": "permission_admin",
+    "👤 Hồ sơ cá nhân": "profile",
+}
+PAGE_FEATURE_GROUPS = {
+    # Một trang có thể chứa nhiều chức năng độc lập. Chỉ cần có ít nhất một quyền
+    # trong nhóm thì trang được hiện; từng section bên trong vẫn kiểm tra quyền riêng.
+    "💰 Bảng lương": {"payroll", "payroll_history"},
+    "✏️ Sửa / Xóa nhân viên": {"employee_edit", "employment_status", "employee_delete"},
+}
 
+def has_page_access(page_name):
+    features = PAGE_FEATURE_GROUPS.get(page_name)
+    if features:
+        return any(has_feature_access(key) for key in features)
+    key = PAGE_FEATURE_KEYS.get(page_name)
+    return bool(key and has_feature_access(key))
+
+PAGE_ORDER = list(PAGE_FEATURE_KEYS.keys())
+allowed_pages = [p for p in PAGE_ORDER if has_page_access(p)]
+# Admin luôn giữ trang phân quyền để tránh tự khóa hệ thống.
+if st.session_state.current_role == 'admin' and "🔐 Phân quyền chức năng" not in allowed_pages:
+    allowed_pages.append("🔐 Phân quyền chức năng")
+# Nếu tài khoản không có trang nghiệp vụ nào, giữ Hồ sơ cá nhân khi được cấp quyền; còn không sẽ chỉ thấy header/logout.
 # Đọc trang từ URL để nút Back/Forward và swipe trên điện thoại hoạt động.
 requested_slug = str(st.query_params.get("page", "")).strip()
 requested_page = SLUG_TO_PAGE.get(requested_slug)
 if requested_page in allowed_pages:
     st.session_state.app_page = requested_page
 elif st.session_state.get("app_page") not in allowed_pages:
-    preferred_default = DEFAULT_LEAVE_PAGE if st.session_state.current_role in {"letan", "quanly", "nhanvien"} and DEFAULT_LEAVE_PAGE in allowed_pages else allowed_pages[0]
-    st.session_state.app_page = preferred_default
-selected_page = st.session_state.app_page
+    if allowed_pages:
+        preferred_default = DEFAULT_LEAVE_PAGE if st.session_state.current_role in {"letan", "quanly", "nhanvien", "leader"} and DEFAULT_LEAVE_PAGE in allowed_pages else allowed_pages[0]
+        st.session_state.app_page = preferred_default
+    else:
+        st.session_state.app_page = ""
+selected_page = st.session_state.get("app_page", "")
 
 
 def open_app_page(page_name):
@@ -6246,7 +6491,7 @@ def open_app_page(page_name):
     st.rerun()
 
 # Nhân viên vẫn ẩn sidebar; Admin/Lễ tân/Quản lý dùng mỗi chức năng = một nút riêng.
-if st.session_state.current_role in ["nhanvien", "locker"]:
+if st.session_state.current_role in ["nhanvien", "leader", "locker"]:
     st.markdown("""
         <style>
             [data-testid="collapsedControl"] { display: none !important; }
@@ -6261,19 +6506,7 @@ else:
             open_app_page(page_name)
     if st.session_state.current_role == "admin":
         st.sidebar.markdown("---")
-        st.sidebar.subheader("💰 QUYỀN LỄ TÂN - BẢNG LƯƠNG")
-        if payroll_letan_enabled:
-            st.sidebar.success("🟢 Lễ tân đang được phép mở Bảng lương")
-            if st.sidebar.button("🔒 Đóng quyền Lễ tân xem lương", use_container_width=True):
-                ok, msg = set_payroll_letan_enabled(False)
-                (st.sidebar.success if ok else st.sidebar.error)(msg)
-                if ok: st.rerun()
-        else:
-            st.sidebar.warning("🔴 Lễ tân đang bị khóa Bảng lương")
-            if st.sidebar.button("🔓 Mở quyền Lễ tân xem lương", use_container_width=True):
-                ok, msg = set_payroll_letan_enabled(True)
-                (st.sidebar.success if ok else st.sidebar.error)(msg)
-                if ok: st.rerun()
+        st.sidebar.caption("🔐 Quyền từng chức năng/từng vai trò/từng tài khoản được quản lý tại trang Phân quyền chức năng.")
 
 # --- GIAO DIỆN HEADER ---
 st.write("")
@@ -6303,14 +6536,15 @@ with col_logout:
 # V48: Thông báo sinh nhật đầu tháng cho Admin/Quản lý/Lễ tân.
 render_birthday_login_notice(df_credentials)
 # V51: nút xem sinh nhật chủ động áp dụng cho mọi tài khoản.
-with st.expander("🎂 Sinh nhật nhân sự trong tháng", expanded=False):
-    render_manual_birthday_check(
-        df_credentials,
-        key_prefix=f"birthday_manual_{normalize_login_name(st.session_state.current_user) or 'user'}"
-    )
+if has_feature_access("birthday"):
+    with st.expander("🎂 Sinh nhật nhân sự trong tháng", expanded=False):
+        render_manual_birthday_check(
+            df_credentials,
+            key_prefix=f"birthday_manual_{normalize_login_name(st.session_state.current_user) or 'user'}"
+        )
 
 # Nhân viên: thanh nút điều hướng ngay trên nội dung, phù hợp điện thoại.
-if st.session_state.current_role in ["nhanvien", "locker"]:
+if st.session_state.current_role in ["nhanvien", "leader", "locker"]:
     nav_cols = st.columns(2)
     for idx, page_name in enumerate(allowed_pages):
         with nav_cols[idx % 2]:
@@ -6396,7 +6630,7 @@ if selected_page == "👤 Hồ sơ cá nhân" and st.session_state.current_role 
 # ==========================================
 if selected_page == "👤 Hồ sơ cá nhân":
     pass  # Nội dung hồ sơ đã hiển thị ở phía trên.
-elif selected_page == "⏰ Thiết lập ca làm việc" and is_admin_letan:
+elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access("shift"):
     st.subheader("⏰ Thiết lập ca làm việc")
     st.info("Chỉnh sửa trực tiếp trên bảng dưới đây để phân ca đồng loạt cho toàn bộ nhân viên.")
 
@@ -6431,13 +6665,13 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and is_admin_letan:
             if res: st.success(msg)
             else: st.error(msg)
 
-elif selected_page == "👥 Danh sách nhân sự" and is_admin_letan:
+elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff_list"):
     st.subheader("👥 Danh sách nhân sự")
     staff_source_df = df_credentials.copy()
     employment_map = load_employment_status_map()
     staff_source_df['Trạng thái làm việc'] = staff_source_df.apply(
         lambda r: employment_map.get(normalize_login_name(r.get('Tên nhân viên', '')), EMPLOYMENT_STATUS_ACTIVE)
-        if str(r.get('Phân quyền', '')).strip().lower() == 'nhanvien' else '', axis=1
+        if str(r.get('Phân quyền', '')).strip().lower() in EMPLOYEE_LIKE_ROLES else '', axis=1
     )
     cols_staff = ['Tên nhân viên', 'Họ và tên đầy đủ', 'Phân quyền', 'Trạng thái làm việc', 'Điện thoại', 'Email', 'Địa chỉ', 'Số tài khoản ngân hàng', 'Tên ngân hàng', 'Khóa đăng nhập']
     cols_staff = [c for c in cols_staff if c in staff_source_df.columns]
@@ -6449,7 +6683,7 @@ elif selected_page == "👥 Danh sách nhân sự" and is_admin_letan:
         column_config=table_layout_column_config("staff_list", list(staff_df.columns))
     )
 
-elif selected_page == "⚙️ Cấu hình cột" and st.session_state.current_role == "admin":
+elif selected_page == "⚙️ Cấu hình cột" and has_feature_access("column_config"):
     st.subheader("⚙️ Cấu hình hiển thị cột toàn hệ thống")
     st.info(
         "Admin có thể tùy chỉnh thứ tự, độ rộng cột, độ cao dòng, font, cỡ chữ, kiểu chữ, "
@@ -6594,7 +6828,62 @@ elif selected_page == "⚙️ Cấu hình cột" and st.session_state.current_ro
                     st.session_state.pop(row_height_state_key, None)
                     st.rerun()
 
-elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
+elif selected_page == "🔐 Phân quyền chức năng" and st.session_state.current_role == "admin":
+    st.subheader("🔐 Phân quyền chức năng")
+    st.caption("Cấu hình theo vai trò trước; quyền riêng từng tài khoản sẽ ghi đè quyền của vai trò. Admin luôn giữ toàn quyền để tránh tự khóa hệ thống.")
+    feature_keys = list(FEATURE_DEFINITIONS.keys())
+    feature_label_to_key = {label: key for key, label in FEATURE_DEFINITIONS.items()}
+    feature_labels = [FEATURE_DEFINITIONS[k] for k in feature_keys]
+
+    with st.expander("👥 Quyền mặc định theo loại tài khoản", expanded=True):
+        role_choice = st.selectbox("Chọn vai trò", [r for r in ALL_ACCOUNT_ROLES if r != 'admin'], key="perm_role_choice")
+        current_role_allowed = [
+            FEATURE_DEFINITIONS[k] for k in feature_keys
+            if has_feature_access(k, role=role_choice, username='')
+        ]
+        role_allowed_labels = st.multiselect(
+            "Các chức năng được phép", feature_labels, default=current_role_allowed,
+            filter_mode="contains", key=f"perm_role_features_{role_choice}"
+        )
+        if st.button("💾 Lưu quyền cho vai trò", use_container_width=True, key=f"save_role_perm_{role_choice}"):
+            ok, msg = save_role_feature_permissions(
+                role_choice, [feature_label_to_key[x] for x in role_allowed_labels], st.session_state.current_user
+            )
+            (st.success if ok else st.error)(msg)
+            if ok: st.rerun()
+
+    with st.expander("👤 Quyền riêng theo từng tài khoản", expanded=False):
+        account_options = sort_employee_names(df_credentials['Tên nhân viên'].dropna().astype(str).tolist()) if not df_credentials.empty else []
+        account_choice = st.selectbox("Chọn tài khoản", account_options, filter_mode="contains", key="perm_account_choice") if account_options else ""
+        if account_choice:
+            account_row = latest_credential_row_from_credentials(df_credentials, account_choice)
+            account_role = str(account_row.get('Phân quyền', 'nhanvien')).strip().lower() if account_row is not None else 'nhanvien'
+            _role_cfg, _account_cfg = load_feature_permissions()
+            has_account_override = any(k[0] == normalize_login_name(account_choice) for k in _account_cfg)
+            if has_account_override:
+                current_account_allowed = [FEATURE_DEFINITIONS[k] for k in feature_keys if _account_cfg.get((normalize_login_name(account_choice), k), False)]
+            else:
+                current_account_allowed = [FEATURE_DEFINITIONS[k] for k in feature_keys if has_feature_access(k, role=account_role, username='')]
+            st.caption(f"Vai trò hiện tại: {account_role} · {'đang dùng quyền riêng' if has_account_override else 'đang kế thừa quyền theo vai trò'}")
+            account_allowed_labels = st.multiselect(
+                "Các chức năng cho tài khoản này", feature_labels, default=current_account_allowed,
+                filter_mode="contains", key=f"perm_account_features_{normalize_login_name(account_choice)}"
+            )
+            cpa, cpb = st.columns(2)
+            with cpa:
+                if st.button("💾 Lưu quyền riêng", use_container_width=True, key="save_account_permissions"):
+                    ok, msg = save_account_feature_permissions(
+                        account_choice, [feature_label_to_key[x] for x in account_allowed_labels], st.session_state.current_user, inherit=False
+                    )
+                    (st.success if ok else st.error)(msg)
+                    if ok: st.rerun()
+            with cpb:
+                if st.button("♻️ Dùng quyền theo vai trò", use_container_width=True, key="inherit_account_permissions"):
+                    ok, msg = save_account_feature_permissions(account_choice, [], st.session_state.current_user, inherit=True)
+                    (st.success if ok else st.error)(msg)
+                    if ok: st.rerun()
+
+elif selected_page == "➕ Thêm nhân viên" and has_feature_access("employee_add"):
     st.subheader("➕ Thêm nhân viên")
     st.write("Nhập thông tin nhân viên mới:")
     st.caption("📍 Địa chỉ dùng danh mục hành chính Việt Nam sau 01/07/2025; khi lưu sẽ tự ghép vào duy nhất cột Địa chỉ.")
@@ -6602,7 +6891,8 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
     with col1:
         new_usr = st.text_input("Tên đăng nhập (Bắt buộc)", key="new_emp_username")
         new_pwd = st.text_input("Mật khẩu", value="123456", key="new_emp_password")
-        new_role = st.selectbox("Phân quyền", ["nhanvien", "quanly", "locker", "tapvu", "letan", "admin"], filter_mode="contains", key="new_emp_role")
+        _new_role_options = ALL_ACCOUNT_ROLES if st.session_state.current_role == 'admin' else ["nhanvien", "locker", "tapvu"]
+        new_role = st.selectbox("Phân quyền", _new_role_options, filter_mode="contains", key="new_emp_role")
         new_fn = st.text_input("Họ và tên đầy đủ", key="new_emp_fullname")
         new_phone = st.text_input("Số điện thoại", key="new_emp_phone")
         new_email = st.text_input("Email", key="new_emp_email")
@@ -6630,7 +6920,7 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
                     _gs_call_with_backoff(sheet_mk.append_row, row_data, value_input_option='USER_ENTERED')
                     start_work_date = get_vn_today()
                     role_new = str(new_role).strip().lower()
-                    # Chỉ vai trò nhanvien tham gia TichLuy. Quanly/letan/locker/tapvu/admin không xuất hiện ở TichLuy.
+                    # Nhân viên và Leader tham gia TichLuy. Quanly/letan/locker/tapvu/admin không xuất hiện ở TichLuy.
                     if role_new not in TICHLUY_EXCLUDED_ROLES:
                         tl_ok, tl_msg = ensure_employee_in_tichluy(new_usr, start_work_date)
                     else:
@@ -6660,76 +6950,33 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
             st.error("Vui lòng nhập Tên đăng nhập.")
 
 
-elif selected_page == "✏️ Sửa / Xóa nhân viên" and is_admin_letan:
+elif selected_page == "✏️ Sửa / Xóa nhân viên" and has_page_access("✏️ Sửa / Xóa nhân viên"):
     st.subheader("✏️ Sửa / Xóa nhân viên")
-    st.write("Chọn nhân viên cần thao tác.")
+    st.caption("Thứ tự thao tác: Chỉnh sửa hồ sơ → Trạng thái làm việc → Xóa nhân viên.")
 
-    st.markdown("#### 🏷️ Trạng thái làm việc của nhân viên")
-    if 'Phân quyền' in df_credentials.columns:
-        nhanvien_df_status = df_credentials[
-            df_credentials['Phân quyền'].astype(str).str.strip().str.lower().eq('nhanvien')
-        ].copy()
-    else:
-        nhanvien_df_status = pd.DataFrame(columns=df_credentials.columns)
-    status_emp_options = nhanvien_df_status['Tên nhân viên'].dropna().astype(str).tolist() if not nhanvien_df_status.empty else []
-    if not status_emp_options:
-        st.info("Hiện không có tài khoản vai trò nhanvien để cập nhật trạng thái.")
-    else:
-        c_status_emp, c_status_value, c_status_save = st.columns([2.2, 1.6, 1.2])
-        with c_status_emp:
-            status_emp = st.selectbox(
-                "Chọn nhân viên", options=status_emp_options, filter_mode="contains",
-                key="employment_status_employee"
-            )
-        current_status_map = load_employment_status_map()
-        current_status = current_status_map.get(normalize_login_name(status_emp), EMPLOYMENT_STATUS_ACTIVE)
-        with c_status_value:
-            status_value = st.selectbox(
-                "Trạng thái", options=EMPLOYMENT_STATUS_OPTIONS,
-                index=EMPLOYMENT_STATUS_OPTIONS.index(current_status) if current_status in EMPLOYMENT_STATUS_OPTIONS else 0,
-                key=f"employment_status_value_{normalize_login_name(status_emp)}"
-            )
-        with c_status_save:
-            st.write("")
-            st.write("")
-            if st.button("💾 Lưu trạng thái", use_container_width=True, key="save_employment_status"):
-                ok, msg = set_employee_employment_status(status_emp, status_value, st.session_state.current_user)
-                (st.success if ok else st.error)(msg)
-                if ok:
-                    st.rerun()
-    st.caption("Trạng thái nghỉ việc không xóa tài khoản hoặc dữ liệu lịch sử; có thể đổi lại 'Đang làm việc' bất cứ lúc nào.")
-    st.markdown("---")
+    _current_role = str(st.session_state.current_role).strip().lower()
+    _all_staff = df_credentials.copy()
+    if _current_role != 'admin' and 'Phân quyền' in _all_staff.columns:
+        _all_staff = _all_staff[_all_staff['Phân quyền'].astype(str).str.strip().str.lower().isin(FRONTDESK_MANAGEABLE_ROLES)].copy()
+    _manageable_names = sort_employee_names(_all_staff['Tên nhân viên'].dropna().astype(str).tolist()) if not _all_staff.empty else []
 
-    col_action1, col_action2 = st.columns(2)
-    with col_action1:
-        st.markdown("#### 🗑️ Xóa nhân viên")
-        del_usr = st.selectbox("Chọn nhân viên cần xóa:", [""] + df_credentials['Tên nhân viên'].tolist(), filter_mode="contains", key="delete_employee_select")
-        if st.button("Xác nhận xóa", use_container_width=True):
-            if del_usr:
-                try:
-                    client = get_gspread_client()
-                    sheet_mk = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-                    cells = sheet_mk.findall(del_usr, in_column=2)
-                    if cells:
-                        sheet_mk.delete_rows(cells[0].row)
-                        renumber_credential_sheet_stt(sheet_mk)
-                        try:
-                            load_credentials.clear()
-                        except Exception:
-                            pass
-                        sync_tichluy_roles_and_stt()
-                        _clear_dynamic_data_caches()
-                        st.success(f"Đã xóa nhân viên: {del_usr} · đã sắp xếp lại STT Sheet1/TichLuy.")
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Lỗi xóa: {e}")
-    with col_action2:
+    # 1) Chỉnh sửa hồ sơ
+    if has_feature_access('employee_edit'):
         st.markdown("#### ✏️ Chỉnh sửa hồ sơ")
-        if st.session_state.current_role == "admin":
-            edit_usr = st.selectbox("Chọn nhân viên cần sửa:", [""] + df_credentials['Tên nhân viên'].tolist(), key='sb_edit_employee', filter_mode="contains")
-            if edit_usr:
-                usr_data = df_credentials[df_credentials['Tên nhân viên'] == edit_usr].iloc[0]
-                edit_key = re.sub(r"[^a-zA-Z0-9_]+", "_", normalize_login_name(edit_usr)) or "employee"
+        edit_usr = st.selectbox("Chọn nhân viên cần sửa:", [""] + _manageable_names, key='sb_edit_employee', filter_mode="contains")
+        if edit_usr:
+            usr_data = df_credentials[df_credentials['Tên nhân viên'].apply(normalize_login_name) == normalize_login_name(edit_usr)].iloc[-1]
+            edit_key = re.sub(r"[^a-zA-Z0-9_]+", "_", normalize_login_name(edit_usr)) or "employee"
+            current_target_role = str(usr_data.get('Phân quyền', 'nhanvien')).strip().lower()
+            allowed_edit_roles = ALL_ACCOUNT_ROLES if _current_role == 'admin' else ["nhanvien", "locker", "tapvu"]
+            if current_target_role not in allowed_edit_roles and _current_role != 'admin':
+                st.error("Lễ tân/Quản lý chỉ được chỉnh sửa tài khoản nhanvien, locker hoặc tapvu.")
+            else:
+                e_role = st.selectbox(
+                    "Phân quyền", allowed_edit_roles,
+                    index=allowed_edit_roles.index(current_target_role) if current_target_role in allowed_edit_roles else 0,
+                    key=f"edit_role_{edit_key}"
+                )
                 e_pass = st.text_input("Mật khẩu", value=str(usr_data.get('Mật khẩu', '')), key=f"edit_password_{edit_key}")
                 e_fn = st.text_input("Họ tên", value=str(usr_data.get('Họ và tên đầy đủ', '')), key=f"edit_fullname_{edit_key}")
                 e_dob = st.text_input("Ngày sinh", value=str(usr_data.get('Ngày sinh', '')), key=f"edit_dob_{edit_key}")
@@ -6740,60 +6987,115 @@ elif selected_page == "✏️ Sửa / Xóa nhân viên" and is_admin_letan:
                 e_bank_account = st.text_input("Số tài khoản ngân hàng", value=str(usr_data.get('Số tài khoản ngân hàng', '')).replace("'", ""), key=f"edit_bank_account_{edit_key}")
                 e_bank_name = bank_selectbox("Tên ngân hàng", key=f"edit_bank_name_{edit_key}", current_value=str(usr_data.get('Tên ngân hàng', '')))
                 if st.button("💾 Cập nhật dữ liệu", use_container_width=True, key=f"edit_save_{edit_key}"):
-                    ok, msg = update_user_profile(edit_usr, e_pass, e_fn, e_dob, e_phone, e_email, e_address, e_bank_account, e_bank_name)
+                    ok, msg = update_user_profile(
+                        edit_usr, e_pass, e_fn, e_dob, e_phone, e_email, e_address,
+                        e_bank_account, e_bank_name, new_role=e_role
+                    )
                     (st.success if ok else st.error)(msg)
                     if ok: st.rerun()
+        st.markdown("---")
+
+    # 2) Trạng thái làm việc
+    if has_feature_access('employment_status'):
+        st.markdown("#### 🏷️ Trạng thái làm việc của nhân viên")
+        if 'Phân quyền' in df_credentials.columns:
+            _status_roles = EMPLOYEE_LIKE_ROLES if _current_role == 'admin' else {'nhanvien'}
+            nhanvien_df_status = df_credentials[
+                df_credentials['Phân quyền'].astype(str).str.strip().str.lower().isin(_status_roles)
+            ].copy()
         else:
-            st.info("Lễ tân/Quản lý được phép xóa theo quyền hiện tại; chỉnh sửa chi tiết hồ sơ chỉ dành cho Admin.")
+            nhanvien_df_status = pd.DataFrame(columns=df_credentials.columns)
+        status_emp_options = sort_employee_names(nhanvien_df_status['Tên nhân viên'].dropna().astype(str).tolist()) if not nhanvien_df_status.empty else []
+        if not status_emp_options:
+            st.info("Hiện không có tài khoản phù hợp để cập nhật trạng thái.")
+        else:
+            c_status_emp, c_status_value, c_status_save = st.columns([2.2, 1.6, 1.2])
+            with c_status_emp:
+                status_emp = st.selectbox("Chọn nhân viên", options=status_emp_options, filter_mode="contains", key="employment_status_employee")
+            current_status_map = load_employment_status_map()
+            current_status = current_status_map.get(normalize_login_name(status_emp), EMPLOYMENT_STATUS_ACTIVE)
+            with c_status_value:
+                status_value = st.selectbox(
+                    "Trạng thái", options=EMPLOYMENT_STATUS_OPTIONS,
+                    index=EMPLOYMENT_STATUS_OPTIONS.index(current_status) if current_status in EMPLOYMENT_STATUS_OPTIONS else 0,
+                    key=f"employment_status_value_{normalize_login_name(status_emp)}"
+                )
+            with c_status_save:
+                st.write(""); st.write("")
+                if st.button("💾 Lưu trạng thái", use_container_width=True, key="save_employment_status"):
+                    ok, msg = set_employee_employment_status(status_emp, status_value, st.session_state.current_user)
+                    (st.success if ok else st.error)(msg)
+                    if ok: st.rerun()
+        st.caption("Trạng thái nghỉ việc không xóa tài khoản hoặc dữ liệu lịch sử; có thể đổi lại 'Đang làm việc' bất cứ lúc nào.")
+        st.markdown("---")
 
-elif selected_page == "🔒 Khóa đăng nhập" and st.session_state.current_role == "admin":
+    # 3) Xóa nhân viên
+    if has_feature_access('employee_delete'):
+        st.markdown("#### 🗑️ Xóa nhân viên")
+        del_usr = st.selectbox("Chọn nhân viên cần xóa:", [""] + _manageable_names, filter_mode="contains", key="delete_employee_select")
+        confirm_del = st.checkbox("Tôi xác nhận xóa tài khoản đã chọn", key="confirm_delete_employee")
+        if st.button("Xác nhận xóa", use_container_width=True, disabled=not bool(del_usr and confirm_del)):
+            if del_usr:
+                try:
+                    client = get_gspread_client()
+                    sheet_mk = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
+                    cells = sheet_mk.findall(del_usr, in_column=2)
+                    if cells:
+                        sheet_mk.delete_rows(cells[0].row)
+                        renumber_credential_sheet_stt(sheet_mk)
+                        try: load_credentials.clear()
+                        except Exception: pass
+                        sync_tichluy_roles_and_stt()
+                        _clear_dynamic_data_caches()
+                        st.success(f"Đã xóa nhân viên: {del_usr} · đã sắp xếp lại STT Sheet1/TichLuy.")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Lỗi xóa: {e}")
+
+elif selected_page == "🔒 Khóa đăng nhập" and has_feature_access("account_lock"):
     st.markdown("### 🔒 Khóa / mở khóa đăng nhập")
-    if st.session_state.current_role != "admin":
-        st.info("Chỉ tài khoản Admin được phép khóa hoặc mở khóa đăng nhập.")
-    else:
-        lockable_df = df_credentials[df_credentials['Tên nhân viên'].apply(normalize_login_name) != normalize_login_name(st.session_state.current_user)].copy()
-        lockable_users = lockable_df['Tên nhân viên'].dropna().astype(str).tolist()
-        selected_lock_users = st.multiselect(
-            "Chọn một hoặc nhiều tài khoản:",
-            options=lockable_users,
-            default=[],
-            filter_mode="contains",
-            placeholder="Gõ để tìm tài khoản..."
-        )
-        c_lock1, c_lock2, c_lock3, c_lock4 = st.columns(4)
-        with c_lock1:
-            if st.button("🔒 Khóa tài khoản đã chọn", use_container_width=True):
-                if not selected_lock_users:
-                    st.warning("Vui lòng chọn ít nhất 1 tài khoản.")
-                else:
-                    ok, msg = set_accounts_login_lock(selected_lock_users, True)
-                    (st.success if ok else st.error)(msg)
-                    if ok: st.rerun()
-        with c_lock2:
-            if st.button("🔓 Mở khóa tài khoản đã chọn", use_container_width=True):
-                if not selected_lock_users:
-                    st.warning("Vui lòng chọn ít nhất 1 tài khoản.")
-                else:
-                    ok, msg = set_accounts_login_lock(selected_lock_users, False)
-                    (st.success if ok else st.error)(msg)
-                    if ok: st.rerun()
-        with c_lock3:
-            if st.button("⛔ Khóa TOÀN BỘ", use_container_width=True):
-                ok, msg = set_accounts_login_lock(lockable_users, True)
+    lockable_df = df_credentials[df_credentials['Tên nhân viên'].apply(normalize_login_name) != normalize_login_name(st.session_state.current_user)].copy()
+    lockable_users = sort_employee_names(lockable_df['Tên nhân viên'].dropna().astype(str).tolist())
+    selected_lock_users = st.multiselect(
+        "Chọn một hoặc nhiều tài khoản:",
+        options=lockable_users,
+        default=[],
+        filter_mode="contains",
+        placeholder="Gõ để tìm tài khoản..."
+    )
+    c_lock1, c_lock2, c_lock3, c_lock4 = st.columns(4)
+    with c_lock1:
+        if st.button("🔒 Khóa tài khoản đã chọn", use_container_width=True):
+            if not selected_lock_users:
+                st.warning("Vui lòng chọn ít nhất 1 tài khoản.")
+            else:
+                ok, msg = set_accounts_login_lock(selected_lock_users, True)
                 (st.success if ok else st.error)(msg)
                 if ok: st.rerun()
-        with c_lock4:
-            if st.button("✅ Mở TOÀN BỘ", use_container_width=True):
-                ok, msg = set_accounts_login_lock(lockable_users, False)
+    with c_lock2:
+        if st.button("🔓 Mở khóa tài khoản đã chọn", use_container_width=True):
+            if not selected_lock_users:
+                st.warning("Vui lòng chọn ít nhất 1 tài khoản.")
+            else:
+                ok, msg = set_accounts_login_lock(selected_lock_users, False)
                 (st.success if ok else st.error)(msg)
                 if ok: st.rerun()
+    with c_lock3:
+        if st.button("⛔ Khóa TOÀN BỘ", use_container_width=True):
+            ok, msg = set_accounts_login_lock(lockable_users, True)
+            (st.success if ok else st.error)(msg)
+            if ok: st.rerun()
+    with c_lock4:
+        if st.button("✅ Mở TOÀN BỘ", use_container_width=True):
+            ok, msg = set_accounts_login_lock(lockable_users, False)
+            (st.success if ok else st.error)(msg)
+            if ok: st.rerun()
 
-        locked_now = lockable_df[lockable_df['Khóa đăng nhập'].apply(is_locked_value)]
-        st.caption(f"Đang khóa: {len(locked_now)} / {len(lockable_df)} tài khoản. Tài khoản Admin đang sử dụng được loại khỏi danh sách để tránh tự khóa chính mình.")
-        if not locked_now.empty:
-            st.dataframe(locked_now[['Tên nhân viên', 'Phân quyền', 'Khóa đăng nhập']], width='stretch', height='content', hide_index=True)
-
-elif selected_page == "🔐 Khóa quyền đăng ký" and st.session_state.current_role == "admin":
+    locked_now = lockable_df[lockable_df['Khóa đăng nhập'].apply(is_locked_value)]
+    st.caption(f"Đang khóa: {len(locked_now)} / {len(lockable_df)} tài khoản. Tài khoản Admin đang sử dụng được loại khỏi danh sách để tránh tự khóa chính mình.")
+    if not locked_now.empty:
+        st.dataframe(locked_now[['Tên nhân viên', 'Phân quyền', 'Khóa đăng nhập']], width='stretch', height='content', hide_index=True)
+elif selected_page == "🔐 Khóa quyền đăng ký" and has_feature_access("registration_lock"):
     st.subheader("🔐 Khóa quyền đăng ký lịch của nhân viên")
     if system_status["lock_nv"]:
         st.warning("🔴 Quyền đăng ký/xóa lịch của tài khoản Nhân viên đang bị KHÓA tạm thời.")
@@ -6806,7 +7108,7 @@ elif selected_page == "🔐 Khóa quyền đăng ký" and st.session_state.curre
             system_status["lock_nv"] = True
             st.rerun()
 
-elif selected_page == "🔄 Đồng bộ dữ liệu" and st.session_state.current_role == "admin":
+elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sync"):
     st.subheader("🔄 Đồng bộ dữ liệu")
     st.info("Các công cụ đồng bộ chỉ dành cho tài khoản Admin.")
     if st.button("🔄 Đồng bộ Excel ➡️ Google Sheets", help="Chỉ thêm những dòng mới từ Excel vào Sheet", use_container_width=True):
@@ -6821,1412 +7123,1451 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and st.session_state.curre
             else:
                 st.info("Excel gốc đã có đủ dữ liệu, không có dòng mới.")
 
-elif selected_page == "💰 Thống kê lương" and (st.session_state.current_role == "admin" or (st.session_state.current_role in ["letan", "quanly"] and payroll_letan_enabled)):
-    st.subheader("💰 Thống kê lương nhân viên")
+elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lương"):
+    st.subheader("💰 Bảng lương nhân viên")
     st.caption("Tiền Lương được tính theo đúng quy tắc: cột F bắt đầu bằng 'Tip' → cộng cột G theo tên nhân viên ở cột I.")
 
     tab_calc, tab_history = st.tabs(["🧮 Tính lương nhân viên", "🗂 Lịch sử bảng lương đã lưu"])
     with tab_calc:
-        # V56: Admin kiểm tra toàn bộ nghĩa vụ Vi phạm còn mở, tách riêng 2 nguồn:
-        # 1) Nợ do Thực nhận âm tự phát sinh khi lưu lương.
-        # 2) Khoản Admin chủ động Tạm hoãn Vi phạm sang kỳ kế tiếp.
-        if st.session_state.current_role == "admin":
-            _debt_btn_col, _debt_hide_col = st.columns([3, 2])
-            with _debt_btn_col:
-                if st.button(
-                    "💳 Kiểm tra nghĩa vụ Vi phạm còn mở",
-                    use_container_width=True,
-                    key="admin_check_open_negative_payroll_debts"
-                ):
-                    _clear_violation_debt_cache()
-                    st.session_state.show_open_negative_payroll_debts = True
-            with _debt_hide_col:
-                if st.button(
-                    "✖️ Ẩn danh sách nghĩa vụ",
-                    use_container_width=True,
-                    key="admin_hide_open_negative_payroll_debts",
-                    disabled=not bool(st.session_state.get('show_open_negative_payroll_debts', False))
-                ):
-                    st.session_state.show_open_negative_payroll_debts = False
-                    st.rerun()
-
-            if st.session_state.get('show_open_negative_payroll_debts', False):
-                _negative_debt_summary, _negative_debt_detail = get_open_negative_payroll_debts()
-                _deferred_debt_summary, _deferred_debt_detail = get_open_admin_deferred_violation_debts()
-
-                if _negative_debt_summary.empty and _deferred_debt_summary.empty:
-                    st.success("✅ Hiện không có Nghĩa vụ Vi phạm nào còn Chưa hoàn thành.")
-                else:
-                    _negative_debt_total = int(round(_negative_debt_summary['Tổng còn nợ'].apply(_money_to_float).sum())) if not _negative_debt_summary.empty else 0
-                    _deferred_debt_total = int(round(_deferred_debt_summary['Tổng tạm hoãn'].apply(_money_to_float).sum())) if not _deferred_debt_summary.empty else 0
-                    _m1, _m2, _m3, _m4 = st.columns(4)
-                    _m1.metric("NV nợ Thực nhận âm", len(_negative_debt_summary))
-                    _m2.metric("Tổng nợ Thực nhận âm", f"{_negative_debt_total:,.0f} đ".replace(',', '.'))
-                    _m3.metric("NV Admin tạm hoãn", len(_deferred_debt_summary))
-                    _m4.metric("Tổng Admin tạm hoãn", f"{_deferred_debt_total:,.0f} đ".replace(',', '.'))
-                    st.caption("Hiển thị riêng hai nhóm nghĩa vụ còn mở: Thực nhận âm tự chuyển kỳ và Vi phạm do Admin chủ động tạm hoãn.")
-
-                    st.markdown("#### 🔴 Nợ do Thực nhận âm")
-                    if _negative_debt_summary.empty:
-                        st.info("Không có nhân viên nào còn nợ do Thực nhận âm.")
-                    else:
-                        _summary_show = _negative_debt_summary.copy()
-                        _summary_show['Tổng còn nợ'] = _summary_show['Tổng còn nợ'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
-                        st.dataframe(
-                            _summary_show,
-                            hide_index=True,
-                            width="stretch",
-                            height="content"
-                        )
-                        with st.expander("🔎 Xem chi tiết từng kỳ nợ Thực nhận âm", expanded=False):
-                            _detail_show = _negative_debt_detail.copy()
-                            if 'Số tiền' in _detail_show.columns:
-                                _detail_show['Số tiền'] = _detail_show['Số tiền'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
-                            st.dataframe(
-                                _detail_show,
-                                hide_index=True,
-                                width="stretch",
-                                height="content"
-                            )
-
-                    st.markdown("#### ⏭️ Nghĩa vụ Vi phạm Admin chủ động tạm hoãn")
-                    if _deferred_debt_summary.empty:
-                        st.info("Không có khoản Vi phạm nào do Admin chủ động tạm hoãn đang mở.")
-                    else:
-                        _deferred_summary_show = _deferred_debt_summary.copy()
-                        _deferred_summary_show['Tổng tạm hoãn'] = _deferred_summary_show['Tổng tạm hoãn'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
-                        st.dataframe(
-                            _deferred_summary_show,
-                            hide_index=True,
-                            width="stretch",
-                            height="content"
-                        )
-                        with st.expander("🔎 Xem chi tiết từng kỳ Admin đã tạm hoãn", expanded=False):
-                            _deferred_detail_show = _deferred_debt_detail.copy()
-                            if 'Số tiền' in _deferred_detail_show.columns:
-                                _deferred_detail_show['Số tiền'] = _deferred_detail_show['Số tiền'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
-                            st.dataframe(
-                                _deferred_detail_show,
-                                hide_index=True,
-                                width="stretch",
-                                height="content"
-                            )
-
-        default_living_db, default_locker_db = get_payroll_default_amounts()
-        with st.expander("⚙️ Mức khấu trừ mặc định", expanded=False):
-            cfg1, cfg2, cfg3 = st.columns([3, 3, 2])
-            with cfg1:
-                payroll_default_living = st.number_input(
-                    "Chi phí sinh hoạt / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
-                    value=float(default_living_db), key="payroll_default_living"
-                )
-            with cfg2:
-                payroll_default_locker = st.number_input(
-                    "Hỗ trợ Locker / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
-                    value=float(default_locker_db), key="payroll_default_locker"
-                )
-            with cfg3:
-                st.write("")
-                if st.button("💾 Lưu mức mặc định", use_container_width=True, key="save_payroll_defaults"):
-                    ok, msg = set_payroll_default_amounts(payroll_default_living, payroll_default_locker)
-                    (st.success if ok else st.error)(msg)
-            st.caption("Hai mức này được áp dụng cho toàn bộ nhân viên khi tạo bảng lương mới. Mức riêng theo nhân viên bên dưới sẽ được ưu tiên hơn mức mặc định chung.")
-
-            # --- MỨC RIÊNG CHO 1 / NHIỀU NHÂN VIÊN ---
-            st.markdown("#### 👥 Mức riêng theo nhân viên")
-            payroll_emp_choices_df = df_credentials.copy() if isinstance(df_credentials, pd.DataFrame) else pd.DataFrame()
-            if not payroll_emp_choices_df.empty and 'Tên nhân viên' in payroll_emp_choices_df.columns:
-                payroll_emp_choices_df = payroll_emp_choices_df[payroll_emp_choices_df['Tên nhân viên'].astype(str).str.strip() != ''].copy()
-                payroll_emp_choices_df = payroll_emp_choices_df[~payroll_emp_choices_df['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
-                    'ten nhan vien', 'ten he thong', 'username', 'user name'
-                })]
-                if 'Phân quyền' in payroll_emp_choices_df.columns:
-                    _pay_roles = payroll_emp_choices_df['Phân quyền'].astype(str).str.strip().str.lower()
-                    payroll_emp_choices_df = payroll_emp_choices_df[_pay_roles.eq('nhanvien')].copy()
-                payroll_employee_options = payroll_emp_choices_df['Tên nhân viên'].astype(str).str.strip().drop_duplicates().tolist()
-            else:
-                payroll_employee_options = []
-
-            selected_payroll_override_emps = st.multiselect(
-                "Chọn 1 hoặc nhiều nhân viên cần đặt mức riêng:",
-                options=payroll_employee_options,
-                key="payroll_override_employees",
-                filter_mode="contains",
-                help="Các nhân viên được chọn sẽ dùng mức riêng thay cho mức mặc định chung khi tạo bảng lương mới."
-            )
-
-            existing_payroll_overrides = get_payroll_employee_overrides()
-            _selected_keys = [normalize_login_name(x) for x in selected_payroll_override_emps]
-            _living_values = [existing_payroll_overrides[k]['living'] for k in _selected_keys if k in existing_payroll_overrides]
-            _locker_values = [existing_payroll_overrides[k]['locker'] for k in _selected_keys if k in existing_payroll_overrides]
-            _living_initial = _living_values[0] if _living_values and len(set(_living_values)) == 1 else float(payroll_default_living)
-            _locker_initial = _locker_values[0] if _locker_values and len(set(_locker_values)) == 1 else float(payroll_default_locker)
-            _override_sig = hashlib.md5("|".join(sorted(_selected_keys)).encode('utf-8')).hexdigest()[:10] if _selected_keys else "none"
-
-            ov1, ov2, ov3, ov4 = st.columns([3, 3, 2, 2])
-            with ov1:
-                payroll_override_living = st.number_input(
-                    "Chi phí sinh hoạt riêng / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
-                    value=float(_living_initial), key=f"payroll_override_living_{_override_sig}",
-                    disabled=not bool(selected_payroll_override_emps)
-                )
-            with ov2:
-                payroll_override_locker = st.number_input(
-                    "Hỗ trợ Locker riêng / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
-                    value=float(_locker_initial), key=f"payroll_override_locker_{_override_sig}",
-                    disabled=not bool(selected_payroll_override_emps)
-                )
-            with ov3:
-                st.write("")
-                if st.button(
-                    "💾 Áp dụng mức riêng", use_container_width=True, key="save_payroll_employee_overrides",
-                    disabled=not bool(selected_payroll_override_emps)
-                ):
-                    ok, msg = set_payroll_employee_overrides(
-                        selected_payroll_override_emps, payroll_override_living, payroll_override_locker
-                    )
-                    if ok:
-                        _apply_payroll_override_to_current_session(
-                            selected_payroll_override_emps, payroll_override_living, payroll_override_locker
-                        )
-                        st.success(msg)
-                    else:
-                        st.error(msg)
-            with ov4:
-                st.write("")
-                if st.button(
-                    "♻️ Dùng lại mặc định", use_container_width=True, key="clear_payroll_employee_overrides",
-                    disabled=not bool(selected_payroll_override_emps)
-                ):
-                    ok, msg = clear_payroll_employee_overrides(selected_payroll_override_emps)
-                    if ok:
-                        _apply_payroll_override_to_current_session(
-                            selected_payroll_override_emps, payroll_default_living, payroll_default_locker
-                        )
-                        st.success(msg)
-                    else:
-                        st.error(msg)
-
-            # Hiển thị danh sách nhân viên đang có mức riêng để Admin dễ kiểm tra.
-            if existing_payroll_overrides:
-                _override_rows = []
-                _display_order = {normalize_login_name(n): i for i, n in enumerate(payroll_employee_options)}
-                for _k, _v in existing_payroll_overrides.items():
-                    _override_rows.append({
-                        "Tên Hệ thống": _v.get("name", _k),
-                        "Phí Sinh Hoạt riêng": int(round(_money_to_float(_v.get("living", 0)))),
-                        "Hỗ trợ Locker riêng": int(round(_money_to_float(_v.get("locker", 0)))),
-                        "__order": _display_order.get(_k, 9999),
-                    })
-                _override_df = pd.DataFrame(_override_rows).sort_values(["__order", "Tên Hệ thống"]).drop(columns=["__order"])
-                with st.expander(f"📋 Danh sách mức riêng đang lưu ({len(_override_df)} nhân viên)", expanded=False):
-                    st.dataframe(
-                        _override_df, width="stretch", height="content", hide_index=True,
-                        column_config={
-                            "Tên Hệ thống": st.column_config.TextColumn("Tên Hệ thống"),
-                            "Phí Sinh Hoạt riêng": st.column_config.NumberColumn("Phí Sinh Hoạt riêng", format="%,d"),
-                            "Hỗ trợ Locker riêng": st.column_config.NumberColumn("Hỗ trợ Locker riêng", format="%,d"),
-                        }
-                    )
-
-        c_period, c_source = st.columns(2)
-        with c_period:
-            preset = st.selectbox(
-                "Chọn kỳ tính lương:",
-                ["Kỳ 1 - Tháng này", "Kỳ 2 - Tháng này", "Kỳ 1 - Tháng trước", "Kỳ 2 - Tháng trước"],
-                key="payroll_period_preset", filter_mode="contains"
-            )
-            p_start, p_end, period_err = resolve_payroll_period(preset, get_vn_today())
-            if period_err:
-                st.error(period_err)
-            elif p_start and p_end:
-                st.info(f"Kỳ đang chọn: **{p_start.strftime('%d/%m/%Y')} → {p_end.strftime('%d/%m/%Y')}**")
-        with c_source:
-            source_mode = st.selectbox(
-                "Nguồn dữ liệu lương:",
-                ["Upload file Excel", "Google Sheet mặc định"],
-                index=0,
-                key="payroll_source_mode", filter_mode="contains"
-            )
-            payroll_upload = None
-            if source_mode == "Upload file Excel":
-                payroll_upload = st.file_uploader(
-                    "Upload file dulieuluong (.xlsx/.xlsm)", type=["xlsx", "xlsm"], key="payroll_upload_file",
-                    help=f"File phải có sheet '{PAYROLL_SOURCE_WORKSHEET}'."
-                )
-            else:
-                st.caption("Nguồn mặc định: Google Sheet 1WtYsbEAlifL1PZ-nSGBojgL4Bnur-1vF")
-
-        # Trạng thái trực quan cho quy trình tải dữ liệu & tính lương.
-        if "payroll_process_message" not in st.session_state:
-            st.session_state.payroll_process_message = "⏸️ Sẵn sàng tính lương nhân viên."
-        if "payroll_process_state" not in st.session_state:
-            st.session_state.payroll_process_state = "idle"
-
-        state_icon = {"idle": "⚪", "running": "🔵", "complete": "🟢", "error": "🔴"}.get(
-            st.session_state.payroll_process_state, "⚪"
-        )
-        st.markdown(
-            f"<div style='padding:8px 12px;border:1px solid #d9d9d9;border-radius:8px;"
-            f"background:#fafafa;margin:4px 0 8px 0;font-weight:600;'>"
-            f"{state_icon} {st.session_state.payroll_process_message}</div>",
-            unsafe_allow_html=True
-        )
-
-        calc_col, recalc_col = st.columns(2)
-        with calc_col:
-            payroll_calc_clicked = st.button(
-                "🧮 Tính lương nhân viên", use_container_width=True, disabled=bool(period_err),
-                key="payroll_calc_button"
-            )
-        with recalc_col:
-            payroll_clear_recalc_clicked = st.button(
-                "🧹 Xóa dữ liệu bảng lương & tính lại", use_container_width=True, disabled=bool(period_err),
-                key="payroll_clear_recalc_button",
-                help="Xóa bảng lương đang nằm trong phiên làm việc, tải lại hồ sơ/role mới nhất rồi tính lại từ đầu."
-            )
-
-        if payroll_clear_recalc_clicked:
-            # Chỉ xóa dữ liệu bảng lương đang tính trong phiên, KHÔNG xóa lịch sử đã lưu.
-            for _k in [
-                "payroll_current_df", "payroll_current_start", "payroll_current_end",
-                "payroll_current_source", "payroll_unmatched", "payroll_adjustment_editor"
-            ]:
-                st.session_state.pop(_k, None)
-            _clear_violation_debt_cache()
-            st.session_state.payroll_process_state = "idle"
-            st.session_state.payroll_process_message = "Đã xóa dữ liệu cũ · Đang tính lại từ đầu..."
-
-        if payroll_calc_clicked or payroll_clear_recalc_clicked:
-            progress = st.progress(0, text="0% - Bắt đầu xử lý...")
-            status = st.status("🧮 Đang tính lương nhân viên...", expanded=True, state="running")
-            try:
-                st.session_state.payroll_process_state = "running"
-                st.session_state.payroll_process_message = "Đang kiểm tra nguồn dữ liệu..."
-                status.write("1/5 · Kiểm tra nguồn dữ liệu và kỳ lương")
-                progress.progress(10, text="10% - Kiểm tra nguồn dữ liệu")
-
-                if source_mode == "Upload file Excel":
-                    if payroll_upload is None:
-                        raise ValueError("Vui lòng upload file Excel dữ liệu lương trước khi tính.")
-                    status.write(f"2/5 · Đang đọc file: {getattr(payroll_upload, 'name', 'Upload Excel')}")
-                    progress.progress(25, text="25% - Đang đọc file Excel")
-                    src_df, src_err = load_payroll_source_from_uploaded_excel(payroll_upload)
-                    src_label = getattr(payroll_upload, 'name', 'Upload Excel')
-                else:
-                    status.write("2/5 · Đang tải dữ liệu từ Google Sheet mặc định")
-                    progress.progress(25, text="25% - Đang tải Google Sheet")
-                    src_df, src_err = load_payroll_source_from_google_sheet()
-                    src_label = f"Google Sheet {PAYROLL_SOURCE_SHEET_ID}"
-
-                if src_err:
-                    raise ValueError(src_err)
-
-                row_count = len(src_df) if isinstance(src_df, pd.DataFrame) else 0
-                status.write(f"✅ Đã đọc {row_count:,} dòng dữ liệu nguồn".replace(",", "."))
-                progress.progress(45, text="45% - Đã đọc dữ liệu nguồn")
-
-                status.write("3/5 · Đang tải dữ liệu tiền phạt từ hệ thống")
-                st.session_state.payroll_process_message = "Đang tải dữ liệu tiền phạt..."
-                progress.progress(60, text="60% - Đang tải tiền phạt")
-                leave_primary = load_backup_sheet_data()
-                penalty_rows = len(leave_primary) if isinstance(leave_primary, pd.DataFrame) else 0
-                status.write(f"✅ Đã tải {penalty_rows:,} dòng lịch nghỉ/vi phạm".replace(",", "."))
-
-                status.write("4/5 · Đang tải lại vai trò nhân viên, đồng bộ TichLuy và tính lương")
-                st.session_state.payroll_process_message = "Đang tải lại vai trò nhân viên và tính lương..."
-                progress.progress(75, text="75% - Đang tính lương")
-
-                # V44: luôn lấy hồ sơ/Phân quyền MỚI NHẤT trước mỗi lần tính lương.
-                # Điều này bảo đảm người vừa đổi từ nhanvien -> letan/quanly/locker/tapvu
-                # bị loại ngay khỏi bảng lương, không chờ cache load_credentials hết hạn.
-                credentials_live = load_credentials_fresh()
-                df_credentials = credentials_live
-                nhanvien_live_count = 0
-                if isinstance(credentials_live, pd.DataFrame) and not credentials_live.empty and 'Phân quyền' in credentials_live.columns:
-                    nhanvien_live_count = int(
-                        credentials_live['Phân quyền'].astype(str).str.strip().str.lower().eq('nhanvien').sum()
-                    )
-                status.write(f"✅ Hồ sơ mới nhất: {nhanvien_live_count} tài khoản vai trò nhanvien")
-
-                # Bảo đảm mọi nhân viên đủ điều kiện đều có một dòng trong TichLuy trước khi tính.
-                # Đồng bộ chỉ thêm người thiếu + đánh STT; không sửa D/E/F của người đã có.
-                tl_sync_ok, tl_sync_msg = sync_tichluy_roles_and_stt(credentials_live)
-                if tl_sync_ok:
-                    status.write(f"✅ {tl_sync_msg}")
-                else:
-                    status.write(f"⚠️ {tl_sync_msg}")
-                # Tiền phạt chỉ dùng dữ liệu ở Google Sheet 1Kz0...; không lấy nguồn lịch nghỉ thứ hai.
-                payroll_df, unmatched_names = build_payroll_table(
-                    src_df, credentials_live, p_start, p_end,
-                    leave_primary=leave_primary, leave_secondary=None,
-                    default_living_expense=payroll_default_living,
-                    default_locker_support=payroll_default_locker
-                )
-
-                status.write("5/5 · Đang hoàn tất và lưu kết quả vào phiên làm việc")
-                st.session_state.payroll_process_message = "Đang hoàn tất bảng lương..."
-                progress.progress(92, text="92% - Đang hoàn tất")
-                st.session_state.payroll_current_df = payroll_df
-                st.session_state.payroll_current_start = p_start.isoformat()
-                st.session_state.payroll_current_end = p_end.isoformat()
-                st.session_state.payroll_current_source = src_label
-                st.session_state.payroll_unmatched = unmatched_names
-
-                progress.progress(100, text="100% - Hoàn tất")
-                st.session_state.payroll_process_state = "complete"
-                st.session_state.payroll_process_message = f"Hoàn tất · Đã tính lương cho {len(payroll_df)} nhân viên."
-                status.update(
-                    label=f"✅ Hoàn tất - Đã tính lương cho {len(payroll_df)} nhân viên",
-                    state="complete", expanded=False
-                )
-                st.success(f"✅ Đã tính lương cho {len(payroll_df)} tài khoản nhân viên.")
-                if unmatched_names:
-                    status.write(f"⚠️ Có {len(unmatched_names)} tên trong dữ liệu Tip chưa khớp tài khoản hệ thống.")
-            except Exception as e:
-                progress.empty()
-                st.session_state.payroll_process_state = "error"
-                st.session_state.payroll_process_message = f"Lỗi: {e}"
-                status.update(label=f"❌ Không thể tính lương: {e}", state="error", expanded=True)
-                status.write(f"❌ {e}")
-                st.error(f"❌ {e}")
-
-        current = st.session_state.get('payroll_current_df')
-        if isinstance(current, pd.DataFrame) and not current.empty:
-            # Dọn cả dữ liệu đang nằm trong session từ bản cũ để không còn dòng header giả.
-            current = _filter_real_payroll_rows(current)
-            st.session_state.payroll_current_df = current
-            current_start = date.fromisoformat(st.session_state.get('payroll_current_start'))
-            current_end = date.fromisoformat(st.session_state.get('payroll_current_end'))
-            unmatched = st.session_state.get('payroll_unmatched', [])
-            if unmatched:
-                st.warning("Có tên ở dữ liệu Tip nhưng không khớp tài khoản hệ thống: " + ", ".join(map(str, unmatched)))
-
-            # V49: bảng điều chỉnh được chuyển xuống CUỐI trang và luôn đóng mặc định.
-            # Ở phần nội dung phía trên, dùng dữ liệu bảng lương hiện có trong session.
-            # Khi Admin mở bảng điều chỉnh ở cuối trang và thay đổi số liệu, ứng dụng lưu lại
-            # vào session rồi rerun để toàn bộ thống kê/export/email phía trên cập nhật đồng bộ.
-            final_df = recalculate_payroll_net(current.copy())
-            final_df = _filter_real_payroll_rows(final_df)
-            # V60: đồng bộ mọi trường hồ sơ theo Sheet1 nguồn và áp dụng role hiện tại.
-            final_df = apply_latest_profile_fields_to_payroll(
-                final_df, load_credentials_recent(), only_current_nhanvien=True
-            )
-            st.session_state.payroll_current_df = final_df
-
-            # V47: Admin có thể chủ động tạm hoãn tiền Vi phạm của kỳ hiện tại.
-            # Khoản đã hoãn được lưu vào sheet NoViPham và chỉ bắt đầu trừ từ kỳ kế tiếp.
+        if not has_feature_access("payroll"):
+            st.info("🔒 Bạn chưa được cấp quyền Tính lương nhân viên.")
+        else:
+            # V56: Admin kiểm tra toàn bộ nghĩa vụ Vi phạm còn mở, tách riêng 2 nguồn:
+            # 1) Nợ do Thực nhận âm tự phát sinh khi lưu lương.
+            # 2) Khoản Admin chủ động Tạm hoãn Vi phạm sang kỳ kế tiếp.
             if st.session_state.current_role == "admin":
-                # V55: giữ section Tạm hoãn Vi phạm luôn mở trong lúc thao tác.
-                # Selectbox có filter_mode="contains" sẽ rerun khi gõ/chọn; nếu expanded=False
-                # thì expander tự đóng sau mỗi rerun. Để expanded=True giúp phần này không bị
-                # ẩn khi Admin đang tìm/chọn nhân viên hoặc nhập số tiền tạm hoãn.
-                with st.expander("⏭️ Tạm hoãn Vi phạm sang kỳ kế tiếp", expanded=True):
-                    _leave_for_defer = load_backup_sheet_data()
-                    _raw_penalty_map = _period_penalty_by_employee(current_start, current_end, _leave_for_defer, None)
-                    _due_debt_map, _deferred_map, _active_debts = get_violation_debt_state(
-                        current_start, current_end, final_df['Tên Hệ thống'].astype(str).tolist()
-                    )
-                    _defer_options = []
-                    _available_by_emp = {}
-                    for _emp in final_df['Tên Hệ thống'].astype(str).tolist():
-                        _ek = normalize_login_name(_emp)
-                        _raw_current = max(0.0, float(_money_to_float(_raw_penalty_map.get(_ek, 0))))
-                        _already_deferred = max(0.0, float(_money_to_float(_deferred_map.get(_ek, 0))))
-                        _available = max(0.0, _raw_current - _already_deferred)
-                        if _available > 0:
-                            _defer_options.append(_emp)
-                            _available_by_emp[_emp] = (_raw_current, _already_deferred, _available)
+                _debt_btn_col, _debt_hide_col = st.columns([3, 2])
+                with _debt_btn_col:
+                    if st.button(
+                        "💳 Kiểm tra nghĩa vụ Vi phạm còn mở",
+                        use_container_width=True,
+                        key="admin_check_open_negative_payroll_debts"
+                    ):
+                        _clear_violation_debt_cache()
+                        st.session_state.show_open_negative_payroll_debts = True
+                with _debt_hide_col:
+                    if st.button(
+                        "✖️ Ẩn danh sách nghĩa vụ",
+                        use_container_width=True,
+                        key="admin_hide_open_negative_payroll_debts",
+                        disabled=not bool(st.session_state.get('show_open_negative_payroll_debts', False))
+                    ):
+                        st.session_state.show_open_negative_payroll_debts = False
+                        st.rerun()
 
-                    if _defer_options:
-                        _defer_emp = st.selectbox(
-                            "Nhân viên", _defer_options, filter_mode="contains", key="payroll_defer_violation_emp"
+                if st.session_state.get('show_open_negative_payroll_debts', False):
+                    _negative_debt_summary, _negative_debt_detail = get_open_negative_payroll_debts()
+                    _deferred_debt_summary, _deferred_debt_detail = get_open_admin_deferred_violation_debts()
+
+                    if _negative_debt_summary.empty and _deferred_debt_summary.empty:
+                        st.success("✅ Hiện không có Nghĩa vụ Vi phạm nào còn Chưa hoàn thành.")
+                    else:
+                        _negative_debt_total = int(round(_negative_debt_summary['Tổng còn nợ'].apply(_money_to_float).sum())) if not _negative_debt_summary.empty else 0
+                        _deferred_debt_total = int(round(_deferred_debt_summary['Tổng tạm hoãn'].apply(_money_to_float).sum())) if not _deferred_debt_summary.empty else 0
+                        _m1, _m2, _m3, _m4 = st.columns(4)
+                        _m1.metric("NV nợ Thực nhận âm", len(_negative_debt_summary))
+                        _m2.metric("Tổng nợ Thực nhận âm", f"{_negative_debt_total:,.0f} đ".replace(',', '.'))
+                        _m3.metric("NV Admin tạm hoãn", len(_deferred_debt_summary))
+                        _m4.metric("Tổng Admin tạm hoãn", f"{_deferred_debt_total:,.0f} đ".replace(',', '.'))
+                        st.caption("Hiển thị riêng hai nhóm nghĩa vụ còn mở: Thực nhận âm tự chuyển kỳ và Vi phạm do Admin chủ động tạm hoãn.")
+
+                        st.markdown("#### 🔴 Nợ do Thực nhận âm")
+                        if _negative_debt_summary.empty:
+                            st.info("Không có nhân viên nào còn nợ do Thực nhận âm.")
+                        else:
+                            _summary_show = _negative_debt_summary.copy()
+                            _summary_show['Tổng còn nợ'] = _summary_show['Tổng còn nợ'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
+                            st.dataframe(
+                                _summary_show,
+                                hide_index=True,
+                                width="stretch",
+                                height="content"
+                            )
+                            with st.expander("🔎 Xem chi tiết từng kỳ nợ Thực nhận âm", expanded=False):
+                                _detail_show = _negative_debt_detail.copy()
+                                if 'Số tiền' in _detail_show.columns:
+                                    _detail_show['Số tiền'] = _detail_show['Số tiền'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
+                                st.dataframe(
+                                    _detail_show,
+                                    hide_index=True,
+                                    width="stretch",
+                                    height="content"
+                                )
+
+                        st.markdown("#### ⏭️ Nghĩa vụ Vi phạm Admin chủ động tạm hoãn")
+                        if _deferred_debt_summary.empty:
+                            st.info("Không có khoản Vi phạm nào do Admin chủ động tạm hoãn đang mở.")
+                        else:
+                            _deferred_summary_show = _deferred_debt_summary.copy()
+                            _deferred_summary_show['Tổng tạm hoãn'] = _deferred_summary_show['Tổng tạm hoãn'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
+                            st.dataframe(
+                                _deferred_summary_show,
+                                hide_index=True,
+                                width="stretch",
+                                height="content"
+                            )
+                            with st.expander("🔎 Xem chi tiết từng kỳ Admin đã tạm hoãn", expanded=False):
+                                _deferred_detail_show = _deferred_debt_detail.copy()
+                                if 'Số tiền' in _deferred_detail_show.columns:
+                                    _deferred_detail_show['Số tiền'] = _deferred_detail_show['Số tiền'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
+                                st.dataframe(
+                                    _deferred_detail_show,
+                                    hide_index=True,
+                                    width="stretch",
+                                    height="content"
+                                )
+
+            default_living_db, default_locker_db = get_payroll_default_amounts()
+            leader_allowance_db = get_leader_responsibility_allowance()
+            payroll_default_living = float(default_living_db)
+            payroll_default_locker = float(default_locker_db)
+            payroll_leader_allowance = float(leader_allowance_db)
+
+            # Chỉ Admin được thay đổi cấu hình tiền mặc định / mức riêng / tiền trách nhiệm Leader.
+            if st.session_state.current_role == 'admin':
+                with st.expander("⚙️ Mức khấu trừ mặc định & tiền trách nhiệm Leader", expanded=False):
+                    cfg1, cfg2, cfg3, cfg4 = st.columns([3, 3, 3, 2])
+                    with cfg1:
+                        payroll_default_living = st.number_input(
+                            "Chi phí sinh hoạt / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
+                            value=float(default_living_db), key="payroll_default_living"
                         )
-                        _raw_current, _already_deferred, _available = _available_by_emp[_defer_emp]
-                        c_a, c_b, c_c = st.columns(3)
-                        c_a.metric("Vi phạm gốc kỳ này", f"{_raw_current:,.0f} đ".replace(',', '.'))
-                        c_b.metric("Đã tạm hoãn", f"{_already_deferred:,.0f} đ".replace(',', '.'))
-                        c_c.metric("Còn có thể hoãn", f"{_available:,.0f} đ".replace(',', '.'))
-                        _step = 50000.0 if _available >= 50000 else max(1.0, _available)
-                        _defer_amount = st.number_input(
-                            "Số tiền Vi phạm muốn chuyển sang kỳ kế tiếp",
-                            min_value=0.0, max_value=float(_available), value=float(_available), step=float(_step),
-                            format="%.0f", key=f"payroll_defer_violation_amount_{normalize_login_name(_defer_emp)}"
+                    with cfg2:
+                        payroll_default_locker = st.number_input(
+                            "Hỗ trợ Locker / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
+                            value=float(default_locker_db), key="payroll_default_locker"
                         )
-                        if st.button("💾 Lưu nghĩa vụ Vi phạm sang kỳ kế tiếp", use_container_width=True, key="save_deferred_violation"):
-                            ok, msg = defer_violation_to_next_period(
-                                _defer_emp, _defer_amount, current_start, current_end, st.session_state.current_user
+                    with cfg3:
+                        payroll_leader_allowance = st.number_input(
+                            "Tiền trách nhiệm Leader / kỳ", min_value=0.0, step=50000.0, format="%.0f",
+                            value=float(leader_allowance_db), key="payroll_leader_allowance",
+                            help="Khoản này tự động cộng vào cột Hỗ Trợ Hoàn Lại của tài khoản Leader khi tính lương."
+                        )
+                    with cfg4:
+                        st.write("")
+                        if st.button("💾 Lưu cấu hình", use_container_width=True, key="save_payroll_defaults"):
+                            ok1, msg1 = set_payroll_default_amounts(payroll_default_living, payroll_default_locker)
+                            ok2, msg2 = set_leader_responsibility_allowance(payroll_leader_allowance)
+                            if ok1 and ok2:
+                                st.success(f"{msg1} {msg2}")
+                            else:
+                                st.error(" | ".join([m for o, m in [(ok1,msg1),(ok2,msg2)] if not o]))
+                    st.caption(
+                        "Nhân viên/Leader dùng Phí Sinh Hoạt và Locker theo mức mặc định hoặc mức riêng. "
+                        "Leader được cộng thêm Tiền trách nhiệm vào Hỗ Trợ Hoàn Lại."
+                    )
+
+                    st.markdown("#### 👥 Mức riêng theo Nhân viên / Leader")
+                    payroll_emp_choices_df = df_credentials.copy() if isinstance(df_credentials, pd.DataFrame) else pd.DataFrame()
+                    if not payroll_emp_choices_df.empty and 'Tên nhân viên' in payroll_emp_choices_df.columns:
+                        payroll_emp_choices_df = payroll_emp_choices_df[payroll_emp_choices_df['Tên nhân viên'].astype(str).str.strip() != ''].copy()
+                        payroll_emp_choices_df = payroll_emp_choices_df[~payroll_emp_choices_df['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
+                            'ten nhan vien', 'ten he thong', 'username', 'user name'
+                        })]
+                        if 'Phân quyền' in payroll_emp_choices_df.columns:
+                            _pay_roles = payroll_emp_choices_df['Phân quyền'].astype(str).str.strip().str.lower()
+                            payroll_emp_choices_df = payroll_emp_choices_df[_pay_roles.isin(PAYROLL_ELIGIBLE_ROLES)].copy()
+                        payroll_employee_options = sort_employee_names(
+                            payroll_emp_choices_df['Tên nhân viên'].astype(str).str.strip().tolist()
+                        )
+                    else:
+                        payroll_employee_options = []
+
+                    selected_payroll_override_emps = st.multiselect(
+                        "Chọn 1 hoặc nhiều nhân viên cần đặt mức riêng:",
+                        options=payroll_employee_options,
+                        key="payroll_override_employees",
+                        filter_mode="contains",
+                        help="Các tài khoản được chọn sẽ dùng mức riêng thay cho mức mặc định chung khi tạo bảng lương mới."
+                    )
+
+                    existing_payroll_overrides = get_payroll_employee_overrides()
+                    _selected_keys = [normalize_login_name(x) for x in selected_payroll_override_emps]
+                    _living_values = [existing_payroll_overrides[k]['living'] for k in _selected_keys if k in existing_payroll_overrides]
+                    _locker_values = [existing_payroll_overrides[k]['locker'] for k in _selected_keys if k in existing_payroll_overrides]
+                    _living_initial = _living_values[0] if _living_values and len(set(_living_values)) == 1 else float(payroll_default_living)
+                    _locker_initial = _locker_values[0] if _locker_values and len(set(_locker_values)) == 1 else float(payroll_default_locker)
+                    _override_sig = hashlib.md5("|".join(sorted(_selected_keys)).encode('utf-8')).hexdigest()[:10] if _selected_keys else "none"
+
+                    ov1, ov2, ov3, ov4 = st.columns([3, 3, 2, 2])
+                    with ov1:
+                        payroll_override_living = st.number_input(
+                            "Chi phí sinh hoạt riêng / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
+                            value=float(_living_initial), key=f"payroll_override_living_{_override_sig}",
+                            disabled=not bool(selected_payroll_override_emps)
+                        )
+                    with ov2:
+                        payroll_override_locker = st.number_input(
+                            "Hỗ trợ Locker riêng / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
+                            value=float(_locker_initial), key=f"payroll_override_locker_{_override_sig}",
+                            disabled=not bool(selected_payroll_override_emps)
+                        )
+                    with ov3:
+                        st.write("")
+                        if st.button(
+                            "💾 Áp dụng mức riêng", use_container_width=True, key="save_payroll_employee_overrides",
+                            disabled=not bool(selected_payroll_override_emps)
+                        ):
+                            ok, msg = set_payroll_employee_overrides(
+                                selected_payroll_override_emps, payroll_override_living, payroll_override_locker
                             )
                             if ok:
-                                # Cập nhật ngay bảng đang mở; lần Tính lại sau sẽ đọc lại ledger và cho cùng kết quả.
-                                _tmp = st.session_state.payroll_current_df.copy()
-                                _mask = _tmp['Tên Hệ thống'].apply(normalize_login_name).eq(normalize_login_name(_defer_emp))
-                                if _mask.any():
-                                    _idx = _tmp.index[_mask][0]
-                                    _tmp.at[_idx, 'Tiền phạt trong tháng'] = max(
-                                        0.0,
-                                        float(_money_to_float(_tmp.at[_idx, 'Tiền phạt trong tháng'])) - float(_money_to_float(_defer_amount))
-                                    )
-                                    _tmp = recalculate_payroll_net(_tmp)
-                                    st.session_state.payroll_current_df = _tmp
-                                st.session_state.pop('payroll_adjustment_editor', None)
+                                _apply_payroll_override_to_current_session(
+                                    selected_payroll_override_emps, payroll_override_living, payroll_override_locker
+                                )
                                 st.success(msg)
-                                st.rerun()
                             else:
                                 st.error(msg)
-                    else:
-                        st.info("Không còn khoản Vi phạm của kỳ hiện tại có thể tạm hoãn.")
-
-                    # V54: Admin xem + sửa/xóa toàn bộ Nghĩa vụ Vi phạm đang mở.
-                    # Việc sửa/xóa có hiệu lực ngay với kỳ đang mở và mọi kỳ tính sau.
-                    _all_active = get_all_open_violation_debts_for_admin()
-                    if isinstance(_all_active, pd.DataFrame) and not _all_active.empty:
-                        _show_cols = [c for c in [
-                            'Tên nhân viên','Số tiền','Nội dung','Loại','Kỳ phát sinh từ','Kỳ phát sinh đến','Bắt đầu trừ từ','Trạng thái'
-                        ] if c in _all_active.columns]
-                        _debt_show = _all_active[_show_cols].copy()
-                        if 'Số tiền' in _debt_show.columns:
-                            _debt_show['Số tiền'] = _debt_show['Số tiền'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
-                        st.caption("Nghĩa vụ Vi phạm đang mở")
-                        st.dataframe(_debt_show, hide_index=True, width="stretch", height="content")
-
-                        with st.expander("✏️ Sửa / Xóa Nghĩa vụ Vi phạm", expanded=False):
-                            _manage_rows = _all_active.reset_index(drop=True).copy()
-                            _manage_options = []
-                            _manage_lookup = {}
-                            for _i, _r in _manage_rows.iterrows():
-                                _sheet_row = int(_r.get('__sheet_row', 0) or 0)
-                                _emp = str(_r.get('Tên nhân viên', '')).strip()
-                                _amt = float(_money_to_float(_r.get('Số tiền', 0)))
-                                _typ = str(_r.get('Loại', '')).strip()
-                                _p1 = str(_r.get('Kỳ phát sinh từ', '')).strip()
-                                _p2 = str(_r.get('Kỳ phát sinh đến', '')).strip()
-                                _label = f"{_emp} · {_amt:,.0f} đ · {_typ} · {_p1} → {_p2}".replace(',', '.')
-                                # Bảo đảm label duy nhất nếu có nhiều dòng giống nhau.
-                                if _label in _manage_lookup:
-                                    _label = f"{_label} · dòng {_sheet_row}"
-                                _manage_options.append(_label)
-                                _manage_lookup[_label] = _r.to_dict()
-
-                            _selected_label = st.selectbox(
-                                "Chọn nghĩa vụ cần chỉnh sửa",
-                                _manage_options,
-                                filter_mode="contains",
-                                key="admin_manage_violation_debt_select",
-                            )
-                            _selected = _manage_lookup.get(_selected_label, {})
-                            _selected_row = int(_selected.get('__sheet_row', 0) or 0)
-                            _selected_amount = max(0.0, float(_money_to_float(_selected.get('Số tiền', 0))))
-                            _selected_due = _parse_vn_date(_selected.get('Bắt đầu trừ từ', '')) or current_start
-                            _edit_amount = st.number_input(
-                                "Số tiền nghĩa vụ",
-                                min_value=1.0,
-                                value=float(max(1.0, _selected_amount)),
-                                step=50000.0,
-                                format="%.0f",
-                                key=f"edit_violation_debt_amount_{_selected_row}",
-                            )
-                            _edit_content = st.text_input(
-                                "Nội dung",
-                                value=str(_selected.get('Nội dung', '')).strip() or VIOLATION_DEBT_CONTENT,
-                                key=f"edit_violation_debt_content_{_selected_row}",
-                            )
-                            _edit_due = st.date_input(
-                                "Bắt đầu trừ từ kỳ/ngày",
-                                value=_selected_due,
-                                format="DD/MM/YYYY",
-                                key=f"edit_violation_debt_due_{_selected_row}",
-                            )
-                            _btn_edit, _btn_delete = st.columns(2)
-                            if _btn_edit.button(
-                                "💾 Lưu chỉnh sửa nghĩa vụ",
-                                use_container_width=True,
-                                key=f"save_violation_debt_edit_{_selected_row}",
-                            ):
-                                _ok, _msg = update_violation_debt_obligation(
-                                    _selected_row,
-                                    _edit_amount,
-                                    _edit_content,
-                                    _edit_due,
-                                    st.session_state.current_user,
+                    with ov4:
+                        st.write("")
+                        if st.button(
+                            "♻️ Dùng lại mặc định", use_container_width=True, key="clear_payroll_employee_overrides",
+                            disabled=not bool(selected_payroll_override_emps)
+                        ):
+                            ok, msg = clear_payroll_employee_overrides(selected_payroll_override_emps)
+                            if ok:
+                                _apply_payroll_override_to_current_session(
+                                    selected_payroll_override_emps, payroll_default_living, payroll_default_locker
                                 )
-                                if _ok:
-                                    _clear_violation_debt_cache()
-                                    try:
-                                        st.session_state.payroll_current_df = refresh_current_payroll_violation_debt(
-                                            st.session_state.payroll_current_df,
-                                            current_start,
-                                            current_end,
-                                        )
-                                    except Exception:
-                                        pass
-                                    st.session_state.pop('payroll_adjustment_editor', None)
-                                    st.success(_msg + " Kỳ đang mở đã được tính lại; các kỳ tiếp theo sẽ dùng số mới.")
-                                    st.rerun()
-                                else:
-                                    st.error(_msg)
+                                st.success(msg)
+                            else:
+                                st.error(msg)
 
-                            _confirm_delete = st.checkbox(
-                                "Tôi xác nhận xóa vĩnh viễn nghĩa vụ này",
-                                key=f"confirm_delete_violation_debt_{_selected_row}",
+                    if existing_payroll_overrides:
+                        _override_rows = []
+                        for _k, _v in existing_payroll_overrides.items():
+                            _override_rows.append({
+                                "Tên Hệ thống": _v.get("name", _k),
+                                "Phí Sinh Hoạt riêng": int(round(_money_to_float(_v.get("living", 0)))),
+                                "Hỗ trợ Locker riêng": int(round(_money_to_float(_v.get("locker", 0)))),
+                            })
+                        _override_df = pd.DataFrame(_override_rows)
+                        if not _override_df.empty:
+                            _override_df['__sort'] = _override_df['Tên Hệ thống'].apply(normalize_login_name)
+                            _override_df = _override_df.sort_values('__sort').drop(columns='__sort')
+                        with st.expander(f"📋 Danh sách mức riêng đang lưu ({len(_override_df)} nhân viên)", expanded=False):
+                            st.dataframe(
+                                _override_df, width="stretch", height="content", hide_index=True,
+                                column_config={
+                                    "Tên Hệ thống": st.column_config.TextColumn("Tên Hệ thống"),
+                                    "Phí Sinh Hoạt riêng": st.column_config.NumberColumn("Phí Sinh Hoạt riêng", format="%,d"),
+                                    "Hỗ trợ Locker riêng": st.column_config.NumberColumn("Hỗ trợ Locker riêng", format="%,d"),
+                                }
                             )
-                            if _btn_delete.button(
-                                "🗑️ Xóa nghĩa vụ",
-                                use_container_width=True,
-                                disabled=not _confirm_delete,
-                                key=f"delete_violation_debt_{_selected_row}",
-                            ):
-                                _ok, _msg = delete_violation_debt_obligation(
-                                    _selected_row,
-                                    st.session_state.current_user,
-                                )
-                                if _ok:
-                                    _clear_violation_debt_cache()
-                                    try:
-                                        st.session_state.payroll_current_df = refresh_current_payroll_violation_debt(
-                                            st.session_state.payroll_current_df,
-                                            current_start,
-                                            current_end,
-                                        )
-                                    except Exception:
-                                        pass
-                                    st.session_state.pop('payroll_adjustment_editor', None)
-                                    st.success(_msg + " Kỳ đang mở đã được tính lại; các kỳ tiếp theo sẽ không còn khoản đã xóa.")
-                                    st.rerun()
-                                else:
-                                    st.error(_msg)
 
-                            st.caption(
-                                "Thay đổi áp dụng ngay cho kỳ lương đang mở và mọi kỳ tính sau. "
-                                "Các bản lương lịch sử đã lưu không bị ghi đè tự động; khi cần cập nhật bản cũ, mở bản đó và bấm Cập nhật bảng lương từ hệ thống."
-                            )
-                    else:
-                        st.caption("Hiện không có Nghĩa vụ Vi phạm nào đang mở.")
-
-            # Thông báo rõ các dòng âm: khi Admin lưu bảng lương, phần âm sẽ chuyển thành nghĩa vụ Vi phạm kỳ sau.
-            _negative_rows = final_df[final_df['Số tiền thực nhận'].apply(_money_to_float) < 0]
-            if not _negative_rows.empty:
-                _negative_total = abs(_negative_rows['Số tiền thực nhận'].apply(_money_to_float).sum())
-                _negative_details = [
-                    f"{str(_r.get('Tên Hệ thống','')).strip()}: {_money_to_float(_r.get('Số tiền thực nhận',0)):,.0f} đ".replace(',', '.')
-                    for _, _r in _negative_rows.iterrows()
-                ]
-                st.warning(
-                    f"Có {len(_negative_rows)} nhân viên Thực nhận âm, tổng phần chưa hoàn thành "
-                    f"{_negative_total:,.0f} đ. Khi lưu bảng lương, những nhân viên Admin KHÔNG chủ động tạm hoãn "
-                    f"sẽ được tự lưu thành '{VIOLATION_DEBT_CONTENT}' và trừ từ kỳ lương kế tiếp.".replace(',', '.')
+            c_period, c_source = st.columns(2)
+            with c_period:
+                preset = st.selectbox(
+                    "Chọn kỳ tính lương:",
+                    ["Kỳ 1 - Tháng này", "Kỳ 2 - Tháng này", "Kỳ 1 - Tháng trước", "Kỳ 2 - Tháng trước"],
+                    key="payroll_period_preset", filter_mode="contains"
                 )
-                st.markdown("**Nhân viên Thực nhận âm:** " + " · ".join(_negative_details))
-
-            total_salary = final_df['Tiền Lương'].sum()
-            total_penalty = final_df['Tiền phạt trong tháng'].apply(_money_to_float).sum() + final_df.get('Vi phạm kỳ trước', pd.Series(0, index=final_df.index)).apply(_money_to_float).sum()
-            total_net = final_df['Số tiền thực nhận'].sum()
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Nhân viên", len(final_df))
-            c2.metric("Tổng Tiền Lương", f"{total_salary:,.0f} đ".replace(',', '.'))
-            c3.metric("Tổng tiền phạt", f"{total_penalty:,.0f} đ".replace(',', '.'))
-            c4.metric("Tổng thực nhận", f"{total_net:,.0f} đ".replace(',', '.'))
-
-            display_cols = [
-                "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
-                "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương",
-                "Tiền hỗ trợ Locker", "Số tiền thực nhận"
-            ]
-            st.markdown("### 📋 Bảng lương tổng hợp")
-            # HTML table dùng width:100% + table-layout:fixed để không tạo thanh cuộn ngang/dọc.
-            web_df = final_df[display_cols].copy()
-            web_df, payroll_web_widths = apply_table_layout_df(web_df, "payroll_current")
-            payroll_internal_order = list(web_df.columns)
-            money_web_cols = [c for c in payroll_internal_order if c.startswith('Tiền') or c in {'Tích lũy','Chi Phí Sinh Hoạt','Vi phạm kỳ trước','Số tiền thực nhận'}]
-            for c in money_web_cols:
-                web_df[c] = web_df[c].apply(lambda v: f"{_money_to_float(v):,.0f}".replace(',', '.'))
-
-            # V53: nếu Admin đã tạm hoãn Vi phạm của kỳ này, ghi chú ngay TRONG ô Vi phạm.
-            # Dùng token rồi thay bằng HTML sau khi pandas escape bảng, để không phải tắt escaping
-            # cho các dữ liệu tên nhân viên lấy từ Google Sheet.
-            _violation_note_tokens = {}
-            try:
-                _, _web_deferred_map, _ = get_violation_debt_state(
-                    current_start, current_end, final_df['Tên Hệ thống'].astype(str).tolist()
+                p_start, p_end, period_err = resolve_payroll_period(preset, get_vn_today())
+                if period_err:
+                    st.error(period_err)
+                elif p_start and p_end:
+                    st.info(f"Kỳ đang chọn: **{p_start.strftime('%d/%m/%Y')} → {p_end.strftime('%d/%m/%Y')}**")
+            with c_source:
+                source_mode = st.selectbox(
+                    "Nguồn dữ liệu lương:",
+                    ["Upload file Excel", "Google Sheet mặc định"],
+                    index=0,
+                    key="payroll_source_mode", filter_mode="contains"
                 )
-                if 'Tiền phạt trong tháng' in web_df.columns:
-                    for _row_pos, _row_idx in enumerate(web_df.index):
-                        _emp_name = str(final_df.loc[_row_idx, 'Tên Hệ thống']).strip() if _row_idx in final_df.index else ''
-                        _defer_amt = max(0.0, float(_money_to_float(_web_deferred_map.get(normalize_login_name(_emp_name), 0))))
-                        if _defer_amt <= 0:
-                            continue
-                        _base_violation = str(web_df.at[_row_idx, 'Tiền phạt trong tháng'])
-                        _token = f"__VERA_DEFER_NOTE_{_row_pos}__"
-                        _note_amount = f"{_defer_amt:,.0f}".replace(',', '.')
-                        _violation_note_tokens[_token] = (
-                            f"<div class='payroll-violation-value'>{_base_violation}</div>"
-                            f"<div class='payroll-violation-note'>Trừ kỳ lương kế tiếp: {_note_amount} đ</div>"
-                        )
-                        web_df.at[_row_idx, 'Tiền phạt trong tháng'] = _token
-            except Exception:
-                _violation_note_tokens = {}
+                payroll_upload = None
+                if source_mode == "Upload file Excel":
+                    payroll_upload = st.file_uploader(
+                        "Upload file dulieuluong (.xlsx/.xlsm)", type=["xlsx", "xlsm"], key="payroll_upload_file",
+                        help=f"File phải có sheet '{PAYROLL_SOURCE_WORKSHEET}'."
+                    )
+                else:
+                    st.caption("Nguồn mặc định: Google Sheet 1WtYsbEAlifL1PZ-nSGBojgL4Bnur-1vF")
 
-            # V50: bảng tổng hợp trên website không hiển thị thông tin ngân hàng hoặc Email.
-            # V46: ghi nhớ dòng Thực nhận <= 0 trước khi đổi định dạng/đổi tên cột để
-            # có thể tô vàng toàn bộ dòng trên bảng Thống kê lương nhân viên.
-            _web_non_positive_mask = final_df['Số tiền thực nhận'].apply(_money_to_float).le(0).tolist()
+            # Trạng thái trực quan cho quy trình tải dữ liệu & tính lương.
+            if "payroll_process_message" not in st.session_state:
+                st.session_state.payroll_process_message = "⏸️ Sẵn sàng tính lương nhân viên."
+            if "payroll_process_state" not in st.session_state:
+                st.session_state.payroll_process_state = "idle"
 
-            # Chỉ đổi tên cột lúc hiển thị; dữ liệu nội bộ vẫn giữ tên chuẩn để tính toán/lưu lịch sử.
-            web_df = web_df.rename(columns={c: PAYROLL_DISPLAY_LABELS.get(c, c) for c in web_df.columns})
-            payroll_html = web_df.to_html(index=False, escape=True, classes='vera-payroll-table')
-            # Chỉ mở HTML đối với token do hệ thống tự tạo; mọi dữ liệu Sheet khác vẫn được escape an toàn.
-            for _token, _fragment in _violation_note_tokens.items():
-                payroll_html = payroll_html.replace(_token, _fragment)
-
-            # Gắn class cho từng <tr> trong <tbody> theo đúng thứ tự dòng.
-            # Không phụ thuộc alternating row color nên dòng <= 0 luôn nổi bật màu vàng.
-            try:
-                _head_html, _body_tail = payroll_html.split('<tbody>', 1)
-                _body_html, _tail_html = _body_tail.split('</tbody>', 1)
-                _row_counter = {'i': 0}
-                def _mark_payroll_non_positive_row(_match):
-                    _i = _row_counter['i']
-                    _row_counter['i'] += 1
-                    if _i < len(_web_non_positive_mask) and _web_non_positive_mask[_i]:
-                        return '<tr class="payroll-nonpositive">'
-                    return '<tr>'
-                _body_html = re.sub(r'<tr>', _mark_payroll_non_positive_row, _body_html)
-                payroll_html = _head_html + '<tbody>' + _body_html + '</tbody>' + _tail_html
-            except Exception:
-                pass
-
-            width_total = max(1, sum(int(payroll_web_widths.get(c, 140)) for c in payroll_internal_order))
-            colgroup = '<colgroup>' + ''.join(
-                f'<col style="width:{(int(payroll_web_widths.get(c, 140)) / width_total) * 100:.3f}%">'
-                for c in payroll_internal_order
-            ) + '</colgroup>'
-            payroll_html = payroll_html.replace('>', '>' + colgroup, 1)
-            payroll_layout_css = table_layout_html_css(
-                "payroll_current", payroll_internal_order, "table.vera-payroll-table"
+            state_icon = {"idle": "⚪", "running": "🔵", "complete": "🟢", "error": "🔴"}.get(
+                st.session_state.payroll_process_state, "⚪"
             )
             st.markdown(
-                f"""<style>
-                {payroll_layout_css}
-                .vera-payroll-wrap{{width:100%;overflow:visible;}}
-                table.vera-payroll-table{{width:100%;table-layout:fixed;border-collapse:collapse;font-size:clamp(8px,.68vw,12px);}}
-                table.vera-payroll-table th{{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 3px;border:1px solid #c9c9c9;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;line-height:1.15!important;vertical-align:middle!important;}}
-                table.vera-payroll-table td{{padding:4px 3px;border:1px solid #dedede;white-space:normal;word-break:break-word;vertical-align:middle;}}
-                table.vera-payroll-table .payroll-violation-value{{line-height:1.05;}}
-                table.vera-payroll-table .payroll-violation-note{{font-size:6px!important;line-height:1.05!important;margin-top:2px;white-space:normal!important;font-weight:400;}}
-                table.vera-payroll-table tbody tr:nth-child(even){{background:#fafafa;}}
-                table.vera-payroll-table tbody tr.payroll-nonpositive td{{background:#FFF2CC!important;}}
-                @media(max-width:800px){{table.vera-payroll-table{{font-size:7px;}}table.vera-payroll-table th,table.vera-payroll-table td{{padding:3px 1px;}}}}
-                </style>""" + f"<div class='vera-payroll-wrap'>{payroll_html}</div>",
+                f"<div style='padding:8px 12px;border:1px solid #d9d9d9;border-radius:8px;"
+                f"background:#fafafa;margin:4px 0 8px 0;font-weight:600;'>"
+                f"{state_icon} {st.session_state.payroll_process_message}</div>",
                 unsafe_allow_html=True
             )
 
-            c_save, c_export = st.columns(2)
-            with c_save:
-                if st.button("💾 Lưu bảng lương kỳ này vào hệ thống", use_container_width=True):
-                    ok, msg, batch_id = save_payroll_snapshot(
-                        final_df, current_start, current_end,
-                        st.session_state.get('payroll_current_source', ''), st.session_state.current_user
+            calc_col, recalc_col = st.columns(2)
+            with calc_col:
+                payroll_calc_clicked = st.button(
+                    "🧮 Tính lương nhân viên", use_container_width=True, disabled=bool(period_err),
+                    key="payroll_calc_button"
+                )
+            with recalc_col:
+                payroll_clear_recalc_clicked = st.button(
+                    "🧹 Xóa dữ liệu bảng lương & tính lại", use_container_width=True, disabled=bool(period_err),
+                    key="payroll_clear_recalc_button",
+                    help="Xóa bảng lương đang nằm trong phiên làm việc, tải lại hồ sơ/role mới nhất rồi tính lại từ đầu."
+                )
+
+            if payroll_clear_recalc_clicked:
+                # Chỉ xóa dữ liệu bảng lương đang tính trong phiên, KHÔNG xóa lịch sử đã lưu.
+                for _k in [
+                    "payroll_current_df", "payroll_current_start", "payroll_current_end",
+                    "payroll_current_source", "payroll_unmatched", "payroll_adjustment_editor"
+                ]:
+                    st.session_state.pop(_k, None)
+                _clear_violation_debt_cache()
+                st.session_state.payroll_process_state = "idle"
+                st.session_state.payroll_process_message = "Đã xóa dữ liệu cũ · Đang tính lại từ đầu..."
+
+            if payroll_calc_clicked or payroll_clear_recalc_clicked:
+                progress = st.progress(0, text="0% - Bắt đầu xử lý...")
+                status = st.status("🧮 Đang tính lương nhân viên...", expanded=True, state="running")
+                try:
+                    st.session_state.payroll_process_state = "running"
+                    st.session_state.payroll_process_message = "Đang kiểm tra nguồn dữ liệu..."
+                    status.write("1/5 · Kiểm tra nguồn dữ liệu và kỳ lương")
+                    progress.progress(10, text="10% - Kiểm tra nguồn dữ liệu")
+
+                    if source_mode == "Upload file Excel":
+                        if payroll_upload is None:
+                            raise ValueError("Vui lòng upload file Excel dữ liệu lương trước khi tính.")
+                        status.write(f"2/5 · Đang đọc file: {getattr(payroll_upload, 'name', 'Upload Excel')}")
+                        progress.progress(25, text="25% - Đang đọc file Excel")
+                        src_df, src_err = load_payroll_source_from_uploaded_excel(payroll_upload)
+                        src_label = getattr(payroll_upload, 'name', 'Upload Excel')
+                    else:
+                        status.write("2/5 · Đang tải dữ liệu từ Google Sheet mặc định")
+                        progress.progress(25, text="25% - Đang tải Google Sheet")
+                        src_df, src_err = load_payroll_source_from_google_sheet()
+                        src_label = f"Google Sheet {PAYROLL_SOURCE_SHEET_ID}"
+
+                    if src_err:
+                        raise ValueError(src_err)
+
+                    row_count = len(src_df) if isinstance(src_df, pd.DataFrame) else 0
+                    status.write(f"✅ Đã đọc {row_count:,} dòng dữ liệu nguồn".replace(",", "."))
+                    progress.progress(45, text="45% - Đã đọc dữ liệu nguồn")
+
+                    status.write("3/5 · Đang tải dữ liệu tiền phạt từ hệ thống")
+                    st.session_state.payroll_process_message = "Đang tải dữ liệu tiền phạt..."
+                    progress.progress(60, text="60% - Đang tải tiền phạt")
+                    leave_primary = load_backup_sheet_data()
+                    penalty_rows = len(leave_primary) if isinstance(leave_primary, pd.DataFrame) else 0
+                    status.write(f"✅ Đã tải {penalty_rows:,} dòng lịch nghỉ/vi phạm".replace(",", "."))
+
+                    status.write("4/5 · Đang tải lại vai trò nhân viên, đồng bộ TichLuy và tính lương")
+                    st.session_state.payroll_process_message = "Đang tải lại vai trò nhân viên và tính lương..."
+                    progress.progress(75, text="75% - Đang tính lương")
+
+                    # V44: luôn lấy hồ sơ/Phân quyền MỚI NHẤT trước mỗi lần tính lương.
+                    # Điều này bảo đảm người vừa đổi từ nhanvien -> letan/quanly/locker/tapvu
+                    # bị loại ngay khỏi bảng lương, không chờ cache load_credentials hết hạn.
+                    credentials_live = load_credentials_fresh()
+                    df_credentials = credentials_live
+                    nhanvien_live_count = 0
+                    if isinstance(credentials_live, pd.DataFrame) and not credentials_live.empty and 'Phân quyền' in credentials_live.columns:
+                        nhanvien_live_count = int(
+                            credentials_live['Phân quyền'].astype(str).str.strip().str.lower().isin(PAYROLL_ELIGIBLE_ROLES).sum()
+                        )
+                    status.write(f"✅ Hồ sơ mới nhất: {nhanvien_live_count} tài khoản Nhân viên/Leader")
+
+                    # Bảo đảm mọi nhân viên đủ điều kiện đều có một dòng trong TichLuy trước khi tính.
+                    # Đồng bộ chỉ thêm người thiếu + đánh STT; không sửa D/E/F của người đã có.
+                    tl_sync_ok, tl_sync_msg = sync_tichluy_roles_and_stt(credentials_live)
+                    if tl_sync_ok:
+                        status.write(f"✅ {tl_sync_msg}")
+                    else:
+                        status.write(f"⚠️ {tl_sync_msg}")
+                    # Tiền phạt chỉ dùng dữ liệu ở Google Sheet 1Kz0...; không lấy nguồn lịch nghỉ thứ hai.
+                    payroll_df, unmatched_names = build_payroll_table(
+                        src_df, credentials_live, p_start, p_end,
+                        leave_primary=leave_primary, leave_secondary=None,
+                        default_living_expense=payroll_default_living,
+                        default_locker_support=payroll_default_locker,
+                        leader_responsibility_allowance=payroll_leader_allowance
                     )
-                    (st.success if ok else st.error)(msg)
-                    if ok:
-                        load_payroll_history.clear()
-                        st.caption(f"Mã bản lưu: {batch_id}")
-            with c_export:
-                excel_bytes = build_payroll_excel_bytes(final_df, current_start, current_end)
-                st.download_button(
-                    "📥 Export toàn bộ Bảng lương Excel",
-                    data=excel_bytes,
-                    file_name=f"BangLuong_{current_start.strftime('%d%m%Y')}_{current_end.strftime('%d%m%Y')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
 
-            with st.expander("📧 GỬI BẢNG LƯƠNG QUA EMAIL"):
-                # V59: danh sách gửi chỉ phụ thuộc Thực nhận > 0. Email KHÔNG lấy từ bảng lương
-                # vì có thể đã cũ; địa chỉ mới nhất sẽ được đọc trực tiếp từ Sheet1 ngay khi bấm Gửi.
-                _email_net = final_df['Số tiền thực nhận'].apply(_money_to_float) if 'Số tiền thực nhận' in final_df.columns else pd.Series(0, index=final_df.index)
-                emailable = final_df[_email_net > 0].copy()
-                employees_email = emailable['Tên Hệ thống'].astype(str).tolist()
-                selected_email_emps = st.multiselect(
-                    "Chọn 1, nhiều hoặc tất cả nhân viên:", employees_email, default=employees_email,
-                    filter_mode="contains", key="payroll_email_recipients"
+                    status.write("5/5 · Đang hoàn tất và lưu kết quả vào phiên làm việc")
+                    st.session_state.payroll_process_message = "Đang hoàn tất bảng lương..."
+                    progress.progress(92, text="92% - Đang hoàn tất")
+                    st.session_state.payroll_current_df = payroll_df
+                    st.session_state.payroll_current_start = p_start.isoformat()
+                    st.session_state.payroll_current_end = p_end.isoformat()
+                    st.session_state.payroll_current_source = src_label
+                    st.session_state.payroll_unmatched = unmatched_names
+
+                    progress.progress(100, text="100% - Hoàn tất")
+                    st.session_state.payroll_process_state = "complete"
+                    st.session_state.payroll_process_message = f"Hoàn tất · Đã tính lương cho {len(payroll_df)} nhân viên."
+                    status.update(
+                        label=f"✅ Hoàn tất - Đã tính lương cho {len(payroll_df)} nhân viên",
+                        state="complete", expanded=False
+                    )
+                    st.success(f"✅ Đã tính lương cho {len(payroll_df)} tài khoản Nhân viên/Leader.")
+                    if unmatched_names:
+                        status.write(f"⚠️ Có {len(unmatched_names)} tên trong dữ liệu Tip chưa khớp tài khoản hệ thống.")
+                except Exception as e:
+                    progress.empty()
+                    st.session_state.payroll_process_state = "error"
+                    st.session_state.payroll_process_message = f"Lỗi: {e}"
+                    status.update(label=f"❌ Không thể tính lương: {e}", state="error", expanded=True)
+                    status.write(f"❌ {e}")
+                    st.error(f"❌ {e}")
+
+            current = st.session_state.get('payroll_current_df')
+            if isinstance(current, pd.DataFrame) and not current.empty:
+                # Dọn cả dữ liệu đang nằm trong session từ bản cũ để không còn dòng header giả.
+                current = _filter_real_payroll_rows(current)
+                st.session_state.payroll_current_df = current
+                current_start = date.fromisoformat(st.session_state.get('payroll_current_start'))
+                current_end = date.fromisoformat(st.session_state.get('payroll_current_end'))
+                unmatched = st.session_state.get('payroll_unmatched', [])
+                if unmatched:
+                    st.warning("Có tên ở dữ liệu Tip nhưng không khớp tài khoản hệ thống: " + ", ".join(map(str, unmatched)))
+
+                # V49: bảng điều chỉnh được chuyển xuống CUỐI trang và luôn đóng mặc định.
+                # Ở phần nội dung phía trên, dùng dữ liệu bảng lương hiện có trong session.
+                # Khi Admin mở bảng điều chỉnh ở cuối trang và thay đổi số liệu, ứng dụng lưu lại
+                # vào session rồi rerun để toàn bộ thống kê/export/email phía trên cập nhật đồng bộ.
+                final_df = recalculate_payroll_net(current.copy())
+                final_df = _filter_real_payroll_rows(final_df)
+                # V60: đồng bộ mọi trường hồ sơ theo Sheet1 nguồn và áp dụng role hiện tại.
+                final_df = apply_latest_profile_fields_to_payroll(
+                    final_df, load_credentials_recent(), only_current_nhanvien=True
                 )
-                st.caption(
-                    f"Có {len(employees_email)} nhân viên có Thực nhận > 0. "
-                    "Email sẽ luôn được đọc lại mới nhất từ Sheet1 ngay trước khi gửi; "
-                    "nhân viên có Thực nhận ≤ 0 sẽ không được gửi mail."
-                )
-                if st.button("🚀 Gửi bảng lương cho nhân viên đã chọn", use_container_width=True):
-                    if not selected_email_emps:
-                        st.warning("Vui lòng chọn ít nhất 1 nhân viên.")
-                    else:
-                        sender_email = "veraspabienhoa@gmail.com"
-                        sender_pass = "zvtgbysfmdaqxaau"
-                        progress = st.progress(0)
-                        ok_count, errors = 0, []
-                        # V59: đọc hồ sơ nhân sự MỚI NHẤT đúng 1 lần cho cả lượt gửi.
-                        # Không dùng Email đang nằm trong final_df vì bảng lương có thể đã được tính/lưu trước khi Email được sửa.
-                        live_email_creds = load_credentials_fresh_for_email()
-                        # Chỉ đọc Sheet1 lịch nghỉ một lần rồi lọc theo từng nhân viên, tránh quota 429.
-                        email_leave_df = load_backup_sheet_data()
-                        for idx, emp in enumerate(selected_email_emps):
-                            matched_pay = emailable[emailable['Tên Hệ thống'].astype(str) == str(emp)]
-                            if matched_pay.empty:
-                                errors.append(f"{emp}: Không tìm thấy dữ liệu bảng lương.")
-                                progress.progress((idx + 1) / len(selected_email_emps))
-                                continue
-                            row = matched_pay.iloc[0].copy()
-                            _live_row_df = apply_latest_profile_fields_to_payroll(
-                                pd.DataFrame([row]), live_email_creds, only_current_nhanvien=False
+                st.session_state.payroll_current_df = final_df
+
+                # V47: Admin có thể chủ động tạm hoãn tiền Vi phạm của kỳ hiện tại.
+                # Khoản đã hoãn được lưu vào sheet NoViPham và chỉ bắt đầu trừ từ kỳ kế tiếp.
+                if st.session_state.current_role == "admin":
+                    # V55: giữ section Tạm hoãn Vi phạm luôn mở trong lúc thao tác.
+                    # Selectbox có filter_mode="contains" sẽ rerun khi gõ/chọn; nếu expanded=False
+                    # thì expander tự đóng sau mỗi rerun. Để expanded=True giúp phần này không bị
+                    # ẩn khi Admin đang tìm/chọn nhân viên hoặc nhập số tiền tạm hoãn.
+                    with st.expander("⏭️ Tạm hoãn Vi phạm sang kỳ kế tiếp", expanded=True):
+                        _leave_for_defer = load_backup_sheet_data()
+                        _raw_penalty_map = _period_penalty_by_employee(current_start, current_end, _leave_for_defer, None)
+                        _due_debt_map, _deferred_map, _active_debts = get_violation_debt_state(
+                            current_start, current_end, final_df['Tên Hệ thống'].astype(str).tolist()
+                        )
+                        _defer_options = []
+                        _available_by_emp = {}
+                        for _emp in final_df['Tên Hệ thống'].astype(str).tolist():
+                            _ek = normalize_login_name(_emp)
+                            _raw_current = max(0.0, float(_money_to_float(_raw_penalty_map.get(_ek, 0))))
+                            _already_deferred = max(0.0, float(_money_to_float(_deferred_map.get(_ek, 0))))
+                            _available = max(0.0, _raw_current - _already_deferred)
+                            if _available > 0:
+                                _defer_options.append(_emp)
+                                _available_by_emp[_emp] = (_raw_current, _already_deferred, _available)
+
+                        _defer_options = sort_employee_names(_defer_options)
+                        if _defer_options:
+                            _defer_emp = st.selectbox(
+                                "Nhân viên", _defer_options, filter_mode="contains", key="payroll_defer_violation_emp"
                             )
-                            if not _live_row_df.empty:
-                                row = _live_row_df.iloc[0].copy()
-                            to_email = str(row.get('Email', '')).strip() or latest_email_from_credentials(live_email_creds, emp)
-                            if not to_email or '@' not in to_email:
-                                errors.append(f"{emp}: Email mới nhất trong Sheet1 không hợp lệ hoặc đang để trống.")
-                                progress.progress((idx + 1) / len(selected_email_emps))
-                                continue
-                            # Đồng bộ Email trên row chỉ để nội dung/file nội bộ luôn phản ánh dữ liệu mới nhất.
-                            row['Email'] = to_email
-                            emp_violations = get_employee_violation_details(emp, current_start, current_end, email_leave_df)
-                            ok, msg = send_payroll_email(
-                                sender_email, sender_pass, to_email, row,
-                                current_start, current_end, emp_violations
+                            _raw_current, _already_deferred, _available = _available_by_emp[_defer_emp]
+                            c_a, c_b, c_c = st.columns(3)
+                            c_a.metric("Vi phạm gốc kỳ này", f"{_raw_current:,.0f} đ".replace(',', '.'))
+                            c_b.metric("Đã tạm hoãn", f"{_already_deferred:,.0f} đ".replace(',', '.'))
+                            c_c.metric("Còn có thể hoãn", f"{_available:,.0f} đ".replace(',', '.'))
+                            _step = 50000.0 if _available >= 50000 else max(1.0, _available)
+                            _defer_amount = st.number_input(
+                                "Số tiền Vi phạm muốn chuyển sang kỳ kế tiếp",
+                                min_value=0.0, max_value=float(_available), value=float(_available), step=float(_step),
+                                format="%.0f", key=f"payroll_defer_violation_amount_{normalize_login_name(_defer_emp)}"
                             )
-                            if ok: ok_count += 1
-                            else: errors.append(f"{emp}: {msg}")
-                            progress.progress((idx + 1) / len(selected_email_emps))
-                            time.sleep(0.35)
-                        if ok_count: st.success(f"Đã gửi thành công {ok_count}/{len(selected_email_emps)} email bảng lương.")
-                        for e in errors: st.error(e)
+                            if st.button("💾 Lưu nghĩa vụ Vi phạm sang kỳ kế tiếp", use_container_width=True, key="save_deferred_violation"):
+                                ok, msg = defer_violation_to_next_period(
+                                    _defer_emp, _defer_amount, current_start, current_end, st.session_state.current_user
+                                )
+                                if ok:
+                                    # Cập nhật ngay bảng đang mở; lần Tính lại sau sẽ đọc lại ledger và cho cùng kết quả.
+                                    _tmp = st.session_state.payroll_current_df.copy()
+                                    _mask = _tmp['Tên Hệ thống'].apply(normalize_login_name).eq(normalize_login_name(_defer_emp))
+                                    if _mask.any():
+                                        _idx = _tmp.index[_mask][0]
+                                        _tmp.at[_idx, 'Tiền phạt trong tháng'] = max(
+                                            0.0,
+                                            float(_money_to_float(_tmp.at[_idx, 'Tiền phạt trong tháng'])) - float(_money_to_float(_defer_amount))
+                                        )
+                                        _tmp = recalculate_payroll_net(_tmp)
+                                        st.session_state.payroll_current_df = _tmp
+                                    st.session_state.pop('payroll_adjustment_editor', None)
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        else:
+                            st.info("Không còn khoản Vi phạm của kỳ hiện tại có thể tạm hoãn.")
 
-            if st.session_state.current_role == "admin":
-                with st.expander("📨 GỬI BẢNG LƯƠNG TỔNG HỢP CHO LỄ TÂN"):
-                    # Hiển thị TẤT CẢ tài khoản Lễ tân trước; chỉ sau khi Admin check tên
-                    # mới lấy Email tương ứng từ hồ sơ hệ thống. Không lọc Email từ đầu.
-                    letan_df = df_credentials.copy()
-                    if not letan_df.empty and 'Phân quyền' in letan_df.columns:
-                        letan_df = letan_df[
-                            letan_df['Phân quyền'].astype(str).str.strip().str.lower().isin(['letan', 'quanly'])
-                        ].copy()
-                        if 'Tên nhân viên' in letan_df.columns:
-                            letan_df = letan_df[
-                                ~letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
-                                    'ten nhan vien', 'ten he thong', 'username', 'user name'
-                                })
-                            ].copy()
-                    if letan_df.empty:
-                        st.info("Không có tài khoản Lễ tân trong hồ sơ hệ thống.")
-                    else:
-                        st.write("**Check đúng 1 Lễ tân để hệ thống lấy Email từ hồ sơ:**")
-                        checked_letan = []
-                        for i, (_, lr) in enumerate(letan_df.iterrows()):
-                            lname = str(lr.get('Tên nhân viên', '')).strip()
-                            if not lname:
-                                continue
-                            if st.checkbox(lname, key=f"payroll_letan_check_{i}_{normalize_login_name(lname)}"):
-                                checked_letan.append(lname)
+                        # V54: Admin xem + sửa/xóa toàn bộ Nghĩa vụ Vi phạm đang mở.
+                        # Việc sửa/xóa có hiệu lực ngay với kỳ đang mở và mọi kỳ tính sau.
+                        _all_active = get_all_open_violation_debts_for_admin()
+                        if isinstance(_all_active, pd.DataFrame) and not _all_active.empty:
+                            _show_cols = [c for c in [
+                                'Tên nhân viên','Số tiền','Nội dung','Loại','Kỳ phát sinh từ','Kỳ phát sinh đến','Bắt đầu trừ từ','Trạng thái'
+                            ] if c in _all_active.columns]
+                            _debt_show = _all_active[_show_cols].copy()
+                            if 'Số tiền' in _debt_show.columns:
+                                _debt_show['Số tiền'] = _debt_show['Số tiền'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
+                            st.caption("Nghĩa vụ Vi phạm đang mở")
+                            st.dataframe(_debt_show, hide_index=True, width="stretch", height="content")
 
-                        if len(checked_letan) > 1:
-                            st.warning("⚠️ Chỉ được check 1 Lễ tân cho mỗi lần gửi.")
-                        elif len(checked_letan) == 1:
-                            selected_letan = checked_letan[0]
-                            matched = letan_df[
-                                letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name)
-                                == normalize_login_name(selected_letan)
-                            ]
-                            if matched.empty:
-                                st.error("Không tìm thấy hồ sơ Lễ tân đã chọn.")
-                            else:
-                                st.caption("📧 Email người nhận sẽ được kiểm tra lại trực tiếp từ Sheet1 ngay khi bấm Gửi.")
-                                if st.button(
-                                    "📤 Gửi bảng lương tổng hợp cho Lễ tân đã check",
+                            with st.expander("✏️ Sửa / Xóa Nghĩa vụ Vi phạm", expanded=False):
+                                _manage_rows = _all_active.reset_index(drop=True).copy()
+                                _manage_options = []
+                                _manage_lookup = {}
+                                for _i, _r in _manage_rows.iterrows():
+                                    _sheet_row = int(_r.get('__sheet_row', 0) or 0)
+                                    _emp = str(_r.get('Tên nhân viên', '')).strip()
+                                    _amt = float(_money_to_float(_r.get('Số tiền', 0)))
+                                    _typ = str(_r.get('Loại', '')).strip()
+                                    _p1 = str(_r.get('Kỳ phát sinh từ', '')).strip()
+                                    _p2 = str(_r.get('Kỳ phát sinh đến', '')).strip()
+                                    _label = f"{_emp} · {_amt:,.0f} đ · {_typ} · {_p1} → {_p2}".replace(',', '.')
+                                    # Bảo đảm label duy nhất nếu có nhiều dòng giống nhau.
+                                    if _label in _manage_lookup:
+                                        _label = f"{_label} · dòng {_sheet_row}"
+                                    _manage_options.append(_label)
+                                    _manage_lookup[_label] = _r.to_dict()
+
+                                _selected_label = st.selectbox(
+                                    "Chọn nghĩa vụ cần chỉnh sửa",
+                                    _manage_options,
+                                    filter_mode="contains",
+                                    key="admin_manage_violation_debt_select",
+                                )
+                                _selected = _manage_lookup.get(_selected_label, {})
+                                _selected_row = int(_selected.get('__sheet_row', 0) or 0)
+                                _selected_amount = max(0.0, float(_money_to_float(_selected.get('Số tiền', 0))))
+                                _selected_due = _parse_vn_date(_selected.get('Bắt đầu trừ từ', '')) or current_start
+                                _edit_amount = st.number_input(
+                                    "Số tiền nghĩa vụ",
+                                    min_value=1.0,
+                                    value=float(max(1.0, _selected_amount)),
+                                    step=50000.0,
+                                    format="%.0f",
+                                    key=f"edit_violation_debt_amount_{_selected_row}",
+                                )
+                                _edit_content = st.text_input(
+                                    "Nội dung",
+                                    value=str(_selected.get('Nội dung', '')).strip() or VIOLATION_DEBT_CONTENT,
+                                    key=f"edit_violation_debt_content_{_selected_row}",
+                                )
+                                _edit_due = st.date_input(
+                                    "Bắt đầu trừ từ kỳ/ngày",
+                                    value=_selected_due,
+                                    format="DD/MM/YYYY",
+                                    key=f"edit_violation_debt_due_{_selected_row}",
+                                )
+                                _btn_edit, _btn_delete = st.columns(2)
+                                if _btn_edit.button(
+                                    "💾 Lưu chỉnh sửa nghĩa vụ",
                                     use_container_width=True,
-                                    key="send_payroll_summary_letan"
+                                    key=f"save_violation_debt_edit_{_selected_row}",
                                 ):
-                                    live_letan_creds = load_credentials_fresh_for_email()
-                                    letan_email = latest_email_from_credentials(live_letan_creds, selected_letan)
-                                    if not letan_email or '@' not in letan_email:
-                                        st.error(f"⚠️ Tài khoản {selected_letan} chưa có Email hợp lệ trong Sheet1 mới nhất.")
+                                    _ok, _msg = update_violation_debt_obligation(
+                                        _selected_row,
+                                        _edit_amount,
+                                        _edit_content,
+                                        _edit_due,
+                                        st.session_state.current_user,
+                                    )
+                                    if _ok:
+                                        _clear_violation_debt_cache()
+                                        try:
+                                            st.session_state.payroll_current_df = refresh_current_payroll_violation_debt(
+                                                st.session_state.payroll_current_df,
+                                                current_start,
+                                                current_end,
+                                            )
+                                        except Exception:
+                                            pass
+                                        st.session_state.pop('payroll_adjustment_editor', None)
+                                        st.success(_msg + " Kỳ đang mở đã được tính lại; các kỳ tiếp theo sẽ dùng số mới.")
+                                        st.rerun()
+                                    else:
+                                        st.error(_msg)
+
+                                _confirm_delete = st.checkbox(
+                                    "Tôi xác nhận xóa vĩnh viễn nghĩa vụ này",
+                                    key=f"confirm_delete_violation_debt_{_selected_row}",
+                                )
+                                if _btn_delete.button(
+                                    "🗑️ Xóa nghĩa vụ",
+                                    use_container_width=True,
+                                    disabled=not _confirm_delete,
+                                    key=f"delete_violation_debt_{_selected_row}",
+                                ):
+                                    _ok, _msg = delete_violation_debt_obligation(
+                                        _selected_row,
+                                        st.session_state.current_user,
+                                    )
+                                    if _ok:
+                                        _clear_violation_debt_cache()
+                                        try:
+                                            st.session_state.payroll_current_df = refresh_current_payroll_violation_debt(
+                                                st.session_state.payroll_current_df,
+                                                current_start,
+                                                current_end,
+                                            )
+                                        except Exception:
+                                            pass
+                                        st.session_state.pop('payroll_adjustment_editor', None)
+                                        st.success(_msg + " Kỳ đang mở đã được tính lại; các kỳ tiếp theo sẽ không còn khoản đã xóa.")
+                                        st.rerun()
+                                    else:
+                                        st.error(_msg)
+
+                                st.caption(
+                                    "Thay đổi áp dụng ngay cho kỳ lương đang mở và mọi kỳ tính sau. "
+                                    "Các bản lương lịch sử đã lưu không bị ghi đè tự động; khi cần cập nhật bản cũ, mở bản đó và bấm Cập nhật bảng lương từ hệ thống."
+                                )
+                        else:
+                            st.caption("Hiện không có Nghĩa vụ Vi phạm nào đang mở.")
+
+                # Thông báo rõ các dòng âm: khi Admin lưu bảng lương, phần âm sẽ chuyển thành nghĩa vụ Vi phạm kỳ sau.
+                _negative_rows = final_df[final_df['Số tiền thực nhận'].apply(_money_to_float) < 0]
+                if not _negative_rows.empty:
+                    _negative_total = abs(_negative_rows['Số tiền thực nhận'].apply(_money_to_float).sum())
+                    _negative_details = [
+                        f"{str(_r.get('Tên Hệ thống','')).strip()}: {_money_to_float(_r.get('Số tiền thực nhận',0)):,.0f} đ".replace(',', '.')
+                        for _, _r in _negative_rows.iterrows()
+                    ]
+                    st.warning(
+                        f"Có {len(_negative_rows)} nhân viên Thực nhận âm, tổng phần chưa hoàn thành "
+                        f"{_negative_total:,.0f} đ. Khi lưu bảng lương, những nhân viên Admin KHÔNG chủ động tạm hoãn "
+                        f"sẽ được tự lưu thành '{VIOLATION_DEBT_CONTENT}' và trừ từ kỳ lương kế tiếp.".replace(',', '.')
+                    )
+                    st.markdown("**Nhân viên Thực nhận âm:** " + " · ".join(_negative_details))
+
+                total_salary = final_df['Tiền Lương'].sum()
+                total_penalty = final_df['Tiền phạt trong tháng'].apply(_money_to_float).sum() + final_df.get('Vi phạm kỳ trước', pd.Series(0, index=final_df.index)).apply(_money_to_float).sum()
+                total_net = final_df['Số tiền thực nhận'].sum()
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Nhân viên", len(final_df))
+                c2.metric("Tổng Tiền Lương", f"{total_salary:,.0f} đ".replace(',', '.'))
+                c3.metric("Tổng tiền phạt", f"{total_penalty:,.0f} đ".replace(',', '.'))
+                c4.metric("Tổng thực nhận", f"{total_net:,.0f} đ".replace(',', '.'))
+
+                display_cols = [
+                    "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
+                    "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương",
+                    "Tiền hỗ trợ Locker", "Số tiền thực nhận"
+                ]
+                st.markdown("### 📋 Bảng lương tổng hợp")
+                # HTML table dùng width:100% + table-layout:fixed để không tạo thanh cuộn ngang/dọc.
+                web_df = final_df[display_cols].copy()
+                web_df, payroll_web_widths = apply_table_layout_df(web_df, "payroll_current")
+                payroll_internal_order = list(web_df.columns)
+                money_web_cols = [c for c in payroll_internal_order if c.startswith('Tiền') or c in {'Tích lũy','Chi Phí Sinh Hoạt','Vi phạm kỳ trước','Số tiền thực nhận'}]
+                for c in money_web_cols:
+                    web_df[c] = web_df[c].apply(lambda v: f"{_money_to_float(v):,.0f}".replace(',', '.'))
+
+                # V53: nếu Admin đã tạm hoãn Vi phạm của kỳ này, ghi chú ngay TRONG ô Vi phạm.
+                # Dùng token rồi thay bằng HTML sau khi pandas escape bảng, để không phải tắt escaping
+                # cho các dữ liệu tên nhân viên lấy từ Google Sheet.
+                _violation_note_tokens = {}
+                try:
+                    _, _web_deferred_map, _ = get_violation_debt_state(
+                        current_start, current_end, final_df['Tên Hệ thống'].astype(str).tolist()
+                    )
+                    if 'Tiền phạt trong tháng' in web_df.columns:
+                        for _row_pos, _row_idx in enumerate(web_df.index):
+                            _emp_name = str(final_df.loc[_row_idx, 'Tên Hệ thống']).strip() if _row_idx in final_df.index else ''
+                            _defer_amt = max(0.0, float(_money_to_float(_web_deferred_map.get(normalize_login_name(_emp_name), 0))))
+                            if _defer_amt <= 0:
+                                continue
+                            _base_violation = str(web_df.at[_row_idx, 'Tiền phạt trong tháng'])
+                            _token = f"__VERA_DEFER_NOTE_{_row_pos}__"
+                            _note_amount = f"{_defer_amt:,.0f}".replace(',', '.')
+                            _violation_note_tokens[_token] = (
+                                f"<div class='payroll-violation-value'>{_base_violation}</div>"
+                                f"<div class='payroll-violation-note'>Trừ kỳ lương kế tiếp: {_note_amount} đ</div>"
+                            )
+                            web_df.at[_row_idx, 'Tiền phạt trong tháng'] = _token
+                except Exception:
+                    _violation_note_tokens = {}
+
+                # V50: bảng tổng hợp trên website không hiển thị thông tin ngân hàng hoặc Email.
+                # V46: ghi nhớ dòng Thực nhận <= 0 trước khi đổi định dạng/đổi tên cột để
+                # có thể tô vàng toàn bộ dòng trên Bảng lương nhân viên.
+                _web_non_positive_mask = final_df['Số tiền thực nhận'].apply(_money_to_float).le(0).tolist()
+
+                # Chỉ đổi tên cột lúc hiển thị; dữ liệu nội bộ vẫn giữ tên chuẩn để tính toán/lưu lịch sử.
+                web_df = web_df.rename(columns={c: PAYROLL_DISPLAY_LABELS.get(c, c) for c in web_df.columns})
+                payroll_html = web_df.to_html(index=False, escape=True, classes='vera-payroll-table')
+                # Chỉ mở HTML đối với token do hệ thống tự tạo; mọi dữ liệu Sheet khác vẫn được escape an toàn.
+                for _token, _fragment in _violation_note_tokens.items():
+                    payroll_html = payroll_html.replace(_token, _fragment)
+
+                # Gắn class cho từng <tr> trong <tbody> theo đúng thứ tự dòng.
+                # Không phụ thuộc alternating row color nên dòng <= 0 luôn nổi bật màu vàng.
+                try:
+                    _head_html, _body_tail = payroll_html.split('<tbody>', 1)
+                    _body_html, _tail_html = _body_tail.split('</tbody>', 1)
+                    _row_counter = {'i': 0}
+                    def _mark_payroll_non_positive_row(_match):
+                        _i = _row_counter['i']
+                        _row_counter['i'] += 1
+                        if _i < len(_web_non_positive_mask) and _web_non_positive_mask[_i]:
+                            return '<tr class="payroll-nonpositive">'
+                        return '<tr>'
+                    _body_html = re.sub(r'<tr>', _mark_payroll_non_positive_row, _body_html)
+                    payroll_html = _head_html + '<tbody>' + _body_html + '</tbody>' + _tail_html
+                except Exception:
+                    pass
+
+                width_total = max(1, sum(int(payroll_web_widths.get(c, 140)) for c in payroll_internal_order))
+                colgroup = '<colgroup>' + ''.join(
+                    f'<col style="width:{(int(payroll_web_widths.get(c, 140)) / width_total) * 100:.3f}%">'
+                    for c in payroll_internal_order
+                ) + '</colgroup>'
+                payroll_html = payroll_html.replace('>', '>' + colgroup, 1)
+                payroll_layout_css = table_layout_html_css(
+                    "payroll_current", payroll_internal_order, "table.vera-payroll-table"
+                )
+                st.markdown(
+                    f"""<style>
+                    {payroll_layout_css}
+                    .vera-payroll-wrap{{width:100%;overflow:visible;}}
+                    table.vera-payroll-table{{width:100%;table-layout:fixed;border-collapse:collapse;font-size:clamp(8px,.68vw,12px);}}
+                    table.vera-payroll-table th{{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 3px;border:1px solid #c9c9c9;white-space:nowrap!important;overflow-wrap:normal!important;word-break:normal!important;line-height:1.15!important;vertical-align:middle!important;}}
+                    table.vera-payroll-table td{{padding:4px 3px;border:1px solid #dedede;white-space:nowrap!important;word-break:normal!important;vertical-align:middle;}}
+                    table.vera-payroll-table .payroll-violation-value{{line-height:1.05;}}
+                    table.vera-payroll-table .payroll-violation-note{{font-size:6px!important;line-height:1.05!important;margin-top:2px;white-space:normal!important;font-weight:400;}}
+                    table.vera-payroll-table tbody tr:nth-child(even){{background:#fafafa;}}
+                    table.vera-payroll-table tbody tr.payroll-nonpositive td{{background:#FFF2CC!important;}}
+                    @media(max-width:800px){{table.vera-payroll-table{{font-size:7px;}}table.vera-payroll-table th,table.vera-payroll-table td{{padding:3px 1px;}}}}
+                    </style>""" + f"<div class='vera-payroll-wrap'>{payroll_html}</div>",
+                    unsafe_allow_html=True
+                )
+
+                c_save, c_export = st.columns(2)
+                with c_save:
+                    if st.button("💾 Lưu bảng lương kỳ này vào hệ thống", use_container_width=True):
+                        ok, msg, batch_id = save_payroll_snapshot(
+                            final_df, current_start, current_end,
+                            st.session_state.get('payroll_current_source', ''), st.session_state.current_user
+                        )
+                        (st.success if ok else st.error)(msg)
+                        if ok:
+                            load_payroll_history.clear()
+                            st.caption(f"Mã bản lưu: {batch_id}")
+                with c_export:
+                    excel_bytes = build_payroll_excel_bytes(final_df, current_start, current_end)
+                    st.download_button(
+                        "📥 Export toàn bộ Bảng lương Excel",
+                        data=excel_bytes,
+                        file_name=f"BangLuong_{current_start.strftime('%d%m%Y')}_{current_end.strftime('%d%m%Y')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+
+                if has_feature_access("payroll_email"):
+                    with st.expander("📧 GỬI BẢNG LƯƠNG QUA EMAIL"):
+                        # V59: danh sách gửi chỉ phụ thuộc Thực nhận > 0. Email KHÔNG lấy từ bảng lương
+                        # vì có thể đã cũ; địa chỉ mới nhất sẽ được đọc trực tiếp từ Sheet1 ngay khi bấm Gửi.
+                        _email_net = final_df['Số tiền thực nhận'].apply(_money_to_float) if 'Số tiền thực nhận' in final_df.columns else pd.Series(0, index=final_df.index)
+                        emailable = final_df[_email_net > 0].copy()
+                        employees_email = sort_employee_names(emailable['Tên Hệ thống'].astype(str).tolist())
+                        selected_email_emps = st.multiselect(
+                            "Chọn 1, nhiều hoặc tất cả nhân viên:", employees_email, default=employees_email,
+                            filter_mode="contains", key="payroll_email_recipients"
+                        )
+                        st.caption(
+                            f"Có {len(employees_email)} nhân viên có Thực nhận > 0. "
+                            "Email sẽ luôn được đọc lại mới nhất từ Sheet1 ngay trước khi gửi; "
+                            "nhân viên có Thực nhận ≤ 0 sẽ không được gửi mail."
+                        )
+                        if st.button("🚀 Gửi bảng lương cho nhân viên đã chọn", use_container_width=True):
+                            if not selected_email_emps:
+                                st.warning("Vui lòng chọn ít nhất 1 nhân viên.")
+                            else:
+                                sender_email = "veraspabienhoa@gmail.com"
+                                sender_pass = "zvtgbysfmdaqxaau"
+                                progress = st.progress(0)
+                                ok_count, errors = 0, []
+                                # V59: đọc hồ sơ nhân sự MỚI NHẤT đúng 1 lần cho cả lượt gửi.
+                                # Không dùng Email đang nằm trong final_df vì bảng lương có thể đã được tính/lưu trước khi Email được sửa.
+                                live_email_creds = load_credentials_fresh_for_email()
+                                # Chỉ đọc Sheet1 lịch nghỉ một lần rồi lọc theo từng nhân viên, tránh quota 429.
+                                email_leave_df = load_backup_sheet_data()
+                                for idx, emp in enumerate(selected_email_emps):
+                                    matched_pay = emailable[emailable['Tên Hệ thống'].astype(str) == str(emp)]
+                                    if matched_pay.empty:
+                                        errors.append(f"{emp}: Không tìm thấy dữ liệu bảng lương.")
+                                        progress.progress((idx + 1) / len(selected_email_emps))
+                                        continue
+                                    row = matched_pay.iloc[0].copy()
+                                    _live_row_df = apply_latest_profile_fields_to_payroll(
+                                        pd.DataFrame([row]), live_email_creds, only_current_nhanvien=False
+                                    )
+                                    if not _live_row_df.empty:
+                                        row = _live_row_df.iloc[0].copy()
+                                    to_email = str(row.get('Email', '')).strip() or latest_email_from_credentials(live_email_creds, emp)
+                                    if not to_email or '@' not in to_email:
+                                        errors.append(f"{emp}: Email mới nhất trong Sheet1 không hợp lệ hoặc đang để trống.")
+                                        progress.progress((idx + 1) / len(selected_email_emps))
+                                        continue
+                                    # Đồng bộ Email trên row chỉ để nội dung/file nội bộ luôn phản ánh dữ liệu mới nhất.
+                                    row['Email'] = to_email
+                                    emp_violations = get_employee_violation_details(emp, current_start, current_end, email_leave_df)
+                                    ok, msg = send_payroll_email(
+                                        sender_email, sender_pass, to_email, row,
+                                        current_start, current_end, emp_violations
+                                    )
+                                    if ok: ok_count += 1
+                                    else: errors.append(f"{emp}: {msg}")
+                                    progress.progress((idx + 1) / len(selected_email_emps))
+                                    time.sleep(0.35)
+                                if ok_count: st.success(f"Đã gửi thành công {ok_count}/{len(selected_email_emps)} email bảng lương.")
+                                for e in errors: st.error(e)
+
+                    if st.session_state.current_role == "admin":
+                        with st.expander("📨 GỬI BẢNG LƯƠNG TỔNG HỢP CHO LỄ TÂN"):
+                            # Hiển thị TẤT CẢ tài khoản Lễ tân trước; chỉ sau khi Admin check tên
+                            # mới lấy Email tương ứng từ hồ sơ hệ thống. Không lọc Email từ đầu.
+                            letan_df = df_credentials.copy()
+                            if not letan_df.empty and 'Phân quyền' in letan_df.columns:
+                                letan_df = letan_df[
+                                    letan_df['Phân quyền'].astype(str).str.strip().str.lower().isin(['letan', 'quanly'])
+                                ].copy()
+                                if 'Tên nhân viên' in letan_df.columns:
+                                    letan_df = letan_df[
+                                        ~letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
+                                            'ten nhan vien', 'ten he thong', 'username', 'user name'
+                                        })
+                                    ].copy()
+                            if not letan_df.empty and 'Tên nhân viên' in letan_df.columns:
+                                letan_df = letan_df.assign(__sort=letan_df['Tên nhân viên'].apply(normalize_login_name)).sort_values('__sort').drop(columns='__sort')
+                            if letan_df.empty:
+                                st.info("Không có tài khoản Lễ tân trong hồ sơ hệ thống.")
+                            else:
+                                st.write("**Check đúng 1 Lễ tân để hệ thống lấy Email từ hồ sơ:**")
+                                checked_letan = []
+                                for i, (_, lr) in enumerate(letan_df.iterrows()):
+                                    lname = str(lr.get('Tên nhân viên', '')).strip()
+                                    if not lname:
+                                        continue
+                                    if st.checkbox(lname, key=f"payroll_letan_check_{i}_{normalize_login_name(lname)}"):
+                                        checked_letan.append(lname)
+
+                                if len(checked_letan) > 1:
+                                    st.warning("⚠️ Chỉ được check 1 Lễ tân cho mỗi lần gửi.")
+                                elif len(checked_letan) == 1:
+                                    selected_letan = checked_letan[0]
+                                    matched = letan_df[
+                                        letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name)
+                                        == normalize_login_name(selected_letan)
+                                    ]
+                                    if matched.empty:
+                                        st.error("Không tìm thấy hồ sơ Lễ tân đã chọn.")
+                                    else:
+                                        st.caption("📧 Email người nhận sẽ được kiểm tra lại trực tiếp từ Sheet1 ngay khi bấm Gửi.")
+                                        if st.button(
+                                            "📤 Gửi bảng lương tổng hợp cho Lễ tân đã check",
+                                            use_container_width=True,
+                                            key="send_payroll_summary_letan"
+                                        ):
+                                            live_letan_creds = load_credentials_fresh_for_email()
+                                            letan_email = latest_email_from_credentials(live_letan_creds, selected_letan)
+                                            if not letan_email or '@' not in letan_email:
+                                                st.error(f"⚠️ Tài khoản {selected_letan} chưa có Email hợp lệ trong Sheet1 mới nhất.")
+                                            else:
+                                                sender_email = "veraspabienhoa@gmail.com"
+                                                sender_pass = "zvtgbysfmdaqxaau"
+                                                ok, msg = send_payroll_summary_email(
+                                                    sender_email, sender_pass, letan_email,
+                                                    selected_letan, final_df, current_start, current_end
+                                                )
+                                                if ok:
+                                                    st.success(f"{msg} Email mới nhất: {letan_email}")
+                                                else:
+                                                    st.error(msg)
+                                else:
+                                    st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
+
+                # V49: BẢNG ĐIỀU CHỈNH BẢNG LƯƠNG LUÔN ẨN VÀ NẰM CUỐI CÙNG CỦA TRANG TÍNH LƯƠNG.
+                # Đây chính là bảng TT / Tên Hệ thống / Tiền Lương / Hỗ Trợ Hoàn Lại / Tích lũy / ...
+                # Người dùng chỉ mở khi thật sự cần điều chỉnh.
+                with st.expander("✏️ Mở bảng điều chỉnh bảng lương", expanded=False):
+                    st.caption("Bảng này được ẩn mặc định. Chỉ mở khi cần chỉnh các khoản cho bảng lương hiện tại.")
+                    editor_cols = [
+                        "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
+                        "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker"
+                    ]
+                    editor_source = st.session_state.get('payroll_current_df')
+                    if isinstance(editor_source, pd.DataFrame) and not editor_source.empty:
+                        editor_source = _filter_real_payroll_rows(editor_source.copy())
+                        editor_df = editor_source[editor_cols].copy()
+                        editor_df, _ = apply_table_layout_df(editor_df, "payroll_current")
+                        col_cfg = {
+                            "TT": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["TT"], format="%d", disabled=True, width=layout_width("payroll_current", "TT", "small")),
+                            "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS["Tên Hệ thống"], disabled=True, width=layout_width("payroll_current", "Tên Hệ thống", "small")),
+                            "Tiền Lương": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền Lương"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền Lương", "small")),
+                            "Tiền phạt trong tháng": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền phạt trong tháng"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền phạt trong tháng", "small")),
+                            "Vi phạm kỳ trước": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Vi phạm kỳ trước"], format="%,d", disabled=True, width=layout_width("payroll_current", "Vi phạm kỳ trước", "small")),
+                            "Tích lũy": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tích lũy"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tích lũy", "small")),
+                        }
+                        for c in [x for x in PAYROLL_ADJUSTMENT_COLUMNS if x != "Tích lũy"]:
+                            col_cfg[c] = st.column_config.NumberColumn(
+                                PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0,
+                                format="%,d", width=layout_width("payroll_current", c, "small")
+                            )
+                        edited = st.data_editor(
+                            editor_df, key="payroll_adjustment_editor", width="stretch", height="content", hide_index=True,
+                            row_height=layout_row_height("payroll_current"),
+                            column_config=col_cfg,
+                            disabled=["TT", "Tên Hệ thống", "Tiền Lương", "Tích lũy", "Tiền phạt trong tháng", "Vi phạm kỳ trước"]
+                        )
+
+                        adjusted_df = editor_source.copy()
+                        for c in editor_cols:
+                            if c in edited.columns:
+                                adjusted_df[c] = edited[c].values
+                        adjusted_df = recalculate_payroll_net(adjusted_df)
+                        adjusted_df = _filter_real_payroll_rows(adjusted_df)
+
+                        compare_cols = [c for c in editor_cols + ["Số tiền thực nhận"] if c in adjusted_df.columns and c in editor_source.columns]
+                        _changed = False
+                        try:
+                            _left = adjusted_df[compare_cols].reset_index(drop=True).fillna(0)
+                            _right = editor_source[compare_cols].reset_index(drop=True).fillna(0)
+                            _changed = not _left.equals(_right)
+                        except Exception:
+                            _changed = True
+                        if _changed:
+                            st.session_state.payroll_current_df = adjusted_df
+                            st.rerun()
+                    else:
+                        st.info("Chưa có dữ liệu bảng lương để điều chỉnh.")
+    with tab_history:
+        if not has_feature_access("payroll_history"):
+            st.info("🔒 Bạn chưa được cấp quyền xem Lịch sử bảng lương.")
+        else:
+            delete_flash = st.session_state.pop("payroll_history_delete_flash", None)
+            if delete_flash:
+                flash_type, flash_text = delete_flash
+                if flash_type == "success":
+                    st.success(flash_text)
+                else:
+                    st.warning(flash_text)
+
+            history = load_payroll_history()
+            if history.empty or 'Mã bản lưu' not in history.columns:
+                st.info("Chưa có bảng lương nào được lưu trong hệ thống.")
+            else:
+                batches = [x for x in history['Mã bản lưu'].dropna().astype(str).unique().tolist() if x.strip()]
+                # Bản mới nhất nằm cuối Sheet nên đảo lên đầu.
+                batches = list(reversed(batches))
+
+                # Admin có thể xóa bớt một hoặc nhiều bản lịch sử. Chức năng này chỉ xóa
+                # snapshot bảng lương, tuyệt đối không hoàn tác Tích lũy / Vi phạm / hồ sơ.
+                if st.session_state.current_role == "admin":
+                    batch_labels = {}
+                    for _batch_id in batches:
+                        _g = history[history['Mã bản lưu'].astype(str) == str(_batch_id)]
+                        if _g.empty:
+                            batch_labels[_batch_id] = str(_batch_id)
+                        else:
+                            _r = _g.iloc[0]
+                            _period = f"{_r.get('Từ ngày','')} → {_r.get('Đến ngày','')}"
+                            _saved_at = f"{_r.get('Ngày lưu','')} {_r.get('Giờ lưu','')}".strip()
+                            batch_labels[_batch_id] = f"{_batch_id} | {_period} | lưu {_saved_at}"
+
+                    with st.expander("🗑 Xóa bớt lịch sử bảng lương (Admin)", expanded=False):
+                        st.caption(
+                            "Có thể chọn 1 hoặc nhiều bản lương để xóa. Việc này chỉ xóa Lịch sử bảng lương đã lưu; "
+                            "không thay đổi sheet TichLuy, dữ liệu vi phạm, lịch nghỉ hoặc hồ sơ nhân viên."
+                        )
+                        delete_batches = st.multiselect(
+                            "Chọn bản lương cần xóa:",
+                            options=batches,
+                            default=[],
+                            format_func=lambda x: batch_labels.get(x, str(x)),
+                            filter_mode="contains",
+                            key="payroll_history_delete_batches",
+                        )
+                        if delete_batches:
+                            st.warning(
+                                f"Bạn đang chọn xóa {len(delete_batches)} bản lương. Thao tác này không có nút hoàn tác trong ứng dụng."
+                            )
+                        confirm_delete_history = st.checkbox(
+                            "Tôi xác nhận xóa vĩnh viễn các bản lương đã chọn khỏi lịch sử",
+                            key="confirm_delete_payroll_history",
+                        )
+                        if st.button(
+                            "🗑 Xóa các bản lương đã chọn",
+                            use_container_width=True,
+                            type="primary",
+                            key="delete_selected_payroll_history",
+                            disabled=not (delete_batches and confirm_delete_history),
+                        ):
+                            ok_delete, msg_delete, deleted_batches = delete_payroll_snapshots(delete_batches)
+                            if ok_delete:
+                                # Dọn state liên quan đến các batch vừa xóa để lần rerun sau không giữ editor cũ.
+                                for _deleted_batch in deleted_batches:
+                                    for _state_key in (
+                                        f"payroll_history_system_refresh_{_deleted_batch}",
+                                        f"payroll_history_editor_version_{_deleted_batch}",
+                                    ):
+                                        st.session_state.pop(_state_key, None)
+                                st.session_state.pop("payroll_history_batch", None)
+                                st.session_state.pop("payroll_history_delete_batches", None)
+                                st.session_state.pop("confirm_delete_payroll_history", None)
+                                st.session_state["payroll_history_delete_flash"] = ("success", msg_delete)
+                                st.rerun()
+                            else:
+                                st.error(msg_delete)
+
+                batch = st.selectbox("Chọn bản lương đã lưu:", batches, filter_mode="contains", key="payroll_history_batch")
+                saved = history[history['Mã bản lưu'].astype(str) == str(batch)].copy()
+                if not saved.empty:
+                    st.info(
+                        f"Kỳ {saved.iloc[0].get('Từ ngày','')} → {saved.iloc[0].get('Đến ngày','')} | "
+                        f"Lưu bởi {saved.iloc[0].get('Người lưu','')} lúc {saved.iloc[0].get('Giờ lưu','')} ngày {saved.iloc[0].get('Ngày lưu','')}"
+                    )
+                    saved_table = payroll_history_to_table(saved)
+                    saved_table = _filter_real_payroll_rows(saved_table)
+                    # V60: hồ sơ của bản lịch sử lấy từ Sheet1 gần nhất ngay khi mở.
+                    _history_live_creds = load_credentials_recent()
+                    saved_table = apply_latest_profile_fields_to_payroll(
+                        saved_table, _history_live_creds, only_current_nhanvien=False
+                    )
+
+                    # Nếu Admin vừa bấm "Cập nhật bảng lương từ hệ thống", dùng bản đã làm mới
+                    # làm dữ liệu nền cho editor ở lần rerun kế tiếp. Mỗi batch có state riêng.
+                    hist_refresh_key = f"payroll_history_system_refresh_{batch}"
+                    hist_editor_version_key = f"payroll_history_editor_version_{batch}"
+                    if hist_refresh_key in st.session_state:
+                        try:
+                            refreshed_state_df = st.session_state.get(hist_refresh_key)
+                            if isinstance(refreshed_state_df, pd.DataFrame) and not refreshed_state_df.empty:
+                                saved_table = _filter_real_payroll_rows(refreshed_state_df.copy())
+                                saved_table = apply_latest_profile_fields_to_payroll(
+                                    saved_table, _history_live_creds, only_current_nhanvien=False
+                                )
+                        except Exception:
+                            pass
+
+                    # V60: role cũng lấy theo Sheet1 gần nhất; bảng lương áp dụng `nhanvien` và `leader`.
+                    try:
+                        _current_role_map = _credential_role_map(_history_live_creds)
+                        if 'Tên Hệ thống' in saved_table.columns and _current_role_map:
+                            saved_table = saved_table[
+                                saved_table['Tên Hệ thống'].astype(str).apply(
+                                    lambda _n: _current_role_map.get(normalize_login_name(_n), 'nhanvien') in PAYROLL_ELIGIBLE_ROLES
+                                )
+                            ].copy()
+                            saved_table = _filter_real_payroll_rows(saved_table)
+                    except Exception:
+                        pass
+
+                    try:
+                        hs = pd.to_datetime(saved.iloc[0]['Từ ngày'], dayfirst=True).date()
+                        he = pd.to_datetime(saved.iloc[0]['Đến ngày'], dayfirst=True).date()
+                    except Exception:
+                        hs, he = get_vn_today(), get_vn_today()
+
+                    # Cập nhật các dữ liệu hệ thống có thể thay đổi sau khi bản lương đã được lưu.
+                    # Nút được đặt ngay phía trên tiêu đề Mở lại và chỉnh sửa bản lương theo yêu cầu.
+                    st.caption(
+                        "Nút cập nhật hệ thống sẽ làm mới: Tích lũy, Vi phạm, Phí Sinh Hoạt, Tiền hỗ trợ Locker, "
+                        "Họ và Tên, Tài khoản ngân hàng, Tên ngân hàng, Email và vai trò hiện tại. Tiền Lương không bị thay đổi."
+                    )
+                    if st.button(
+                        "🔄 Cập nhật bảng lương từ hệ thống",
+                        use_container_width=True,
+                        key=f"refresh_payroll_from_system_{batch}"
+                    ):
+                        progress_refresh = st.progress(0)
+                        status_refresh = st.empty()
+                        try:
+                            status_refresh.info("⏳ Đang tải hồ sơ nhân viên mới nhất...")
+                            progress_refresh.progress(20)
+                            credentials_live = load_credentials_fresh()
+
+                            status_refresh.info("⏳ Đang tải tiền phạt trong kỳ từ hệ thống lịch nghỉ...")
+                            progress_refresh.progress(45)
+                            try:
+                                load_backup_sheet_data.clear()
+                            except Exception:
+                                pass
+                            leave_live = load_backup_sheet_data()
+
+                            status_refresh.info("⏳ Đang tải Tích lũy, Phí sinh hoạt / Locker và cập nhật bảng lương...")
+                            progress_refresh.progress(70)
+                            _clear_payroll_config_cache()
+                            # Bắt buộc làm mới TichLuy để nút cập nhật không dùng snapshot cache 120 giây cũ.
+                            try:
+                                load_tichluy_tracking.clear()
+                            except Exception:
+                                pass
+                            refreshed_df, refresh_meta = refresh_saved_payroll_from_system(
+                                saved_table, hs, he,
+                                credentials_df=credentials_live,
+                                leave_primary=leave_live
+                            )
+
+                            current_hist_version = int(st.session_state.get(hist_editor_version_key, 0) or 0)
+                            st.session_state[hist_refresh_key] = refreshed_df
+                            st.session_state[hist_editor_version_key] = current_hist_version + 1
+                            saved_table = _filter_real_payroll_rows(refreshed_df.copy())
+
+                            progress_refresh.progress(100)
+                            status_refresh.success(
+                                f"✅ Đã cập nhật dữ liệu hệ thống cho {refresh_meta.get('updated', len(refreshed_df))} nhân viên; "
+                                f"Tích lũy kỳ này có số tiền ở {refresh_meta.get('tichluy_updated', 0)} nhân viên. "
+                                "Tiền Lương và các khoản nhập tay được giữ nguyên; Thực nhận đã tính lại."
+                            )
+                            missing_profiles = refresh_meta.get('missing', [])
+                            if missing_profiles:
+                                st.warning(
+                                    "⚠️ Không tìm thấy hồ sơ hệ thống của: " + ", ".join(missing_profiles)
+                                    + ". Các thông tin ngân hàng/email cũ của những người này được giữ nguyên."
+                                )
+                        except Exception as e:
+                            progress_refresh.empty()
+                            status_refresh.error(f"❌ Không cập nhật được bảng lương từ hệ thống: {e}")
+
+                    # V61: giữ vị trí email ngay dưới nút cập nhật hệ thống, nhưng nội dung
+                    # được tạo sau khi editor đã tính xong edited_saved_table. Streamlit container
+                    # cho phép render đúng vị trí mà không nhân đôi logic email.
+                    history_email_actions = st.container()
+
+                    st.markdown("#### ✏️ Mở lại và chỉnh sửa bản lương")
+                    st.caption(
+                        "Bạn có thể sửa trực tiếp các khoản tiền bên dưới. Cột Thực nhận được hệ thống tự tính lại. "
+                        "Khi bấm Ghi đè, Mã bản lưu được giữ nguyên và bản cũ sẽ được thay bằng dữ liệu mới."
+                    )
+
+                    history_edit_cols = [c for c in [
+                        "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy",
+                        "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker",
+                        "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
+                    ] if c in saved_table.columns]
+                    hist_editor_df = saved_table[history_edit_cols].copy()
+                    hist_editor_df, _ = apply_table_layout_df(hist_editor_df, "payroll_history")
+
+                    hist_col_cfg = {
+                        "TT": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS.get("TT", "TT"), format="%d", disabled=True, width=layout_width("payroll_history", "TT", "small")),
+                        "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Tên Hệ thống", "Tên Hệ thống"), disabled=True, width=layout_width("payroll_history", "Tên Hệ thống", "small")),
+                        "Số tiền thực nhận": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS.get("Số tiền thực nhận", "Thực nhận"), format="%,d", disabled=True, width=layout_width("payroll_history", "Số tiền thực nhận", "small")),
+                        "Số tài khoản ngân hàng": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Số tài khoản ngân hàng", "Tài khoản ngân hàng"), disabled=True, width=layout_width("payroll_history", "Số tài khoản ngân hàng", "small")),
+                        "Tên ngân hàng": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Tên ngân hàng", "Tên ngân hàng"), disabled=True, width=layout_width("payroll_history", "Tên ngân hàng", "small")),
+                        "Email": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Email", "Email"), disabled=True, width=layout_width("payroll_history", "Email", "small")),
+                    }
+                    for c in [
+                        "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
+                        "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker"
+                    ]:
+                        if c in hist_editor_df.columns:
+                            hist_col_cfg[c] = st.column_config.NumberColumn(
+                                PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%,d", width=layout_width("payroll_history", c, "small"),
+                                disabled=(c in {"Tích lũy", "Vi phạm kỳ trước"})
+                            )
+
+                    # V58: Streamlit chỉ áp dụng Pandas Styler cho các cột KHÔNG chỉnh sửa
+                    # trong st.data_editor. Ở V57 việc ép màu bằng !important khiến một số ô
+                    # disabled bị render thành màu đen, trong khi các ô editable vẫn không thể
+                    # nhận màu theo hàng. Vì vậy editor dùng nền chuẩn để không còn ô đen;
+                    # ngay bên dưới sẽ có bảng xem trước tô vàng TOÀN BỘ hàng Thực nhận <= 0.
+                    hist_editor_version = int(st.session_state.get(hist_editor_version_key, 0) or 0)
+                    edited_hist = st.data_editor(
+                        hist_editor_df,
+                        key=f"payroll_history_editor_{batch}_{hist_editor_version}",
+                        width="stretch", height="content", hide_index=True,
+                        row_height=layout_row_height("payroll_history"),
+                        column_config=hist_col_cfg,
+                        disabled=[c for c in ["TT", "Tên Hệ thống", "Tích lũy", "Vi phạm kỳ trước", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"] if c in hist_editor_df.columns]
+                    )
+
+                    edited_saved_table = saved_table.copy()
+                    for c in edited_hist.columns:
+                        if c in edited_saved_table.columns:
+                            edited_saved_table[c] = edited_hist[c].values
+                    edited_saved_table = recalculate_payroll_net(edited_saved_table)
+                    edited_saved_table = _filter_real_payroll_rows(edited_saved_table)
+
+                    # V58: Bảng xem trước sau chỉnh sửa. Dùng HTML để bảo đảm TẤT CẢ ô trong
+                    # hàng có Thực nhận <= 0 đều nền vàng, không phụ thuộc giới hạn Styler của
+                    # st.data_editor và không bị theme tối ghi đè thành màu đen.
+                    try:
+                        _hist_preview_cols = [c for c in history_edit_cols if c in edited_saved_table.columns]
+                        _hist_preview = edited_saved_table[_hist_preview_cols].copy()
+                        _hist_non_positive = _hist_preview.get(
+                            "Số tiền thực nhận", pd.Series([0] * len(_hist_preview), index=_hist_preview.index)
+                        ).apply(_money_to_float).le(0).tolist()
+
+                        _hist_money_cols = {
+                            "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
+                            "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương",
+                            "Tiền hỗ trợ Locker", "Số tiền thực nhận"
+                        }
+                        for _c in _hist_preview.columns:
+                            if _c in _hist_money_cols:
+                                _hist_preview[_c] = _hist_preview[_c].apply(
+                                    lambda _v: f"{_money_to_float(_v):,.0f}" if _money_to_float(_v) != 0 else "0"
+                                )
+                            elif _c == "TT":
+                                _hist_preview[_c] = pd.to_numeric(_hist_preview[_c], errors="coerce").fillna(0).astype(int)
+                            else:
+                                _hist_preview[_c] = _hist_preview[_c].fillna("").astype(str)
+
+                        _hist_preview = _hist_preview.rename(
+                            columns={c: PAYROLL_DISPLAY_LABELS.get(c, c) for c in _hist_preview.columns}
+                        )
+                        _hist_html = _hist_preview.to_html(
+                            index=False, escape=True, classes="vera-history-payroll-preview"
+                        )
+                        try:
+                            _hh, _hbt = _hist_html.split("<tbody>", 1)
+                            _hb, _ht = _hbt.split("</tbody>", 1)
+                            _hc = {"i": 0}
+                            def _mark_history_nonpositive(_m):
+                                _i = _hc["i"]
+                                _hc["i"] += 1
+                                if _i < len(_hist_non_positive) and _hist_non_positive[_i]:
+                                    return '<tr class="history-nonpositive">'
+                                return '<tr>'
+                            _hb = re.sub(r"<tr>", _mark_history_nonpositive, _hb)
+                            _hist_html = _hh + "<tbody>" + _hb + "</tbody>" + _ht
+                        except Exception:
+                            pass
+
+                        st.markdown("**👁 Bảng xem trước sau chỉnh sửa**")
+                        # V60: không thụt lề HTML; Markdown sẽ không còn hiểu thành code block.
+                        _hist_preview_css = (
+                            "<style>"
+                            ".vera-history-preview-wrap{width:100%;overflow-x:auto;margin:4px 0 10px 0;}"
+                            "table.vera-history-payroll-preview{width:max-content;min-width:100%;border-collapse:collapse;table-layout:auto;font-size:12px;}"
+                            "table.vera-history-payroll-preview th{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 4px;border:1px solid #c9c9c9;white-space:nowrap!important;overflow-wrap:normal!important;word-break:normal!important;}"
+                            "table.vera-history-payroll-preview td{background:#fff!important;color:#000!important;padding:4px;border:1px solid #dedede;white-space:nowrap!important;word-break:normal!important;}"
+                            "table.vera-history-payroll-preview tbody tr:nth-child(even) td{background:#fafafa!important;}"
+                            "table.vera-history-payroll-preview tbody tr.history-nonpositive td{background:#FFF2CC!important;color:#000!important;}"
+                            "</style>"
+                        )
+                        st.markdown(
+                            _hist_preview_css + f"<div class='vera-history-preview-wrap'>{_hist_html}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    except Exception:
+                        pass
+
+                    # Hiển thị nhanh tổng sau khi sửa để Admin kiểm tra trước khi ghi đè.
+                    h1, h2, h3 = st.columns(3)
+                    h1.metric("Nhân viên", len(edited_saved_table))
+                    h2.metric("Tổng Tiền Lương", f"{edited_saved_table['Tiền Lương'].apply(_money_to_float).sum():,.0f} đ".replace(',', '.'))
+                    h3.metric("Tổng Thực nhận", f"{edited_saved_table['Số tiền thực nhận'].apply(_money_to_float).sum():,.0f} đ".replace(',', '.'))
+
+                    confirm_overwrite = st.checkbox(
+                        f"Tôi xác nhận ghi đè bản lương {batch}",
+                        key=f"confirm_payroll_overwrite_{batch}"
+                    )
+                    c_overwrite, c_export_hist = st.columns(2)
+                    with c_overwrite:
+                        if st.button(
+                            "💾 Ghi đè cập nhật bản lương này",
+                            use_container_width=True,
+                            key=f"overwrite_payroll_{batch}",
+                            disabled=not confirm_overwrite
+                        ):
+                            source_label = str(saved.iloc[0].get('Nguồn dữ liệu', '')).strip()
+                            ok, msg = overwrite_payroll_snapshot(
+                                batch, edited_saved_table, hs, he, source_label, st.session_state.current_user
+                            )
+                            if ok:
+                                load_payroll_history.clear()
+                                try:
+                                    st.session_state.pop(hist_refresh_key, None)
+                                    st.session_state[hist_editor_version_key] = hist_editor_version + 1
+                                except Exception:
+                                    pass
+                                st.success(msg)
+                                st.info(
+                                    f"Bản {batch} đã được cập nhật lúc {datetime.now(VN_TZ).strftime('%H:%M:%S %d/%m/%Y')} "
+                                    f"bởi {st.session_state.current_user}."
+                                )
+                            else:
+                                st.error(msg)
+
+                    with c_export_hist:
+                        try:
+                            hist_excel = build_payroll_excel_bytes(edited_saved_table, hs, he)
+                            st.download_button(
+                                "📥 Export bản đang chỉnh sửa",
+                                data=hist_excel,
+                                file_name=f"BangLuong_DaLuu_{hs.strftime('%d%m%Y')}_{he.strftime('%d%m%Y')}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,
+                                key=f"export_payroll_history_{batch}"
+                            )
+                        except Exception as e:
+                            st.warning(f"Không tạo được file export lịch sử: {e}")
+
+                    if has_feature_access("payroll_email"):
+                        with history_email_actions:
+                            # --- GỬI EMAIL TỪ BẢN LƯƠNG ĐANG MỞ / ĐANG CHỈNH SỬA ---
+                            # Dùng trực tiếp edited_saved_table để email phản ánh đúng số liệu Admin/Lễ tân/Quản lý
+                            # đang nhìn thấy trên màn hình, kể cả trước khi bấm Ghi đè.
+                            with st.expander("📧 GỬI BẢNG LƯƠNG QUA EMAIL (BẢN ĐANG CHỈNH SỬA)"):
+                                st.caption(
+                                    "Email và file đính kèm sẽ dùng số liệu của bản đang chỉnh sửa hiện tại. "
+                                    "Nếu cần lưu các thay đổi này vào hệ thống, hãy bấm Ghi đè cập nhật bản lương."
+                                )
+                                hist_emailable = edited_saved_table.copy()
+                                _hist_email_net = (
+                                    hist_emailable['Số tiền thực nhận'].apply(_money_to_float)
+                                    if 'Số tiền thực nhận' in hist_emailable.columns
+                                    else pd.Series(0, index=hist_emailable.index)
+                                )
+                                hist_emailable = hist_emailable[_hist_email_net > 0].copy()
+
+                                hist_employee_names = (
+                                    sort_employee_names(hist_emailable['Tên Hệ thống'].astype(str).tolist())
+                                    if not hist_emailable.empty and 'Tên Hệ thống' in hist_emailable.columns else []
+                                )
+                                hist_selected_email_emps = st.multiselect(
+                                    "Chọn 1, nhiều hoặc tất cả nhân viên:",
+                                    hist_employee_names,
+                                    default=hist_employee_names,
+                                    filter_mode="contains",
+                                    key=f"payroll_history_email_recipients_{batch}"
+                                )
+                                st.caption(
+                                    f"Có {len(hist_employee_names)} nhân viên có Thực nhận > 0 trong bản lương này. "
+                                    "Email được lấy lại mới nhất từ Sheet1 khi bấm Gửi; nhân viên có Thực nhận ≤ 0 không được gửi mail."
+                                )
+
+                                if st.button(
+                                    "🚀 Gửi bảng lương cho nhân viên đã chọn",
+                                    use_container_width=True,
+                                    key=f"send_payroll_history_employees_{batch}"
+                                ):
+                                    if not hist_selected_email_emps:
+                                        st.warning("Vui lòng chọn ít nhất 1 nhân viên.")
                                     else:
                                         sender_email = "veraspabienhoa@gmail.com"
                                         sender_pass = "zvtgbysfmdaqxaau"
-                                        ok, msg = send_payroll_summary_email(
-                                            sender_email, sender_pass, letan_email,
-                                            selected_letan, final_df, current_start, current_end
-                                        )
-                                        if ok:
-                                            st.success(f"{msg} Email mới nhất: {letan_email}")
-                                        else:
-                                            st.error(msg)
-                        else:
-                            st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
-
-            # V49: BẢNG ĐIỀU CHỈNH BẢNG LƯƠNG LUÔN ẨN VÀ NẰM CUỐI CÙNG CỦA TRANG TÍNH LƯƠNG.
-            # Đây chính là bảng TT / Tên Hệ thống / Tiền Lương / Hỗ Trợ Hoàn Lại / Tích lũy / ...
-            # Người dùng chỉ mở khi thật sự cần điều chỉnh.
-            with st.expander("✏️ Mở bảng điều chỉnh bảng lương", expanded=False):
-                st.caption("Bảng này được ẩn mặc định. Chỉ mở khi cần chỉnh các khoản cho bảng lương hiện tại.")
-                editor_cols = [
-                    "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
-                    "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker"
-                ]
-                editor_source = st.session_state.get('payroll_current_df')
-                if isinstance(editor_source, pd.DataFrame) and not editor_source.empty:
-                    editor_source = _filter_real_payroll_rows(editor_source.copy())
-                    editor_df = editor_source[editor_cols].copy()
-                    editor_df, _ = apply_table_layout_df(editor_df, "payroll_current")
-                    col_cfg = {
-                        "TT": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["TT"], format="%d", disabled=True, width=layout_width("payroll_current", "TT", "small")),
-                        "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS["Tên Hệ thống"], disabled=True, width=layout_width("payroll_current", "Tên Hệ thống", "small")),
-                        "Tiền Lương": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền Lương"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền Lương", "small")),
-                        "Tiền phạt trong tháng": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền phạt trong tháng"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền phạt trong tháng", "small")),
-                        "Vi phạm kỳ trước": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Vi phạm kỳ trước"], format="%,d", disabled=True, width=layout_width("payroll_current", "Vi phạm kỳ trước", "small")),
-                        "Tích lũy": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tích lũy"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tích lũy", "small")),
-                    }
-                    for c in [x for x in PAYROLL_ADJUSTMENT_COLUMNS if x != "Tích lũy"]:
-                        col_cfg[c] = st.column_config.NumberColumn(
-                            PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0,
-                            format="%,d", width=layout_width("payroll_current", c, "small")
-                        )
-                    edited = st.data_editor(
-                        editor_df, key="payroll_adjustment_editor", width="stretch", height="content", hide_index=True,
-                        row_height=layout_row_height("payroll_current"),
-                        column_config=col_cfg,
-                        disabled=["TT", "Tên Hệ thống", "Tiền Lương", "Tích lũy", "Tiền phạt trong tháng", "Vi phạm kỳ trước"]
-                    )
-
-                    adjusted_df = editor_source.copy()
-                    for c in editor_cols:
-                        if c in edited.columns:
-                            adjusted_df[c] = edited[c].values
-                    adjusted_df = recalculate_payroll_net(adjusted_df)
-                    adjusted_df = _filter_real_payroll_rows(adjusted_df)
-
-                    compare_cols = [c for c in editor_cols + ["Số tiền thực nhận"] if c in adjusted_df.columns and c in editor_source.columns]
-                    _changed = False
-                    try:
-                        _left = adjusted_df[compare_cols].reset_index(drop=True).fillna(0)
-                        _right = editor_source[compare_cols].reset_index(drop=True).fillna(0)
-                        _changed = not _left.equals(_right)
-                    except Exception:
-                        _changed = True
-                    if _changed:
-                        st.session_state.payroll_current_df = adjusted_df
-                        st.rerun()
-                else:
-                    st.info("Chưa có dữ liệu bảng lương để điều chỉnh.")
-
-    with tab_history:
-        delete_flash = st.session_state.pop("payroll_history_delete_flash", None)
-        if delete_flash:
-            flash_type, flash_text = delete_flash
-            if flash_type == "success":
-                st.success(flash_text)
-            else:
-                st.warning(flash_text)
-
-        history = load_payroll_history()
-        if history.empty or 'Mã bản lưu' not in history.columns:
-            st.info("Chưa có bảng lương nào được lưu trong hệ thống.")
-        else:
-            batches = [x for x in history['Mã bản lưu'].dropna().astype(str).unique().tolist() if x.strip()]
-            # Bản mới nhất nằm cuối Sheet nên đảo lên đầu.
-            batches = list(reversed(batches))
-
-            # Admin có thể xóa bớt một hoặc nhiều bản lịch sử. Chức năng này chỉ xóa
-            # snapshot bảng lương, tuyệt đối không hoàn tác Tích lũy / Vi phạm / hồ sơ.
-            if st.session_state.current_role == "admin":
-                batch_labels = {}
-                for _batch_id in batches:
-                    _g = history[history['Mã bản lưu'].astype(str) == str(_batch_id)]
-                    if _g.empty:
-                        batch_labels[_batch_id] = str(_batch_id)
-                    else:
-                        _r = _g.iloc[0]
-                        _period = f"{_r.get('Từ ngày','')} → {_r.get('Đến ngày','')}"
-                        _saved_at = f"{_r.get('Ngày lưu','')} {_r.get('Giờ lưu','')}".strip()
-                        batch_labels[_batch_id] = f"{_batch_id} | {_period} | lưu {_saved_at}"
-
-                with st.expander("🗑 Xóa bớt lịch sử bảng lương (Admin)", expanded=False):
-                    st.caption(
-                        "Có thể chọn 1 hoặc nhiều bản lương để xóa. Việc này chỉ xóa Lịch sử bảng lương đã lưu; "
-                        "không thay đổi sheet TichLuy, dữ liệu vi phạm, lịch nghỉ hoặc hồ sơ nhân viên."
-                    )
-                    delete_batches = st.multiselect(
-                        "Chọn bản lương cần xóa:",
-                        options=batches,
-                        default=[],
-                        format_func=lambda x: batch_labels.get(x, str(x)),
-                        filter_mode="contains",
-                        key="payroll_history_delete_batches",
-                    )
-                    if delete_batches:
-                        st.warning(
-                            f"Bạn đang chọn xóa {len(delete_batches)} bản lương. Thao tác này không có nút hoàn tác trong ứng dụng."
-                        )
-                    confirm_delete_history = st.checkbox(
-                        "Tôi xác nhận xóa vĩnh viễn các bản lương đã chọn khỏi lịch sử",
-                        key="confirm_delete_payroll_history",
-                    )
-                    if st.button(
-                        "🗑 Xóa các bản lương đã chọn",
-                        use_container_width=True,
-                        type="primary",
-                        key="delete_selected_payroll_history",
-                        disabled=not (delete_batches and confirm_delete_history),
-                    ):
-                        ok_delete, msg_delete, deleted_batches = delete_payroll_snapshots(delete_batches)
-                        if ok_delete:
-                            # Dọn state liên quan đến các batch vừa xóa để lần rerun sau không giữ editor cũ.
-                            for _deleted_batch in deleted_batches:
-                                for _state_key in (
-                                    f"payroll_history_system_refresh_{_deleted_batch}",
-                                    f"payroll_history_editor_version_{_deleted_batch}",
-                                ):
-                                    st.session_state.pop(_state_key, None)
-                            st.session_state.pop("payroll_history_batch", None)
-                            st.session_state.pop("payroll_history_delete_batches", None)
-                            st.session_state.pop("confirm_delete_payroll_history", None)
-                            st.session_state["payroll_history_delete_flash"] = ("success", msg_delete)
-                            st.rerun()
-                        else:
-                            st.error(msg_delete)
-
-            batch = st.selectbox("Chọn bản lương đã lưu:", batches, filter_mode="contains", key="payroll_history_batch")
-            saved = history[history['Mã bản lưu'].astype(str) == str(batch)].copy()
-            if not saved.empty:
-                st.info(
-                    f"Kỳ {saved.iloc[0].get('Từ ngày','')} → {saved.iloc[0].get('Đến ngày','')} | "
-                    f"Lưu bởi {saved.iloc[0].get('Người lưu','')} lúc {saved.iloc[0].get('Giờ lưu','')} ngày {saved.iloc[0].get('Ngày lưu','')}"
-                )
-                saved_table = payroll_history_to_table(saved)
-                saved_table = _filter_real_payroll_rows(saved_table)
-                # V60: hồ sơ của bản lịch sử lấy từ Sheet1 gần nhất ngay khi mở.
-                _history_live_creds = load_credentials_recent()
-                saved_table = apply_latest_profile_fields_to_payroll(
-                    saved_table, _history_live_creds, only_current_nhanvien=False
-                )
-
-                # Nếu Admin vừa bấm "Cập nhật bảng lương từ hệ thống", dùng bản đã làm mới
-                # làm dữ liệu nền cho editor ở lần rerun kế tiếp. Mỗi batch có state riêng.
-                hist_refresh_key = f"payroll_history_system_refresh_{batch}"
-                hist_editor_version_key = f"payroll_history_editor_version_{batch}"
-                if hist_refresh_key in st.session_state:
-                    try:
-                        refreshed_state_df = st.session_state.get(hist_refresh_key)
-                        if isinstance(refreshed_state_df, pd.DataFrame) and not refreshed_state_df.empty:
-                            saved_table = _filter_real_payroll_rows(refreshed_state_df.copy())
-                            saved_table = apply_latest_profile_fields_to_payroll(
-                                saved_table, _history_live_creds, only_current_nhanvien=False
-                            )
-                    except Exception:
-                        pass
-
-                # V60: role cũng lấy theo Sheet1 gần nhất; bảng lương nhân viên chỉ áp dụng `nhanvien`.
-                try:
-                    _current_role_map = _credential_role_map(_history_live_creds)
-                    if 'Tên Hệ thống' in saved_table.columns and _current_role_map:
-                        saved_table = saved_table[
-                            saved_table['Tên Hệ thống'].astype(str).apply(
-                                lambda _n: _current_role_map.get(normalize_login_name(_n), 'nhanvien') == 'nhanvien'
-                            )
-                        ].copy()
-                        saved_table = _filter_real_payroll_rows(saved_table)
-                except Exception:
-                    pass
-
-                try:
-                    hs = pd.to_datetime(saved.iloc[0]['Từ ngày'], dayfirst=True).date()
-                    he = pd.to_datetime(saved.iloc[0]['Đến ngày'], dayfirst=True).date()
-                except Exception:
-                    hs, he = get_vn_today(), get_vn_today()
-
-                # Cập nhật các dữ liệu hệ thống có thể thay đổi sau khi bản lương đã được lưu.
-                # Nút được đặt ngay phía trên tiêu đề Mở lại và chỉnh sửa bản lương theo yêu cầu.
-                st.caption(
-                    "Nút cập nhật hệ thống sẽ làm mới: Tích lũy, Vi phạm, Phí Sinh Hoạt, Tiền hỗ trợ Locker, "
-                    "Họ và Tên, Tài khoản ngân hàng, Tên ngân hàng, Email và vai trò hiện tại. Tiền Lương không bị thay đổi."
-                )
-                if st.button(
-                    "🔄 Cập nhật bảng lương từ hệ thống",
-                    use_container_width=True,
-                    key=f"refresh_payroll_from_system_{batch}"
-                ):
-                    progress_refresh = st.progress(0)
-                    status_refresh = st.empty()
-                    try:
-                        status_refresh.info("⏳ Đang tải hồ sơ nhân viên mới nhất...")
-                        progress_refresh.progress(20)
-                        credentials_live = load_credentials_fresh()
-
-                        status_refresh.info("⏳ Đang tải tiền phạt trong kỳ từ hệ thống lịch nghỉ...")
-                        progress_refresh.progress(45)
-                        try:
-                            load_backup_sheet_data.clear()
-                        except Exception:
-                            pass
-                        leave_live = load_backup_sheet_data()
-
-                        status_refresh.info("⏳ Đang tải Tích lũy, Phí sinh hoạt / Locker và cập nhật bảng lương...")
-                        progress_refresh.progress(70)
-                        _clear_payroll_config_cache()
-                        # Bắt buộc làm mới TichLuy để nút cập nhật không dùng snapshot cache 120 giây cũ.
-                        try:
-                            load_tichluy_tracking.clear()
-                        except Exception:
-                            pass
-                        refreshed_df, refresh_meta = refresh_saved_payroll_from_system(
-                            saved_table, hs, he,
-                            credentials_df=credentials_live,
-                            leave_primary=leave_live
-                        )
-
-                        current_hist_version = int(st.session_state.get(hist_editor_version_key, 0) or 0)
-                        st.session_state[hist_refresh_key] = refreshed_df
-                        st.session_state[hist_editor_version_key] = current_hist_version + 1
-                        saved_table = _filter_real_payroll_rows(refreshed_df.copy())
-
-                        progress_refresh.progress(100)
-                        status_refresh.success(
-                            f"✅ Đã cập nhật dữ liệu hệ thống cho {refresh_meta.get('updated', len(refreshed_df))} nhân viên; "
-                            f"Tích lũy kỳ này có số tiền ở {refresh_meta.get('tichluy_updated', 0)} nhân viên. "
-                            "Tiền Lương và các khoản nhập tay được giữ nguyên; Thực nhận đã tính lại."
-                        )
-                        missing_profiles = refresh_meta.get('missing', [])
-                        if missing_profiles:
-                            st.warning(
-                                "⚠️ Không tìm thấy hồ sơ hệ thống của: " + ", ".join(missing_profiles)
-                                + ". Các thông tin ngân hàng/email cũ của những người này được giữ nguyên."
-                            )
-                    except Exception as e:
-                        progress_refresh.empty()
-                        status_refresh.error(f"❌ Không cập nhật được bảng lương từ hệ thống: {e}")
-
-                st.markdown("#### ✏️ Mở lại và chỉnh sửa bản lương")
-                st.caption(
-                    "Bạn có thể sửa trực tiếp các khoản tiền bên dưới. Cột Thực nhận được hệ thống tự tính lại. "
-                    "Khi bấm Ghi đè, Mã bản lưu được giữ nguyên và bản cũ sẽ được thay bằng dữ liệu mới."
-                )
-
-                history_edit_cols = [c for c in [
-                    "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy",
-                    "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker",
-                    "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
-                ] if c in saved_table.columns]
-                hist_editor_df = saved_table[history_edit_cols].copy()
-                hist_editor_df, _ = apply_table_layout_df(hist_editor_df, "payroll_history")
-
-                hist_col_cfg = {
-                    "TT": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS.get("TT", "TT"), format="%d", disabled=True, width=layout_width("payroll_history", "TT", "small")),
-                    "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Tên Hệ thống", "Tên Hệ thống"), disabled=True, width=layout_width("payroll_history", "Tên Hệ thống", "small")),
-                    "Số tiền thực nhận": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS.get("Số tiền thực nhận", "Thực nhận"), format="%,d", disabled=True, width=layout_width("payroll_history", "Số tiền thực nhận", "small")),
-                    "Số tài khoản ngân hàng": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Số tài khoản ngân hàng", "Tài khoản ngân hàng"), disabled=True, width=layout_width("payroll_history", "Số tài khoản ngân hàng", "small")),
-                    "Tên ngân hàng": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Tên ngân hàng", "Tên ngân hàng"), disabled=True, width=layout_width("payroll_history", "Tên ngân hàng", "small")),
-                    "Email": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS.get("Email", "Email"), disabled=True, width=layout_width("payroll_history", "Email", "small")),
-                }
-                for c in [
-                    "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
-                    "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker"
-                ]:
-                    if c in hist_editor_df.columns:
-                        hist_col_cfg[c] = st.column_config.NumberColumn(
-                            PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%,d", width=layout_width("payroll_history", c, "small"),
-                            disabled=(c in {"Tích lũy", "Vi phạm kỳ trước"})
-                        )
-
-                # V58: Streamlit chỉ áp dụng Pandas Styler cho các cột KHÔNG chỉnh sửa
-                # trong st.data_editor. Ở V57 việc ép màu bằng !important khiến một số ô
-                # disabled bị render thành màu đen, trong khi các ô editable vẫn không thể
-                # nhận màu theo hàng. Vì vậy editor dùng nền chuẩn để không còn ô đen;
-                # ngay bên dưới sẽ có bảng xem trước tô vàng TOÀN BỘ hàng Thực nhận <= 0.
-                hist_editor_version = int(st.session_state.get(hist_editor_version_key, 0) or 0)
-                edited_hist = st.data_editor(
-                    hist_editor_df,
-                    key=f"payroll_history_editor_{batch}_{hist_editor_version}",
-                    width="stretch", height="content", hide_index=True,
-                    row_height=layout_row_height("payroll_history"),
-                    column_config=hist_col_cfg,
-                    disabled=[c for c in ["TT", "Tên Hệ thống", "Tích lũy", "Vi phạm kỳ trước", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"] if c in hist_editor_df.columns]
-                )
-
-                edited_saved_table = saved_table.copy()
-                for c in edited_hist.columns:
-                    if c in edited_saved_table.columns:
-                        edited_saved_table[c] = edited_hist[c].values
-                edited_saved_table = recalculate_payroll_net(edited_saved_table)
-                edited_saved_table = _filter_real_payroll_rows(edited_saved_table)
-
-                # V58: Bảng xem trước sau chỉnh sửa. Dùng HTML để bảo đảm TẤT CẢ ô trong
-                # hàng có Thực nhận <= 0 đều nền vàng, không phụ thuộc giới hạn Styler của
-                # st.data_editor và không bị theme tối ghi đè thành màu đen.
-                try:
-                    _hist_preview_cols = [c for c in history_edit_cols if c in edited_saved_table.columns]
-                    _hist_preview = edited_saved_table[_hist_preview_cols].copy()
-                    _hist_non_positive = _hist_preview.get(
-                        "Số tiền thực nhận", pd.Series([0] * len(_hist_preview), index=_hist_preview.index)
-                    ).apply(_money_to_float).le(0).tolist()
-
-                    _hist_money_cols = {
-                        "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
-                        "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương",
-                        "Tiền hỗ trợ Locker", "Số tiền thực nhận"
-                    }
-                    for _c in _hist_preview.columns:
-                        if _c in _hist_money_cols:
-                            _hist_preview[_c] = _hist_preview[_c].apply(
-                                lambda _v: f"{_money_to_float(_v):,.0f}" if _money_to_float(_v) != 0 else "0"
-                            )
-                        elif _c == "TT":
-                            _hist_preview[_c] = pd.to_numeric(_hist_preview[_c], errors="coerce").fillna(0).astype(int)
-                        else:
-                            _hist_preview[_c] = _hist_preview[_c].fillna("").astype(str)
-
-                    _hist_preview = _hist_preview.rename(
-                        columns={c: PAYROLL_DISPLAY_LABELS.get(c, c) for c in _hist_preview.columns}
-                    )
-                    _hist_html = _hist_preview.to_html(
-                        index=False, escape=True, classes="vera-history-payroll-preview"
-                    )
-                    try:
-                        _hh, _hbt = _hist_html.split("<tbody>", 1)
-                        _hb, _ht = _hbt.split("</tbody>", 1)
-                        _hc = {"i": 0}
-                        def _mark_history_nonpositive(_m):
-                            _i = _hc["i"]
-                            _hc["i"] += 1
-                            if _i < len(_hist_non_positive) and _hist_non_positive[_i]:
-                                return '<tr class="history-nonpositive">'
-                            return '<tr>'
-                        _hb = re.sub(r"<tr>", _mark_history_nonpositive, _hb)
-                        _hist_html = _hh + "<tbody>" + _hb + "</tbody>" + _ht
-                    except Exception:
-                        pass
-
-                    st.markdown("**👁 Bảng xem trước sau chỉnh sửa**")
-                    # V60: không thụt lề HTML; Markdown sẽ không còn hiểu thành code block.
-                    _hist_preview_css = (
-                        "<style>"
-                        ".vera-history-preview-wrap{width:100%;overflow-x:auto;margin:4px 0 10px 0;}"
-                        "table.vera-history-payroll-preview{width:100%;border-collapse:collapse;table-layout:auto;font-size:12px;}"
-                        "table.vera-history-payroll-preview th{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 4px;border:1px solid #c9c9c9;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;}"
-                        "table.vera-history-payroll-preview td{background:#fff!important;color:#000!important;padding:4px;border:1px solid #dedede;white-space:normal;word-break:break-word;}"
-                        "table.vera-history-payroll-preview tbody tr:nth-child(even) td{background:#fafafa!important;}"
-                        "table.vera-history-payroll-preview tbody tr.history-nonpositive td{background:#FFF2CC!important;color:#000!important;}"
-                        "</style>"
-                    )
-                    st.markdown(
-                        _hist_preview_css + f"<div class='vera-history-preview-wrap'>{_hist_html}</div>",
-                        unsafe_allow_html=True,
-                    )
-                except Exception:
-                    pass
-
-                # Hiển thị nhanh tổng sau khi sửa để Admin kiểm tra trước khi ghi đè.
-                h1, h2, h3 = st.columns(3)
-                h1.metric("Nhân viên", len(edited_saved_table))
-                h2.metric("Tổng Tiền Lương", f"{edited_saved_table['Tiền Lương'].apply(_money_to_float).sum():,.0f} đ".replace(',', '.'))
-                h3.metric("Tổng Thực nhận", f"{edited_saved_table['Số tiền thực nhận'].apply(_money_to_float).sum():,.0f} đ".replace(',', '.'))
-
-                confirm_overwrite = st.checkbox(
-                    f"Tôi xác nhận ghi đè bản lương {batch}",
-                    key=f"confirm_payroll_overwrite_{batch}"
-                )
-                c_overwrite, c_export_hist = st.columns(2)
-                with c_overwrite:
-                    if st.button(
-                        "💾 Ghi đè cập nhật bản lương này",
-                        use_container_width=True,
-                        key=f"overwrite_payroll_{batch}",
-                        disabled=not confirm_overwrite
-                    ):
-                        source_label = str(saved.iloc[0].get('Nguồn dữ liệu', '')).strip()
-                        ok, msg = overwrite_payroll_snapshot(
-                            batch, edited_saved_table, hs, he, source_label, st.session_state.current_user
-                        )
-                        if ok:
-                            load_payroll_history.clear()
-                            try:
-                                st.session_state.pop(hist_refresh_key, None)
-                                st.session_state[hist_editor_version_key] = hist_editor_version + 1
-                            except Exception:
-                                pass
-                            st.success(msg)
-                            st.info(
-                                f"Bản {batch} đã được cập nhật lúc {datetime.now(VN_TZ).strftime('%H:%M:%S %d/%m/%Y')} "
-                                f"bởi {st.session_state.current_user}."
-                            )
-                        else:
-                            st.error(msg)
-
-                with c_export_hist:
-                    try:
-                        hist_excel = build_payroll_excel_bytes(edited_saved_table, hs, he)
-                        st.download_button(
-                            "📥 Export bản đang chỉnh sửa",
-                            data=hist_excel,
-                            file_name=f"BangLuong_DaLuu_{hs.strftime('%d%m%Y')}_{he.strftime('%d%m%Y')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True,
-                            key=f"export_payroll_history_{batch}"
-                        )
-                    except Exception as e:
-                        st.warning(f"Không tạo được file export lịch sử: {e}")
-
-                # --- GỬI EMAIL TỪ BẢN LƯƠNG ĐANG MỞ / ĐANG CHỈNH SỬA ---
-                # Dùng trực tiếp edited_saved_table để email phản ánh đúng số liệu Admin/Lễ tân/Quản lý
-                # đang nhìn thấy trên màn hình, kể cả trước khi bấm Ghi đè.
-                with st.expander("📧 GỬI BẢNG LƯƠNG QUA EMAIL (BẢN ĐANG CHỈNH SỬA)"):
-                    st.caption(
-                        "Email và file đính kèm sẽ dùng số liệu của bản đang chỉnh sửa hiện tại. "
-                        "Nếu cần lưu các thay đổi này vào hệ thống, hãy bấm Ghi đè cập nhật bản lương."
-                    )
-                    hist_emailable = edited_saved_table.copy()
-                    _hist_email_net = (
-                        hist_emailable['Số tiền thực nhận'].apply(_money_to_float)
-                        if 'Số tiền thực nhận' in hist_emailable.columns
-                        else pd.Series(0, index=hist_emailable.index)
-                    )
-                    hist_emailable = hist_emailable[_hist_email_net > 0].copy()
-
-                    hist_employee_names = (
-                        hist_emailable['Tên Hệ thống'].astype(str).tolist()
-                        if not hist_emailable.empty and 'Tên Hệ thống' in hist_emailable.columns else []
-                    )
-                    hist_selected_email_emps = st.multiselect(
-                        "Chọn 1, nhiều hoặc tất cả nhân viên:",
-                        hist_employee_names,
-                        default=hist_employee_names,
-                        filter_mode="contains",
-                        key=f"payroll_history_email_recipients_{batch}"
-                    )
-                    st.caption(
-                        f"Có {len(hist_employee_names)} nhân viên có Thực nhận > 0 trong bản lương này. "
-                        "Email được lấy lại mới nhất từ Sheet1 khi bấm Gửi; nhân viên có Thực nhận ≤ 0 không được gửi mail."
-                    )
-
-                    if st.button(
-                        "🚀 Gửi bảng lương cho nhân viên đã chọn",
-                        use_container_width=True,
-                        key=f"send_payroll_history_employees_{batch}"
-                    ):
-                        if not hist_selected_email_emps:
-                            st.warning("Vui lòng chọn ít nhất 1 nhân viên.")
-                        else:
-                            sender_email = "veraspabienhoa@gmail.com"
-                            sender_pass = "zvtgbysfmdaqxaau"
-                            progress_hist_email = st.progress(0)
-                            hist_ok_count, hist_errors = 0, []
-                            # V59: đọc Email MỚI NHẤT trực tiếp từ Sheet1 một lần cho cả lượt gửi lịch sử.
-                            hist_live_email_creds = load_credentials_fresh_for_email()
-                            # Một snapshot lịch vi phạm dùng chung cho toàn bộ email trong lần gửi.
-                            hist_email_leave_df = load_backup_sheet_data()
-                            for idx, emp in enumerate(hist_selected_email_emps):
-                                matched_emp = hist_emailable[
-                                    hist_emailable['Tên Hệ thống'].astype(str) == str(emp)
-                                ]
-                                if matched_emp.empty:
-                                    hist_errors.append(f"{emp}: Không tìm thấy dữ liệu bảng lương.")
-                                else:
-                                    row = matched_emp.iloc[0].copy()
-                                    _hist_live_row_df = apply_latest_profile_fields_to_payroll(
-                                        pd.DataFrame([row]), hist_live_email_creds, only_current_nhanvien=False
-                                    )
-                                    if not _hist_live_row_df.empty:
-                                        row = _hist_live_row_df.iloc[0].copy()
-                                    to_email = str(row.get('Email', '')).strip() or latest_email_from_credentials(hist_live_email_creds, emp)
-                                    if not to_email or '@' not in to_email:
-                                        hist_errors.append(f"{emp}: Email mới nhất trong Sheet1 không hợp lệ hoặc đang để trống.")
-                                    else:
-                                        row['Email'] = to_email
-                                        emp_violations = get_employee_violation_details(emp, hs, he, hist_email_leave_df)
-                                        ok, msg = send_payroll_email(
-                                            sender_email, sender_pass, to_email, row, hs, he, emp_violations
-                                        )
-                                        if ok:
-                                            hist_ok_count += 1
-                                        else:
-                                            hist_errors.append(f"{emp}: {msg}")
-                                progress_hist_email.progress((idx + 1) / len(hist_selected_email_emps))
-                                time.sleep(0.35)
-
-                            if hist_ok_count:
-                                st.success(
-                                    f"Đã gửi thành công {hist_ok_count}/{len(hist_selected_email_emps)} "
-                                    "email bảng lương từ bản đang chỉnh sửa."
-                                )
-                            for err in hist_errors:
-                                st.error(err)
-
-                if st.session_state.current_role == "admin":
-                    with st.expander("📨 GỬI BẢNG LƯƠNG TỔNG HỢP CHO LỄ TÂN (BẢN ĐANG CHỈNH SỬA)"):
-                        hist_letan_df = df_credentials.copy()
-                        if not hist_letan_df.empty and 'Phân quyền' in hist_letan_df.columns:
-                            hist_letan_df = hist_letan_df[
-                                hist_letan_df['Phân quyền'].astype(str).str.strip().str.lower().isin(['letan', 'quanly'])
-                            ].copy()
-                            if 'Tên nhân viên' in hist_letan_df.columns:
-                                hist_letan_df = hist_letan_df[
-                                    ~hist_letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
-                                        'ten nhan vien', 'ten he thong', 'username', 'user name'
-                                    })
-                                ].copy()
-
-                        if hist_letan_df.empty:
-                            st.info("Không có tài khoản Lễ tân trong hồ sơ hệ thống.")
-                        else:
-                            st.write("**Check đúng 1 Lễ tân để hệ thống lấy Email từ hồ sơ:**")
-                            hist_checked_letan = []
-                            for i, (_, lr) in enumerate(hist_letan_df.iterrows()):
-                                lname = str(lr.get('Tên nhân viên', '')).strip()
-                                if not lname:
-                                    continue
-                                if st.checkbox(
-                                    lname,
-                                    key=f"payroll_history_letan_check_{batch}_{i}_{normalize_login_name(lname)}"
-                                ):
-                                    hist_checked_letan.append(lname)
-
-                            if len(hist_checked_letan) > 1:
-                                st.warning("⚠️ Chỉ được check 1 Lễ tân cho mỗi lần gửi.")
-                            elif len(hist_checked_letan) == 1:
-                                hist_selected_letan = hist_checked_letan[0]
-                                hist_matched_letan = hist_letan_df[
-                                    hist_letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name)
-                                    == normalize_login_name(hist_selected_letan)
-                                ]
-                                if hist_matched_letan.empty:
-                                    st.error("Không tìm thấy hồ sơ Lễ tân đã chọn.")
-                                else:
-                                    st.caption("📧 Email người nhận sẽ được kiểm tra lại trực tiếp từ Sheet1 ngay khi bấm Gửi.")
-                                    if st.button(
-                                        "📤 Gửi bảng lương tổng hợp cho Lễ tân đã check",
-                                        use_container_width=True,
-                                        key=f"send_payroll_history_summary_letan_{batch}"
-                                    ):
-                                        hist_live_letan_creds = load_credentials_fresh_for_email()
-                                        hist_letan_email = latest_email_from_credentials(hist_live_letan_creds, hist_selected_letan)
-                                        if not hist_letan_email or '@' not in hist_letan_email:
-                                            st.error(
-                                                f"⚠️ Tài khoản {hist_selected_letan} chưa có Email hợp lệ trong Sheet1 mới nhất."
-                                            )
-                                        else:
-                                            sender_email = "veraspabienhoa@gmail.com"
-                                            sender_pass = "zvtgbysfmdaqxaau"
-                                            ok, msg = send_payroll_summary_email(
-                                                sender_email, sender_pass, hist_letan_email,
-                                                hist_selected_letan, edited_saved_table, hs, he
-                                            )
-                                            if ok:
-                                                st.success(
-                                                    f"✅ Đã gửi bảng lương tổng hợp của bản {batch} "
-                                                    f"cho {hist_selected_letan} ({hist_letan_email})."
-                                                )
+                                        progress_hist_email = st.progress(0)
+                                        hist_ok_count, hist_errors = 0, []
+                                        # V59: đọc Email MỚI NHẤT trực tiếp từ Sheet1 một lần cho cả lượt gửi lịch sử.
+                                        hist_live_email_creds = load_credentials_fresh_for_email()
+                                        # Một snapshot lịch vi phạm dùng chung cho toàn bộ email trong lần gửi.
+                                        hist_email_leave_df = load_backup_sheet_data()
+                                        for idx, emp in enumerate(hist_selected_email_emps):
+                                            matched_emp = hist_emailable[
+                                                hist_emailable['Tên Hệ thống'].astype(str) == str(emp)
+                                            ]
+                                            if matched_emp.empty:
+                                                hist_errors.append(f"{emp}: Không tìm thấy dữ liệu bảng lương.")
                                             else:
-                                                st.error(msg)
-                            else:
-                                st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
+                                                row = matched_emp.iloc[0].copy()
+                                                _hist_live_row_df = apply_latest_profile_fields_to_payroll(
+                                                    pd.DataFrame([row]), hist_live_email_creds, only_current_nhanvien=False
+                                                )
+                                                if not _hist_live_row_df.empty:
+                                                    row = _hist_live_row_df.iloc[0].copy()
+                                                to_email = str(row.get('Email', '')).strip() or latest_email_from_credentials(hist_live_email_creds, emp)
+                                                if not to_email or '@' not in to_email:
+                                                    hist_errors.append(f"{emp}: Email mới nhất trong Sheet1 không hợp lệ hoặc đang để trống.")
+                                                else:
+                                                    row['Email'] = to_email
+                                                    emp_violations = get_employee_violation_details(emp, hs, he, hist_email_leave_df)
+                                                    ok, msg = send_payroll_email(
+                                                        sender_email, sender_pass, to_email, row, hs, he, emp_violations
+                                                    )
+                                                    if ok:
+                                                        hist_ok_count += 1
+                                                    else:
+                                                        hist_errors.append(f"{emp}: {msg}")
+                                            progress_hist_email.progress((idx + 1) / len(hist_selected_email_emps))
+                                            time.sleep(0.35)
 
+                                        if hist_ok_count:
+                                            st.success(
+                                                f"Đã gửi thành công {hist_ok_count}/{len(hist_selected_email_emps)} "
+                                                "email bảng lương từ bản đang chỉnh sửa."
+                                            )
+                                        for err in hist_errors:
+                                            st.error(err)
+
+                            if st.session_state.current_role == "admin":
+                                with st.expander("📨 GỬI BẢNG LƯƠNG TỔNG HỢP CHO LỄ TÂN (BẢN ĐANG CHỈNH SỬA)"):
+                                    hist_letan_df = df_credentials.copy()
+                                    if not hist_letan_df.empty and 'Phân quyền' in hist_letan_df.columns:
+                                        hist_letan_df = hist_letan_df[
+                                            hist_letan_df['Phân quyền'].astype(str).str.strip().str.lower().isin(['letan', 'quanly'])
+                                        ].copy()
+                                        if 'Tên nhân viên' in hist_letan_df.columns:
+                                            hist_letan_df = hist_letan_df[
+                                                ~hist_letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
+                                                    'ten nhan vien', 'ten he thong', 'username', 'user name'
+                                                })
+                                            ].copy()
+
+                                    if not hist_letan_df.empty and 'Tên nhân viên' in hist_letan_df.columns:
+                                        hist_letan_df = hist_letan_df.assign(__sort=hist_letan_df['Tên nhân viên'].apply(normalize_login_name)).sort_values('__sort').drop(columns='__sort')
+                                    if hist_letan_df.empty:
+                                        st.info("Không có tài khoản Lễ tân trong hồ sơ hệ thống.")
+                                    else:
+                                        st.write("**Check đúng 1 Lễ tân để hệ thống lấy Email từ hồ sơ:**")
+                                        hist_checked_letan = []
+                                        for i, (_, lr) in enumerate(hist_letan_df.iterrows()):
+                                            lname = str(lr.get('Tên nhân viên', '')).strip()
+                                            if not lname:
+                                                continue
+                                            if st.checkbox(
+                                                lname,
+                                                key=f"payroll_history_letan_check_{batch}_{i}_{normalize_login_name(lname)}"
+                                            ):
+                                                hist_checked_letan.append(lname)
+
+                                        if len(hist_checked_letan) > 1:
+                                            st.warning("⚠️ Chỉ được check 1 Lễ tân cho mỗi lần gửi.")
+                                        elif len(hist_checked_letan) == 1:
+                                            hist_selected_letan = hist_checked_letan[0]
+                                            hist_matched_letan = hist_letan_df[
+                                                hist_letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name)
+                                                == normalize_login_name(hist_selected_letan)
+                                            ]
+                                            if hist_matched_letan.empty:
+                                                st.error("Không tìm thấy hồ sơ Lễ tân đã chọn.")
+                                            else:
+                                                st.caption("📧 Email người nhận sẽ được kiểm tra lại trực tiếp từ Sheet1 ngay khi bấm Gửi.")
+                                                if st.button(
+                                                    "📤 Gửi bảng lương tổng hợp cho Lễ tân đã check",
+                                                    use_container_width=True,
+                                                    key=f"send_payroll_history_summary_letan_{batch}"
+                                                ):
+                                                    hist_live_letan_creds = load_credentials_fresh_for_email()
+                                                    hist_letan_email = latest_email_from_credentials(hist_live_letan_creds, hist_selected_letan)
+                                                    if not hist_letan_email or '@' not in hist_letan_email:
+                                                        st.error(
+                                                            f"⚠️ Tài khoản {hist_selected_letan} chưa có Email hợp lệ trong Sheet1 mới nhất."
+                                                        )
+                                                    else:
+                                                        sender_email = "veraspabienhoa@gmail.com"
+                                                        sender_pass = "zvtgbysfmdaqxaau"
+                                                        ok, msg = send_payroll_summary_email(
+                                                            sender_email, sender_pass, hist_letan_email,
+                                                            hist_selected_letan, edited_saved_table, hs, he
+                                                        )
+                                                        if ok:
+                                                            st.success(
+                                                                f"✅ Đã gửi bảng lương tổng hợp của bản {batch} "
+                                                                f"cho {hist_selected_letan} ({hist_letan_email})."
+                                                            )
+                                                        else:
+                                                            st.error(msg)
+                                        else:
+                                            st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
 elif selected_page == "🧭 Bảng Tour":
     st.subheader("🧭 Bảng Tour")
 
@@ -8310,7 +8651,7 @@ elif selected_page == "🧭 Bảng Tour":
 elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
     st.subheader("➕ Đăng ký lịch nghỉ")
     all_users = get_leave_eligible_employee_names(df_credentials, df_nv_excel)
-    if st.session_state.current_role == "nhanvien" and system_status["lock_nv"]:
+    if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and system_status["lock_nv"]:
         st.error("🔒 Tính năng đăng ký lịch nghỉ hiện đang bị Admin tạm khóa. Vui lòng liên hệ Admin hoặc Lễ Tân để được hỗ trợ!")
     else:
         if is_admin_letan:
@@ -8499,7 +8840,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                 today = get_vn_today()
                 can_proceed = True
 
-                if current_role == "nhanvien":
+                if current_role in EMPLOYEE_LIKE_ROLES:
                     emp_min_date, emp_max_date = employee_registration_window(today)
                     if start_date < emp_min_date or end_date > emp_max_date:
                         st.error(f"❌ Tài khoản NHÂN VIÊN chỉ được đăng ký từ hôm nay đến hết ngày {emp_max_date.strftime('%d/%m/%Y')} (tháng hiện tại và 1 tháng kế tiếp).")
@@ -8703,6 +9044,16 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
     # 2) SHEET_LICH_NGHI_2_ID
     # Nếu trùng Ngày + Tên nhân viên + Lý do nghỉ thì ưu tiên Sheet dự phòng.
     detail_all_df = combine_leave_sources_for_daily_stats(df_leave_secondary, df_backup)
+    # Nếu cache nguồn từng trả về rỗng do lỗi API tạm thời, chủ động đọc lại đúng một lần
+    # để phần Chi tiết danh sách không bị trắng dù Google Sheet đang có dữ liệu.
+    if detail_all_df.empty:
+        try:
+            load_backup_sheet_data.clear(); load_secondary_leave_sheet_data.clear()
+            df_backup = load_backup_sheet_data()
+            df_leave_secondary = load_secondary_leave_sheet_data()
+            detail_all_df = combine_leave_sources_for_daily_stats(df_leave_secondary, df_backup)
+        except Exception:
+            pass
     if not detail_all_df.empty:
         mask_date = (detail_all_df['Ngày'] >= start_date) & (detail_all_df['Ngày'] <= end_date)
         filtered_df = detail_all_df[mask_date].copy()
@@ -8718,13 +9069,13 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
     def is_excluded(r): return any(kw in str(r).lower() for kw in excluded_keywords)
 
     # Nguồn riêng cho "Thống kê chi tiết theo từng ngày": hợp nhất CẢ 2 FILE.
-    daily_all_df = combine_leave_sources_for_daily_stats(df_leave_secondary, df_backup)
+    daily_all_df = detail_all_df.copy()
     if not daily_all_df.empty:
         daily_mask = (daily_all_df['Ngày'] >= start_date) & (daily_all_df['Ngày'] <= end_date)
         daily_filtered_df = daily_all_df[daily_mask].copy()
         if selected_nv != "- Tất cả nhân viên -":
             daily_filtered_df = daily_filtered_df[
-                daily_filtered_df['Tên nhân viên'].astype(str).str.strip().str.casefold() == selected_nv.strip().casefold()
+                daily_filtered_df['Tên nhân viên'].astype(str).apply(normalize_login_name) == normalize_login_name(selected_nv)
             ]
     else:
         daily_filtered_df = daily_all_df.copy()
@@ -8828,7 +9179,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         tong_cong_row['Phạt vi phạm'] = tong_phat
         df_for_excel = pd.concat([df_for_excel, tong_cong_row.to_frame().T], ignore_index=True)
 
-    if st.session_state.current_role == "nhanvien":
+    if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:
         st.subheader(f"Chi tiết danh sách (Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')})")
     else:
         col_header, col_download = st.columns([7, 3])
@@ -8852,7 +9203,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         with st.expander("📧 GỬI BÁO CÁO QUA EMAIL CHO NHÂN VIÊN"):
             st.info("Hệ thống sẽ tự động tách dữ liệu của từng nhân viên và gửi đến đúng Email của họ. Bạn có thể chọn gửi cho 1 người, nhiều người hoặc tất cả.")
 
-            unique_employees_in_filter = filtered_df['Tên nhân viên'].dropna().unique().tolist()
+            unique_employees_in_filter = sort_employee_names(filtered_df['Tên nhân viên'].dropna().astype(str).tolist())
 
             with st.form("form_send_email"):
                 # Thêm multiselect cho phép chọn người nhận
@@ -9175,7 +9526,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
     st.markdown("### 🗑️ Xóa / Quản lý lịch nghỉ đã đăng ký")
 
     df_backup_view = df_backup.copy()
-    if st.session_state.current_role == "nhanvien":
+    if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:
         df_backup_view = df_backup_view[df_backup_view['Tên nhân viên'] == st.session_state.current_user]
 
     if df_backup_view.empty: 
@@ -9194,7 +9545,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             column_config=table_layout_column_config("leave_manage", list(df_view_display.columns))
         )
 
-        if st.session_state.current_role == "nhanvien" and system_status["lock_nv"]:
+        if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and system_status["lock_nv"]:
             st.error("🔒 Tính năng xóa lịch nghỉ hiện đang bị Admin tạm khóa. Vui lòng liên hệ Admin để được hỗ trợ!")
         else:
             with st.form("form_delete_backup_row"):
@@ -9203,7 +9554,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
                 row_options = []
                 valid_indices = []
                 for i, row in df_backup.iterrows():
-                    if st.session_state.current_role == "nhanvien" and row.get('Tên nhân viên') != st.session_state.current_user:
+                    if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and row.get('Tên nhân viên') != st.session_state.current_user:
                         continue
                     row_options.append(f"Dòng {i+1}: {row.get('Ngày')} - {row.get('Tên nhân viên')} - {row.get(col_ly_do_disp, '')}")
                     valid_indices.append((i, str(row.get('Ngày'))))
@@ -9221,7 +9572,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
 
                     can_delete = True
                     today = get_vn_today()
-                    if st.session_state.current_role == "nhanvien":
+                    if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:
                         emp_min_date, emp_max_date = employee_registration_window(today)
                         if sel_date < emp_min_date or sel_date > emp_max_date:
                             st.error(f"❌ Nhân viên chỉ được xóa lịch từ hôm nay đến hết {emp_max_date.strftime('%d/%m/%Y')}.")

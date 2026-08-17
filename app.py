@@ -4408,6 +4408,145 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     except Exception as e:
                         st.warning(f"Không tạo được file export lịch sử: {e}")
 
+                # --- GỬI EMAIL TỪ BẢN LƯƠNG ĐANG MỞ / ĐANG CHỈNH SỬA ---
+                # Dùng trực tiếp edited_saved_table để email phản ánh đúng số liệu Admin/Lễ tân
+                # đang nhìn thấy trên màn hình, kể cả trước khi bấm Ghi đè.
+                with st.expander("📧 GỬI BẢNG LƯƠNG QUA EMAIL (BẢN ĐANG CHỈNH SỬA)"):
+                    st.caption(
+                        "Email và file đính kèm sẽ dùng số liệu của bản đang chỉnh sửa hiện tại. "
+                        "Nếu cần lưu các thay đổi này vào hệ thống, hãy bấm Ghi đè cập nhật bản lương."
+                    )
+                    hist_emailable = edited_saved_table.copy()
+                    if 'Email' in hist_emailable.columns:
+                        hist_emailable = hist_emailable[
+                            hist_emailable['Email'].astype(str).str.contains('@', na=False)
+                        ].copy()
+                    else:
+                        hist_emailable = pd.DataFrame()
+
+                    hist_employee_names = (
+                        hist_emailable['Tên Hệ thống'].astype(str).tolist()
+                        if not hist_emailable.empty and 'Tên Hệ thống' in hist_emailable.columns else []
+                    )
+                    hist_selected_email_emps = st.multiselect(
+                        "Chọn 1, nhiều hoặc tất cả nhân viên:",
+                        hist_employee_names,
+                        default=hist_employee_names,
+                        filter_mode="contains",
+                        key=f"payroll_history_email_recipients_{batch}"
+                    )
+                    st.caption(f"Có {len(hist_employee_names)} nhân viên có Email hợp lệ trong bản lương này.")
+
+                    if st.button(
+                        "🚀 Gửi bảng lương cho nhân viên đã chọn",
+                        use_container_width=True,
+                        key=f"send_payroll_history_employees_{batch}"
+                    ):
+                        if not hist_selected_email_emps:
+                            st.warning("Vui lòng chọn ít nhất 1 nhân viên.")
+                        else:
+                            sender_email = "veraspabienhoa@gmail.com"
+                            sender_pass = "zvtgbysfmdaqxaau"
+                            progress_hist_email = st.progress(0)
+                            hist_ok_count, hist_errors = 0, []
+                            for idx, emp in enumerate(hist_selected_email_emps):
+                                matched_emp = hist_emailable[
+                                    hist_emailable['Tên Hệ thống'].astype(str) == str(emp)
+                                ]
+                                if matched_emp.empty:
+                                    hist_errors.append(f"{emp}: Không tìm thấy dữ liệu bảng lương.")
+                                else:
+                                    row = matched_emp.iloc[0]
+                                    to_email = str(row.get('Email', '')).strip()
+                                    ok, msg = send_payroll_email(
+                                        sender_email, sender_pass, to_email, row, hs, he
+                                    )
+                                    if ok:
+                                        hist_ok_count += 1
+                                    else:
+                                        hist_errors.append(f"{emp}: {msg}")
+                                progress_hist_email.progress((idx + 1) / len(hist_selected_email_emps))
+                                time.sleep(0.35)
+
+                            if hist_ok_count:
+                                st.success(
+                                    f"Đã gửi thành công {hist_ok_count}/{len(hist_selected_email_emps)} "
+                                    "email bảng lương từ bản đang chỉnh sửa."
+                                )
+                            for err in hist_errors:
+                                st.error(err)
+
+                if st.session_state.current_role == "admin":
+                    with st.expander("📨 GỬI BẢNG LƯƠNG TỔNG HỢP CHO LỄ TÂN (BẢN ĐANG CHỈNH SỬA)"):
+                        hist_letan_df = df_credentials.copy()
+                        if not hist_letan_df.empty and 'Phân quyền' in hist_letan_df.columns:
+                            hist_letan_df = hist_letan_df[
+                                hist_letan_df['Phân quyền'].astype(str).str.strip().str.lower().eq('letan')
+                            ].copy()
+                            if 'Tên nhân viên' in hist_letan_df.columns:
+                                hist_letan_df = hist_letan_df[
+                                    ~hist_letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name).isin({
+                                        'ten nhan vien', 'ten he thong', 'username', 'user name'
+                                    })
+                                ].copy()
+
+                        if hist_letan_df.empty:
+                            st.info("Không có tài khoản Lễ tân trong hồ sơ hệ thống.")
+                        else:
+                            st.write("**Check đúng 1 Lễ tân để hệ thống lấy Email từ hồ sơ:**")
+                            hist_checked_letan = []
+                            for i, (_, lr) in enumerate(hist_letan_df.iterrows()):
+                                lname = str(lr.get('Tên nhân viên', '')).strip()
+                                if not lname:
+                                    continue
+                                if st.checkbox(
+                                    lname,
+                                    key=f"payroll_history_letan_check_{batch}_{i}_{normalize_login_name(lname)}"
+                                ):
+                                    hist_checked_letan.append(lname)
+
+                            if len(hist_checked_letan) > 1:
+                                st.warning("⚠️ Chỉ được check 1 Lễ tân cho mỗi lần gửi.")
+                            elif len(hist_checked_letan) == 1:
+                                hist_selected_letan = hist_checked_letan[0]
+                                hist_matched_letan = hist_letan_df[
+                                    hist_letan_df['Tên nhân viên'].astype(str).apply(normalize_login_name)
+                                    == normalize_login_name(hist_selected_letan)
+                                ]
+                                if hist_matched_letan.empty:
+                                    st.error("Không tìm thấy hồ sơ Lễ tân đã chọn.")
+                                else:
+                                    hist_rletan = hist_matched_letan.iloc[0]
+                                    hist_letan_email = str(hist_rletan.get('Email', '')).strip()
+                                    if hist_letan_email and '@' in hist_letan_email:
+                                        st.success(f"📧 Email nhận: {hist_letan_email}")
+                                    else:
+                                        st.warning(
+                                            f"⚠️ Tài khoản {hist_selected_letan} chưa có Email hợp lệ trong hồ sơ."
+                                        )
+
+                                    if st.button(
+                                        "📤 Gửi bảng lương tổng hợp cho Lễ tân đã check",
+                                        use_container_width=True,
+                                        key=f"send_payroll_history_summary_letan_{batch}",
+                                        disabled=not (hist_letan_email and '@' in hist_letan_email)
+                                    ):
+                                        sender_email = "veraspabienhoa@gmail.com"
+                                        sender_pass = "zvtgbysfmdaqxaau"
+                                        ok, msg = send_payroll_summary_email(
+                                            sender_email, sender_pass, hist_letan_email,
+                                            hist_selected_letan, edited_saved_table, hs, he
+                                        )
+                                        if ok:
+                                            st.success(
+                                                f"✅ Đã gửi bảng lương tổng hợp của bản {batch} "
+                                                f"cho {hist_selected_letan}."
+                                            )
+                                        else:
+                                            st.error(msg)
+                            else:
+                                st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
+
 elif selected_page == "🧭 Bảng Tour":
     st.subheader("🧭 Bảng Tour")
 

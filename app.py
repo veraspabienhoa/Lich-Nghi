@@ -669,6 +669,46 @@ st.markdown("""
             padding-left: 14px !important;
         }
 
+        /* V63 - BORDER TOÀN HỆ THỐNG: RGB(242,242,242) = #F2F2F2.
+           Áp dụng cho toàn bộ dropdown/select box và đường viền các bảng trên website. */
+        [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+        [data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
+        div[data-baseweb="select"] > div {
+            border-color: #F2F2F2 !important;
+            box-shadow: 0 0 0 1px #F2F2F2 inset !important;
+        }
+        [data-testid="stSelectbox"]:hover div[data-baseweb="select"] > div,
+        [data-testid="stMultiSelect"]:hover div[data-baseweb="select"] > div,
+        div[data-baseweb="select"]:hover > div,
+        [data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within,
+        [data-testid="stMultiSelect"] div[data-baseweb="select"] > div:focus-within {
+            border-color: #F2F2F2 !important;
+            box-shadow: 0 0 0 1px #F2F2F2 inset !important;
+        }
+        div[data-baseweb="popover"],
+        div[data-baseweb="menu"],
+        ul[role="listbox"] {
+            border-color: #F2F2F2 !important;
+        }
+
+        /* HTML tables và các bảng Streamlit/Data Editor. */
+        table, table th, table td {
+            border-color: #F2F2F2 !important;
+        }
+        [data-testid="stDataFrame"],
+        [data-testid="stDataEditor"],
+        [data-testid="stTable"] {
+            border-color: #F2F2F2 !important;
+        }
+        [data-testid="stDataFrame"] [role="grid"],
+        [data-testid="stDataEditor"] [role="grid"],
+        [data-testid="stDataFrame"] [role="gridcell"],
+        [data-testid="stDataEditor"] [role="gridcell"],
+        [data-testid="stDataFrame"] [role="columnheader"],
+        [data-testid="stDataEditor"] [role="columnheader"] {
+            border-color: #F2F2F2 !important;
+        }
+
         /* V62 - NỀN TIÊU ĐỀ/NHÃN TOÀN HỆ THỐNG: RGB(217,217,217) = #D9D9D9.
            Áp dụng cho heading và toàn bộ nhãn widget như "Chọn ngày nghỉ", "Chọn nhân viên", ... */
         h1, h2, h3, h4, h5, h6 {

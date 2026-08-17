@@ -713,7 +713,7 @@ PAYROLL_STORAGE_WORKSHEET = "BangLuong"
 PAYROLL_CONFIG_WORKSHEET = "CauHinhLuong"
 UI_LAYOUT_WORKSHEET = "CauHinhCot"
 TICHLUY_WORKSHEET = "TichLuy"
-# V37: cấu hình hiển thị cột nâng cao + tiêu đề tự wrap khi cột nhỏ.
+# V39: bảo vệ TichLuy đã hoàn thành + tự đồng bộ nhân viên còn thiếu + STT A2=1,2,3...
 TICHLUY_TARGET_DEFAULT = 5000000
 TICHLUY_PERIOD_DEFAULT = 500000
 TICHLUY_HEADERS = [
@@ -3409,6 +3409,20 @@ def _parse_tichluy_history(value):
         return {}
 
 
+def _is_tichluy_completed(target_value, accumulated_value, remaining_value=''):
+    """
+    Xác định hồ sơ đã hoàn thành đóng Tích lũy.
+    Dữ liệu Admin nhập tay ở D/E/F được xem là hoàn thành khi E >= D (>0).
+    Khi đã hoàn thành, hệ thống tuyệt đối không tự sửa D/E/F/G/H/I của dòng đó.
+    """
+    try:
+        target = float(_money_to_float(target_value))
+        accumulated = float(_money_to_float(accumulated_value))
+        return target > 0 and accumulated >= target
+    except Exception:
+        return False
+
+
 def _first_pay_period_for_start(start_work_date):
     """Kỳ 1 = 1-15, Kỳ 2 = 16-cuối tháng."""
     if start_work_date.day <= 15:
@@ -3449,6 +3463,9 @@ def _select_preferred_tichluy_rows(tracking):
         key = normalize_login_name(r.get('Tên nhân viên', ''))
         if not key:
             continue
+        completed_ok = 1 if _is_tichluy_completed(
+            r.get('Mục tiêu tích lũy', ''), r.get('Đã tích lũy', ''), r.get('Còn lại', '')
+        ) else 0
         start_ok = 1 if _parse_vn_date(r.get('Ngày bắt đầu làm', '')) else 0
         hist = _parse_tichluy_history(r.get('Chi tiết các kỳ', ''))
         period_start, period_end = _parse_tichluy_period_text(r.get('Kỳ gần nhất', ''))
@@ -3462,7 +3479,8 @@ def _select_preferred_tichluy_rows(tracking):
             sheet_row = int(r.get('__sheet_row', 0) or 0)
         except Exception:
             sheet_row = 0
-        score = (start_ok, history_ok, numeric_ok, sheet_row)
+        # Dòng đã hoàn thành do Admin nhập tay luôn được ưu tiên nếu tên bị trùng.
+        score = (completed_ok, start_ok, history_ok, numeric_ok, sheet_row)
         if key not in best or score > best[key][0]:
             best[key] = (score, r)
     if not best:
@@ -3493,15 +3511,23 @@ def get_tichluy_charge_map(start_date, end_date, employee_names=None, for_existi
         start_work = _parse_vn_date(r.get('Ngày bắt đầu làm',''))
         target = float(_money_to_float(r.get('Mục tiêu tích lũy', TICHLUY_TARGET_DEFAULT)) or TICHLUY_TARGET_DEFAULT)
         accumulated = float(_money_to_float(r.get('Đã tích lũy',0)))
-        # Cột F = Còn lại là nguồn ưu tiên nếu có số hợp lệ; nếu trống / '-' thì suy ra D - E.
-        remaining_raw = str(r.get('Còn lại', '') or '').strip()
-        if remaining_raw and remaining_raw not in {'-', '–', '—'}:
-            remaining = max(0.0, float(_money_to_float(remaining_raw)))
-            # Nếu E đang trống nhưng F có dữ liệu thì suy ngược Đã tích lũy để giữ D/E/F nhất quán.
-            if not str(r.get('Đã tích lũy', '') or '').strip():
-                accumulated = max(0.0, target - remaining)
+        completed_manual = _is_tichluy_completed(
+            r.get('Mục tiêu tích lũy', target), r.get('Đã tích lũy', accumulated), r.get('Còn lại', '')
+        )
+        # Dòng đã hoàn thành do Admin nhập tay được khóa nghiệp vụ: luôn còn lại = 0,
+        # không phụ thuộc F đang để trống, dấu '-' hay số cũ.
+        if completed_manual:
+            remaining = 0.0
         else:
-            remaining = max(0.0, target - accumulated)
+            # Cột F = Còn lại là nguồn ưu tiên nếu có số hợp lệ; nếu trống / '-' thì suy ra D - E.
+            remaining_raw = str(r.get('Còn lại', '') or '').strip()
+            if remaining_raw and remaining_raw not in {'-', '–', '—'}:
+                remaining = max(0.0, float(_money_to_float(remaining_raw)))
+                # Nếu E đang trống nhưng F có dữ liệu thì suy ngược Đã tích lũy để giữ D/E/F nhất quán.
+                if not str(r.get('Đã tích lũy', '') or '').strip():
+                    accumulated = max(0.0, target - remaining)
+            else:
+                remaining = max(0.0, target - accumulated)
         hist = _parse_tichluy_history(r.get('Chi tiết các kỳ',''))
         existing_amount = float(hist.get(period_key, 0))
 
@@ -3605,8 +3631,12 @@ def renumber_credential_sheet_stt(sheet=None):
 
 def sync_tichluy_roles_and_stt(credentials_df=None):
     """
-    TichLuy chỉ giữ nhân sự hợp lệ; xóa letan/locker/tapvu/admin nếu còn dữ liệu cũ,
-    sau đó đánh lại STT ở cột A. Gộp xóa nhiều dòng thành một batch request để giảm quota.
+    Đồng bộ TichLuy với danh sách nhân viên hiện tại nhưng KHÔNG sửa dữ liệu tích lũy đã nhập tay:
+    - chỉ giữ các vai trò được phép tham gia TichLuy;
+    - tự thêm các nhân viên hiện tại còn thiếu vào cuối sheet;
+    - KHÔNG ghi đè D/E/F của bất kỳ dòng đã có;
+    - đặc biệt dòng đã hoàn thành (E >= D > 0) tuyệt đối không bị hệ thống sửa D:I;
+    - cột A được đánh lại từ dòng 2: 1,2,3... theo đúng thứ tự dòng hiện tại.
     """
     try:
         credentials_df = load_credentials() if credentials_df is None else credentials_df
@@ -3614,31 +3644,51 @@ def sync_tichluy_roles_and_stt(credentials_df=None):
         ws, err = _ensure_tichluy_sheet()
         if err or ws is None:
             return False, err or 'Không mở được TichLuy.'
+
         values = _gs_call_with_backoff(ws.get_all_values)
         if not values:
-            return True, 'TichLuy chưa có dữ liệu.'
+            values = [list(TICHLUY_HEADERS)]
         header = values[0]
         pos = _tichluy_header_positions(header)
         name_pos = pos.get('Tên nhân viên')
         if name_pos is None:
             return False, 'TichLuy chưa có cột Tên nhân viên.'
 
+        # Danh sách nhân viên hiện tại cần có trong TichLuy, giữ đúng thứ tự Sheet1.
+        eligible = []
+        eligible_keys = set()
+        if isinstance(credentials_df, pd.DataFrame) and not credentials_df.empty:
+            for _, cr in credentials_df.iterrows():
+                name = str(cr.get('Tên nhân viên', '')).strip()
+                role = str(cr.get('Phân quyền', 'nhanvien')).strip().lower()
+                key = normalize_login_name(name)
+                if not key or role in TICHLUY_EXCLUDED_ROLES:
+                    continue
+                if key in {'ten nhan vien', 'ten he thong', 'username', 'user name'} or key in eligible_keys:
+                    continue
+                eligible.append((name, key))
+                eligible_keys.add(key)
+
+        # Chỉ xóa dòng thuộc tài khoản hiện tại có role bị loại hoặc tên không còn tồn tại.
+        # Không chỉnh D:I ở những dòng được giữ lại.
         delete_sheet_rows = []
-        keep_rows = []
+        existing_keys = set()
+        kept_names = []
         for sheet_row, row in enumerate(values[1:], start=2):
             name = row[name_pos] if name_pos < len(row) else ''
             if not str(name).strip():
                 continue
-            role = role_map.get(normalize_login_name(name))
-            if role is None or role in TICHLUY_EXCLUDED_ROLES:
+            key = normalize_login_name(name)
+            role = role_map.get(key)
+            if key not in eligible_keys or role in TICHLUY_EXCLUDED_ROLES:
                 delete_sheet_rows.append(sheet_row)
             else:
-                keep_rows.append(name)
+                existing_keys.add(key)
+                kept_names.append(str(name).strip())
 
         if delete_sheet_rows:
             client = get_gspread_client()
             ss = client.open_by_key(SHEET_MAT_KHAU_ID)
-            # Xóa từ dưới lên; mỗi request dùng index 0-based [start,end).
             requests = []
             for r in sorted(delete_sheet_rows, reverse=True):
                 requests.append({
@@ -3651,17 +3701,60 @@ def sync_tichluy_roles_and_stt(credentials_df=None):
                 })
             _gs_call_with_backoff(ss.batch_update, {'requests': requests})
 
-        if keep_rows:
-            stt_values = [[i] for i in range(1, len(keep_rows) + 1)]
-            gspread_update_range(ws, f"A2:A{len(keep_rows)+1}", stt_values, value_input_option='USER_ENTERED')
+        # Tự thêm những nhân viên hiện tại còn thiếu. Với nhân sự cũ chưa có ngày vào làm,
+        # để C trống để Admin bổ sung; D/E/F có mặc định và có thể nhập tay nếu đã hoàn thành.
+        missing = [(name, key) for name, key in eligible if key not in existing_keys]
+        if missing:
+            rows_to_append = []
+            for name, key in missing:
+                row = [''] * len(header)
+                defaults = {
+                    'STT': '',
+                    'Tên nhân viên': name,
+                    'Ngày bắt đầu làm': '',
+                    'Mục tiêu tích lũy': TICHLUY_TARGET_DEFAULT,
+                    'Đã tích lũy': 0,
+                    'Còn lại': TICHLUY_TARGET_DEFAULT,
+                    'Kỳ gần nhất': '',
+                    'Số tiền kỳ gần nhất': 0,
+                    'Chi tiết các kỳ': '{}',
+                }
+                for canonical, value in defaults.items():
+                    idx = pos.get(canonical)
+                    if idx is not None and idx < len(row):
+                        row[idx] = value
+                rows_to_append.append(row)
+            # Một request thay vì append_row từng nhân viên để giảm quota.
+            start_row = max(2, len(values) - len(delete_sheet_rows) + 1)
+            end_row = start_row + len(rows_to_append) - 1
+            end_col = gspread.utils.rowcol_to_a1(1, len(header)).rstrip('1')
+            gspread_update_range(ws, f'A{start_row}:{end_col}{end_row}', rows_to_append, value_input_option='USER_ENTERED')
+
+        # Sau xóa/thêm, đọc đúng cột Tên nhân viên và đánh STT A2 = 1,2,3... theo từng dòng thực tế.
+        # Nếu có dòng trống xen giữa thì A của dòng đó để trống; các dòng có tên vẫn chạy số liên tục.
+        # Đây là cột duy nhất hệ thống luôn được phép thay đổi trên các dòng đã hoàn thành.
+        names_after = _gs_call_with_backoff(ws.col_values, name_pos + 1)
+        stt_values = []
+        seq = 0
+        for name in names_after[1:] if len(names_after) > 1 else []:
+            if str(name).strip():
+                seq += 1
+                stt_values.append([seq])
+            else:
+                stt_values.append([''])
+        if stt_values:
+            gspread_update_range(ws, f'A2:A{len(stt_values) + 1}', stt_values, value_input_option='USER_ENTERED')
+
         try:
             load_tichluy_tracking.clear()
         except Exception:
             pass
-        return True, f'Đã cập nhật TichLuy: {len(keep_rows)} nhân viên hợp lệ.'
+        return True, (
+            f'Đã đồng bộ TichLuy: {seq} dòng nhân viên, thêm {len(missing)} người còn thiếu; '
+            'D/E/F của các dòng hiện có được giữ nguyên.'
+        )
     except Exception as e:
-        return False, f'Lỗi đồng bộ STT TichLuy: {e}'
-
+        return False, f'Lỗi đồng bộ STT/TichLuy: {e}'
 
 def ensure_employee_in_tichluy(employee_name, start_work_date=None):
     """Thêm nhân viên vào TichLuy nếu chưa có; ngày bắt đầu = ngày tạo tài khoản."""
@@ -3753,11 +3846,21 @@ def record_tichluy_contributions(payroll_df, start_date, end_date):
         header = values[0]
         pos = _tichluy_header_positions(header)
         rows_by_key = {}
+        role_map = _credential_role_map(load_credentials())
         name_pos = pos.get('Tên nhân viên', 0)
         for r_idx, row in enumerate(values[1:], start=2):
             if name_pos < len(row) and str(row[name_pos]).strip():
                 full_row = list(row) + [''] * max(0, len(header)-len(row))
-                rows_by_key[normalize_login_name(full_row[name_pos])] = (r_idx, full_row[:len(header)])
+                key = normalize_login_name(full_row[name_pos])
+                def _rv(canonical, default=''):
+                    idx = pos.get(canonical)
+                    return full_row[idx] if idx is not None and idx < len(full_row) else default
+                completed_score = 1 if _is_tichluy_completed(
+                    _rv('Mục tiêu tích lũy'), _rv('Đã tích lũy'), _rv('Còn lại')
+                ) else 0
+                score = (completed_score, r_idx)
+                if key not in rows_by_key or score > rows_by_key[key][0]:
+                    rows_by_key[key] = (score, r_idx, full_row[:len(header)])
         period_key = _tichluy_period_key(start_date, end_date)
         updates = []
         created = 0
@@ -3765,6 +3868,9 @@ def record_tichluy_contributions(payroll_df, start_date, end_date):
             name = str(pr.get('Tên Hệ thống','')).strip()
             key = normalize_login_name(name)
             if not key:
+                continue
+            role = role_map.get(key)
+            if role is None or role in TICHLUY_EXCLUDED_ROLES:
                 continue
             amount = max(0.0, float(_money_to_float(pr.get('Tích lũy',0))))
             if key not in rows_by_key:
@@ -3780,12 +3886,16 @@ def record_tichluy_contributions(payroll_df, start_date, end_date):
                 ws.append_row(new_row, value_input_option='USER_ENTERED')
                 created += 1
                 continue
-            r_idx, row = rows_by_key[key]
+            _score, r_idx, row = rows_by_key[key]
             def g(canonical, default=''):
                 i = pos.get(canonical)
                 return row[i] if i is not None and i < len(row) else default
             target = float(_money_to_float(g('Mục tiêu tích lũy')) or TICHLUY_TARGET_DEFAULT)
             current_total = float(_money_to_float(g('Đã tích lũy')))
+            # Admin có thể nhập tay D/E/F cho người đã hoàn thành. Nếu E >= D > 0,
+            # tuyệt đối bỏ qua dòng này: không sửa D/E/F và cũng không sửa G/H/I.
+            if _is_tichluy_completed(g('Mục tiêu tích lũy'), g('Đã tích lũy'), g('Còn lại')):
+                continue
             hist = _parse_tichluy_history(g('Chi tiết các kỳ'))
             old_amount = float(hist.get(period_key, 0))
             amount_to_record = old_amount if old_amount > 0 and amount <= 0 else amount
@@ -4025,6 +4135,10 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
     d = payroll_df.copy()
     creds = credentials_df.copy() if isinstance(credentials_df, pd.DataFrame) else load_credentials()
     leave_df = leave_primary.copy() if isinstance(leave_primary, pd.DataFrame) else load_backup_sheet_data()
+
+    # Khi mở lại/tính lại bảng lương, bổ sung các nhân viên còn thiếu vào TichLuy trước.
+    # D/E/F của các dòng đã có (đặc biệt người đã hoàn thành) không bị thay đổi.
+    sync_tichluy_roles_and_stt(creds)
 
     # Dùng cùng snapshot cấu hình để tránh phát sinh nhiều request Google Sheets.
     default_living, default_locker = get_payroll_default_amounts()
@@ -5544,9 +5658,16 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 penalty_rows = len(leave_primary) if isinstance(leave_primary, pd.DataFrame) else 0
                 status.write(f"✅ Đã tải {penalty_rows:,} dòng lịch nghỉ/vi phạm".replace(",", "."))
 
-                status.write("4/5 · Đang khớp tên nhân viên và tính lương")
-                st.session_state.payroll_process_message = "Đang khớp nhân viên và tính lương..."
+                status.write("4/5 · Đang đồng bộ TichLuy và tính lương")
+                st.session_state.payroll_process_message = "Đang đồng bộ TichLuy và tính lương..."
                 progress.progress(75, text="75% - Đang tính lương")
+                # Bảo đảm mọi nhân viên đủ điều kiện đều có một dòng trong TichLuy trước khi tính.
+                # Đồng bộ chỉ thêm người thiếu + đánh STT; không sửa D/E/F của người đã có.
+                tl_sync_ok, tl_sync_msg = sync_tichluy_roles_and_stt(df_credentials)
+                if tl_sync_ok:
+                    status.write(f"✅ {tl_sync_msg}")
+                else:
+                    status.write(f"⚠️ {tl_sync_msg}")
                 # Tiền phạt chỉ dùng dữ liệu ở Google Sheet 1Kz0...; không lấy nguồn lịch nghỉ thứ hai.
                 payroll_df, unmatched_names = build_payroll_table(
                     src_df, df_credentials, p_start, p_end,

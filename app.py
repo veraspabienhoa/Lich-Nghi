@@ -4673,6 +4673,77 @@ def get_open_negative_payroll_debts():
     return summary, detail
 
 
+
+def get_open_admin_deferred_violation_debts():
+    """
+    Danh sách các nghĩa vụ Vi phạm do Admin chủ động tạm hoãn còn Chưa hoàn thành.
+
+    Chỉ lấy Loại = "Tạm hoãn vi phạm" trong sheet NoViPham.
+    Trả về:
+      summary_df: tổng nghĩa vụ theo nhân viên.
+      detail_df:  chi tiết từng kỳ Admin đã chủ động tạm hoãn.
+    """
+    d = load_violation_debt_ledger().copy()
+    summary_cols = ["Tên nhân viên", "Tổng tạm hoãn", "Số kỳ tạm hoãn", "Kỳ tạm hoãn gần nhất", "Bắt đầu trừ từ"]
+    detail_cols = ["Tên nhân viên", "Số tiền", "Kỳ phát sinh từ", "Kỳ phát sinh đến", "Bắt đầu trừ từ", "Nội dung", "Loại", "Trạng thái"]
+    if d is None or d.empty:
+        return pd.DataFrame(columns=summary_cols), pd.DataFrame(columns=detail_cols)
+
+    rows = []
+    target_type = normalize_login_name('Tạm hoãn vi phạm')
+    for _, r in d.iterrows():
+        debt_type = normalize_login_name(r.get('Loại', ''))
+        if debt_type != target_type:
+            continue
+        if not _is_open_violation_debt_status(r.get('Trạng thái', '')):
+            continue
+        emp = str(r.get('Tên nhân viên', '')).strip()
+        amount = max(0.0, float(_money_to_float(r.get('Số tiền', 0))))
+        if not emp or amount <= 0:
+            continue
+        src_start = _parse_vn_date(r.get('Kỳ phát sinh từ', ''))
+        src_end = _parse_vn_date(r.get('Kỳ phát sinh đến', ''))
+        due_from = _parse_vn_date(r.get('Bắt đầu trừ từ', ''))
+        rows.append({
+            "Tên nhân viên": emp,
+            "Số tiền": int(round(amount)),
+            "Kỳ phát sinh từ": src_start.strftime('%d/%m/%Y') if src_start else str(r.get('Kỳ phát sinh từ', '')).strip(),
+            "Kỳ phát sinh đến": src_end.strftime('%d/%m/%Y') if src_end else str(r.get('Kỳ phát sinh đến', '')).strip(),
+            "Bắt đầu trừ từ": due_from.strftime('%d/%m/%Y') if due_from else str(r.get('Bắt đầu trừ từ', '')).strip(),
+            "Nội dung": str(r.get('Nội dung', '')).strip() or VIOLATION_DEBT_CONTENT,
+            "Loại": str(r.get('Loại', '')).strip() or 'Tạm hoãn vi phạm',
+            "Trạng thái": str(r.get('Trạng thái', '')).strip() or VIOLATION_DEBT_OPEN_STATUS,
+            "__src_start": src_start,
+            "__due_from": due_from,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=summary_cols), pd.DataFrame(columns=detail_cols)
+
+    detail = pd.DataFrame(rows)
+    detail['__sort_src'] = detail['__src_start'].apply(lambda x: x.toordinal() if hasattr(x, 'toordinal') else 99999999)
+    detail = detail.sort_values(['__sort_src', 'Tên nhân viên'], ascending=[True, True]).reset_index(drop=True)
+
+    summary_rows = []
+    for emp, grp in detail.groupby('Tên nhân viên', sort=True):
+        total = int(round(grp['Số tiền'].apply(_money_to_float).sum()))
+        latest = grp.sort_values('__sort_src', ascending=False).iloc[0]
+        due_dates = [x for x in grp['__due_from'].tolist() if hasattr(x, 'strftime')]
+        earliest_due = min(due_dates) if due_dates else None
+        latest_period = f"{latest['Kỳ phát sinh từ']} - {latest['Kỳ phát sinh đến']}"
+        summary_rows.append({
+            'Tên nhân viên': emp,
+            'Tổng tạm hoãn': total,
+            'Số kỳ tạm hoãn': int(len(grp)),
+            'Kỳ tạm hoãn gần nhất': latest_period,
+            'Bắt đầu trừ từ': earliest_due.strftime('%d/%m/%Y') if earliest_due else str(latest.get('Bắt đầu trừ từ', '')).strip(),
+        })
+
+    summary = pd.DataFrame(summary_rows).sort_values(['Tổng tạm hoãn', 'Tên nhân viên'], ascending=[False, True]).reset_index(drop=True)
+    detail = detail.drop(columns=['__src_start', '__due_from', '__sort_src'], errors='ignore')
+    return summary, detail
+
+
 def defer_violation_to_next_period(employee_name, amount, start_date, end_date, updated_by):
     """Admin chuyển một phần/toàn bộ Vi phạm của kỳ hiện tại sang các kỳ kế tiếp."""
     employee_name = str(employee_name).strip()
@@ -6663,12 +6734,14 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
 
     tab_calc, tab_history = st.tabs(["🧮 Tính lương nhân viên", "🗂 Lịch sử bảng lương đã lưu"])
     with tab_calc:
-        # V52: Admin chủ động kiểm tra các khoản nợ Thực nhận âm còn mở của các kỳ trước.
+        # V56: Admin kiểm tra toàn bộ nghĩa vụ Vi phạm còn mở, tách riêng 2 nguồn:
+        # 1) Nợ do Thực nhận âm tự phát sinh khi lưu lương.
+        # 2) Khoản Admin chủ động Tạm hoãn Vi phạm sang kỳ kế tiếp.
         if st.session_state.current_role == "admin":
             _debt_btn_col, _debt_hide_col = st.columns([3, 2])
             with _debt_btn_col:
                 if st.button(
-                    "💳 Kiểm tra nhân viên còn nợ Thực nhận âm kỳ trước",
+                    "💳 Kiểm tra nghĩa vụ Vi phạm còn mở",
                     use_container_width=True,
                     key="admin_check_open_negative_payroll_debts"
                 ):
@@ -6676,7 +6749,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     st.session_state.show_open_negative_payroll_debts = True
             with _debt_hide_col:
                 if st.button(
-                    "✖️ Ẩn danh sách nợ",
+                    "✖️ Ẩn danh sách nghĩa vụ",
                     use_container_width=True,
                     key="admin_hide_open_negative_payroll_debts",
                     disabled=not bool(st.session_state.get('show_open_negative_payroll_debts', False))
@@ -6686,33 +6759,65 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
 
             if st.session_state.get('show_open_negative_payroll_debts', False):
                 _negative_debt_summary, _negative_debt_detail = get_open_negative_payroll_debts()
-                if _negative_debt_summary.empty:
-                    st.success("✅ Hiện không có nhân viên nào còn nợ do Thực nhận âm của các kỳ trước.")
-                else:
-                    _negative_debt_total = int(round(_negative_debt_summary['Tổng còn nợ'].apply(_money_to_float).sum()))
-                    _d1, _d2 = st.columns(2)
-                    _d1.metric("Nhân viên còn nợ", len(_negative_debt_summary))
-                    _d2.metric("Tổng nợ Thực nhận âm", f"{_negative_debt_total:,.0f} đ".replace(',', '.'))
-                    st.caption("Chỉ hiển thị các khoản Loại = Âm thực nhận và Trạng thái = Chưa hoàn thành. Khoản Admin chủ động tạm hoãn Vi phạm không nằm trong danh sách này.")
+                _deferred_debt_summary, _deferred_debt_detail = get_open_admin_deferred_violation_debts()
 
-                    _summary_show = _negative_debt_summary.copy()
-                    _summary_show['Tổng còn nợ'] = _summary_show['Tổng còn nợ'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
-                    st.dataframe(
-                        _summary_show,
-                        hide_index=True,
-                        width="stretch",
-                        height="content"
-                    )
-                    with st.expander("🔎 Xem chi tiết từng kỳ còn nợ", expanded=False):
-                        _detail_show = _negative_debt_detail.copy()
-                        if 'Số tiền' in _detail_show.columns:
-                            _detail_show['Số tiền'] = _detail_show['Số tiền'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
+                if _negative_debt_summary.empty and _deferred_debt_summary.empty:
+                    st.success("✅ Hiện không có Nghĩa vụ Vi phạm nào còn Chưa hoàn thành.")
+                else:
+                    _negative_debt_total = int(round(_negative_debt_summary['Tổng còn nợ'].apply(_money_to_float).sum())) if not _negative_debt_summary.empty else 0
+                    _deferred_debt_total = int(round(_deferred_debt_summary['Tổng tạm hoãn'].apply(_money_to_float).sum())) if not _deferred_debt_summary.empty else 0
+                    _m1, _m2, _m3, _m4 = st.columns(4)
+                    _m1.metric("NV nợ Thực nhận âm", len(_negative_debt_summary))
+                    _m2.metric("Tổng nợ Thực nhận âm", f"{_negative_debt_total:,.0f} đ".replace(',', '.'))
+                    _m3.metric("NV Admin tạm hoãn", len(_deferred_debt_summary))
+                    _m4.metric("Tổng Admin tạm hoãn", f"{_deferred_debt_total:,.0f} đ".replace(',', '.'))
+                    st.caption("Hiển thị riêng hai nhóm nghĩa vụ còn mở: Thực nhận âm tự chuyển kỳ và Vi phạm do Admin chủ động tạm hoãn.")
+
+                    st.markdown("#### 🔴 Nợ do Thực nhận âm")
+                    if _negative_debt_summary.empty:
+                        st.info("Không có nhân viên nào còn nợ do Thực nhận âm.")
+                    else:
+                        _summary_show = _negative_debt_summary.copy()
+                        _summary_show['Tổng còn nợ'] = _summary_show['Tổng còn nợ'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
                         st.dataframe(
-                            _detail_show,
+                            _summary_show,
                             hide_index=True,
                             width="stretch",
                             height="content"
                         )
+                        with st.expander("🔎 Xem chi tiết từng kỳ nợ Thực nhận âm", expanded=False):
+                            _detail_show = _negative_debt_detail.copy()
+                            if 'Số tiền' in _detail_show.columns:
+                                _detail_show['Số tiền'] = _detail_show['Số tiền'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
+                            st.dataframe(
+                                _detail_show,
+                                hide_index=True,
+                                width="stretch",
+                                height="content"
+                            )
+
+                    st.markdown("#### ⏭️ Nghĩa vụ Vi phạm Admin chủ động tạm hoãn")
+                    if _deferred_debt_summary.empty:
+                        st.info("Không có khoản Vi phạm nào do Admin chủ động tạm hoãn đang mở.")
+                    else:
+                        _deferred_summary_show = _deferred_debt_summary.copy()
+                        _deferred_summary_show['Tổng tạm hoãn'] = _deferred_summary_show['Tổng tạm hoãn'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
+                        st.dataframe(
+                            _deferred_summary_show,
+                            hide_index=True,
+                            width="stretch",
+                            height="content"
+                        )
+                        with st.expander("🔎 Xem chi tiết từng kỳ Admin đã tạm hoãn", expanded=False):
+                            _deferred_detail_show = _deferred_debt_detail.copy()
+                            if 'Số tiền' in _deferred_detail_show.columns:
+                                _deferred_detail_show['Số tiền'] = _deferred_detail_show['Số tiền'].apply(lambda x: f"{_money_to_float(x):,.0f}".replace(',', '.'))
+                            st.dataframe(
+                                _deferred_detail_show,
+                                hide_index=True,
+                                width="stretch",
+                                height="content"
+                            )
 
         default_living_db, default_locker_db = get_payroll_default_amounts()
         with st.expander("⚙️ Mức khấu trừ mặc định", expanded=False):

@@ -446,9 +446,9 @@ def send_email_report(sender_email, sender_password, to_email, emp_name, df_emp,
         
         # Thêm style CSS cho bảng HTML
         html_table = df_display.to_html(index=False, justify='center')
-        html_table = html_table.replace('<table border="1" class="dataframe">', '<table style="width:100%; border-collapse: collapse; border: 1px solid #ddd; font-family: Arial, sans-serif;">')
-        html_table = html_table.replace('<th>', '<th style="background-color: #f2f2f2; border: 1px solid #ddd; padding: 8px; text-align: center; white-space: normal; overflow-wrap: anywhere; word-break: break-word;">')
-        html_table = html_table.replace('<td>', '<td style="border: 1px solid #ddd; padding: 8px; text-align: center;">')
+        html_table = html_table.replace('<table border="1" class="dataframe">', '<table style="width:100%; border-collapse: collapse; border: 1px solid #D9D9D9; font-family: Arial, sans-serif;">')
+        html_table = html_table.replace('<th>', '<th style="background-color: #f2f2f2; border: 1px solid #D9D9D9; padding: 8px; text-align: center; white-space: normal; overflow-wrap: anywhere; word-break: break-word;">')
+        html_table = html_table.replace('<td>', '<td style="border: 1px solid #D9D9D9; padding: 8px; text-align: center;">')
         
         html_content = f"""
         <html>
@@ -673,8 +673,9 @@ st.markdown("""
             padding-left: 14px !important;
         }
 
-        /* V63 - BORDER TOÀN HỆ THỐNG: RGB(242,242,242) = #F2F2F2.
-           Áp dụng cho toàn bộ dropdown/select box và đường viền các bảng trên website. */
+        /* V65 - BORDER GIAO DIỆN.
+           Dropdown/select box giữ RGB(242,242,242) = #F2F2F2.
+           Riêng TOÀN BỘ đường viền bảng dùng RGB(217,217,217) = #D9D9D9. */
         [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
         [data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
         div[data-baseweb="select"] > div {
@@ -695,14 +696,14 @@ st.markdown("""
             border-color: #F2F2F2 !important;
         }
 
-        /* HTML tables và các bảng Streamlit/Data Editor. */
+        /* V65 - HTML tables và các bảng Streamlit/Data Editor: border #D9D9D9. */
         table, table th, table td {
-            border-color: #F2F2F2 !important;
+            border-color: #D9D9D9 !important;
         }
         [data-testid="stDataFrame"],
         [data-testid="stDataEditor"],
         [data-testid="stTable"] {
-            border-color: #F2F2F2 !important;
+            border-color: #D9D9D9 !important;
         }
         [data-testid="stDataFrame"] [role="grid"],
         [data-testid="stDataEditor"] [role="grid"],
@@ -710,7 +711,7 @@ st.markdown("""
         [data-testid="stDataEditor"] [role="gridcell"],
         [data-testid="stDataFrame"] [role="columnheader"],
         [data-testid="stDataEditor"] [role="columnheader"] {
-            border-color: #F2F2F2 !important;
+            border-color: #D9D9D9 !important;
         }
 
         /* V62 - NỀN TIÊU ĐỀ/NHÃN TOÀN HỆ THỐNG: RGB(217,217,217) = #D9D9D9.
@@ -6438,23 +6439,23 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
             "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker", "Số tiền thực nhận"
         ]
         html_rows = "".join(
-            f"<tr><td style='padding:6px;border:1px solid #ddd'>{field}</td><td style='padding:6px;border:1px solid #ddd;text-align:right'>{_money_to_float(employee_row.get(field,0)):,.0f} VNĐ</td></tr>"
+            f"<tr><td style='padding:6px;border:1px solid #D9D9D9'>{field}</td><td style='padding:6px;border:1px solid #D9D9D9;text-align:right'>{_money_to_float(employee_row.get(field,0)):,.0f} VNĐ</td></tr>"
             for field in money_fields
         )
         vp_df = violation_details.copy() if isinstance(violation_details, pd.DataFrame) else pd.DataFrame()
         if not vp_df.empty:
             vp_rows = "".join(
-                f"<tr><td style='padding:5px;border:1px solid #ddd'>{str(vr.get('Ngày',''))}</td>"
-                f"<td style='padding:5px;border:1px solid #ddd'>{str(vr.get('Lý do nghỉ',''))}</td>"
-                f"<td style='padding:5px;border:1px solid #ddd'>{str(vr.get('Chi tiết',''))}</td>"
-                f"<td style='padding:5px;border:1px solid #ddd;text-align:right'>{_money_to_float(vr.get('Phạt vi phạm',0)):,.0f} VNĐ</td></tr>"
+                f"<tr><td style='padding:5px;border:1px solid #D9D9D9'>{str(vr.get('Ngày',''))}</td>"
+                f"<td style='padding:5px;border:1px solid #D9D9D9'>{str(vr.get('Lý do nghỉ',''))}</td>"
+                f"<td style='padding:5px;border:1px solid #D9D9D9'>{str(vr.get('Chi tiết',''))}</td>"
+                f"<td style='padding:5px;border:1px solid #D9D9D9;text-align:right'>{_money_to_float(vr.get('Phạt vi phạm',0)):,.0f} VNĐ</td></tr>"
                 for _, vr in vp_df.iterrows()
             )
             vp_total = vp_df['Phạt vi phạm'].apply(_money_to_float).sum() if 'Phạt vi phạm' in vp_df.columns else 0
             violation_html = f"""
             <p><b>Chi tiết vi phạm trong kỳ:</b></p>
             <table style='border-collapse:collapse;min-width:620px'>
-            <tr><th style='padding:6px;border:1px solid #ddd;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Ngày</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Lý do</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Chi tiết</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Phạt</th></tr>
+            <tr><th style='padding:6px;border:1px solid #D9D9D9;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Ngày</th><th style='padding:6px;border:1px solid #D9D9D9;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Lý do</th><th style='padding:6px;border:1px solid #D9D9D9;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Chi tiết</th><th style='padding:6px;border:1px solid #D9D9D9;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Phạt</th></tr>
             {vp_rows}
             </table><p><b>Tổng vi phạm: {vp_total:,.0f} VNĐ</b></p>
             """
@@ -6465,7 +6466,7 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
         <p>Chào <b>{full or emp}</b>,</p>
         <p>VERA SPA gửi bảng lương kỳ từ <b>{start_date.strftime('%d/%m/%Y')}</b> đến <b>{end_date.strftime('%d/%m/%Y')}</b>.</p>
         <table style='border-collapse:collapse;min-width:520px'>
-        <tr><th style='padding:7px;border:1px solid #ddd;background:#A1948C;color:#000;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Khoản mục</th><th style='padding:7px;border:1px solid #ddd;background:#A1948C;color:#000;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Số tiền</th></tr>
+        <tr><th style='padding:7px;border:1px solid #D9D9D9;background:#A1948C;color:#000;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Khoản mục</th><th style='padding:7px;border:1px solid #D9D9D9;background:#A1948C;color:#000;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Số tiền</th></tr>
         {html_rows}
         </table>
         <p><b>Số tiền thực nhận: {_money_to_float(employee_row.get('Số tiền thực nhận',0)):,.0f} VNĐ</b></p>
@@ -7765,7 +7766,7 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                 st.session_state.payroll_process_state, "⚪"
             )
             st.markdown(
-                f"<div style='padding:8px 12px;border:1px solid #d9d9d9;border-radius:8px;"
+                f"<div style='padding:8px 12px;border:1px solid #D9D9D9;border-radius:8px;"
                 f"background:#fafafa;margin:4px 0 8px 0;font-weight:600;'>"
                 f"{state_icon} {st.session_state.payroll_process_message}</div>",
                 unsafe_allow_html=True
@@ -8209,8 +8210,8 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                     {payroll_layout_css}
                     .vera-payroll-wrap{{width:100%;overflow:visible;}}
                     table.vera-payroll-table{{width:100%;table-layout:fixed;border-collapse:collapse;font-size:clamp(8px,.68vw,12px);}}
-                    table.vera-payroll-table th{{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 3px;border:1px solid #c9c9c9;white-space:nowrap!important;overflow-wrap:normal!important;word-break:normal!important;line-height:1.15!important;vertical-align:middle!important;}}
-                    table.vera-payroll-table td{{padding:4px 3px;border:1px solid #dedede;white-space:nowrap!important;word-break:normal!important;vertical-align:middle;}}
+                    table.vera-payroll-table th{{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 3px;border:1px solid #D9D9D9;white-space:nowrap!important;overflow-wrap:normal!important;word-break:normal!important;line-height:1.15!important;vertical-align:middle!important;}}
+                    table.vera-payroll-table td{{padding:4px 3px;border:1px solid #D9D9D9;white-space:nowrap!important;word-break:normal!important;vertical-align:middle;}}
                     table.vera-payroll-table .payroll-violation-value{{line-height:1.05;}}
                     table.vera-payroll-table .payroll-violation-note{{font-size:6px!important;line-height:1.05!important;margin-top:2px;white-space:normal!important;font-weight:400;}}
                     table.vera-payroll-table tbody tr:nth-child(even){{background:#fafafa;}}
@@ -8720,8 +8721,8 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                             "<style>"
                             ".vera-history-preview-wrap{width:100%;overflow-x:auto;margin:4px 0 10px 0;}"
                             "table.vera-history-payroll-preview{width:max-content;min-width:100%;border-collapse:collapse;table-layout:auto;font-size:12px;}"
-                            "table.vera-history-payroll-preview th{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 4px;border:1px solid #c9c9c9;white-space:nowrap!important;overflow-wrap:normal!important;word-break:normal!important;}"
-                            "table.vera-history-payroll-preview td{background:#fff!important;color:#000!important;padding:4px;border:1px solid #dedede;white-space:nowrap!important;word-break:normal!important;}"
+                            "table.vera-history-payroll-preview th{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 4px;border:1px solid #D9D9D9;white-space:nowrap!important;overflow-wrap:normal!important;word-break:normal!important;}"
+                            "table.vera-history-payroll-preview td{background:#fff!important;color:#000!important;padding:4px;border:1px solid #D9D9D9;white-space:nowrap!important;word-break:normal!important;}"
                             "table.vera-history-payroll-preview tbody tr:nth-child(even) td{background:#fafafa!important;}"
                             "table.vera-history-payroll-preview tbody tr.history-nonpositive td{background:#FFF2CC!important;color:#000!important;}"
                             "</style>"

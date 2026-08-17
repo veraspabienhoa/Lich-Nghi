@@ -1,0 +1,24 @@
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*service-account*.json
+*credentials*.json
+*secret*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Temporary / generated
+*.log
+*.tmp
+*.bak

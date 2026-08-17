@@ -4571,8 +4571,31 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
     from openpyxl.worksheet.page import PageMargins
 
     d = recalculate_payroll_net(payroll_df).copy()
-    # V45: File Excel export KHÔNG xuất Email. Cột cuối thay bằng Họ và Tên nhân viên,
-    # lấy từ hồ sơ Sheet1 cột E (đã được nạp vào trường nội bộ "Họ và tên").
+
+    # V46: luôn làm mới Họ và Tên từ hồ sơ Sheet1 cột E trước khi xuất Excel.
+    # Nhờ vậy cả Export trực tiếp và file tổng hợp gửi cho Lễ tân đều dùng cùng
+    # thông tin Họ và Tên mới nhất, kể cả các bản lịch sử cũ chưa lưu trường này.
+    try:
+        _export_creds = load_credentials()
+        if isinstance(_export_creds, pd.DataFrame) and not _export_creds.empty and 'Tên nhân viên' in _export_creds.columns:
+            _fullname_map = {}
+            for _, _cr in _export_creds.iterrows():
+                _k = normalize_login_name(_cr.get('Tên nhân viên', ''))
+                if _k:
+                    _fullname_map[_k] = str(_cr.get('Họ và tên đầy đủ', '')).strip()
+            if 'Họ và tên' not in d.columns:
+                d['Họ và tên'] = ''
+            if 'Tên Hệ thống' in d.columns:
+                for _idx, _rr in d.iterrows():
+                    _k = normalize_login_name(_rr.get('Tên Hệ thống', ''))
+                    _full = _fullname_map.get(_k, '')
+                    if _full:
+                        d.at[_idx, 'Họ và tên'] = _full
+    except Exception:
+        # Nếu Google Sheets tạm thời lỗi, vẫn cho phép export bằng dữ liệu đã có trong bảng lương.
+        pass
+
+    # V45/V46: File Excel export KHÔNG xuất Email. Cột cuối thay bằng Họ và Tên nhân viên.
     export_cols = [
         "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
         "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
@@ -4943,6 +4966,9 @@ def send_payroll_summary_email(sender_email, sender_password, to_email, recipien
         msg['To'] = to_email
         msg['Subject'] = subject
         msg.attach(MIMEText(html, 'html'))
+        # V46: dùng đúng bộ export chuẩn nên file gửi Lễ tân cũng:
+        # - bỏ Email, thay bằng Họ và Tên từ Sheet1 cột E
+        # - tô vàng toàn bộ dòng có Thực nhận <= 0
         attachment = build_payroll_excel_bytes(payroll_df, start_date, end_date)
         part = MIMEApplication(attachment, _subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         part.add_header('Content-Disposition', 'attachment', filename=f"BangLuong_TongHop_{start_date.strftime('%d%m%Y')}_{end_date.strftime('%d%m%Y')}.xlsx")
@@ -6035,9 +6061,31 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             for c in money_web_cols:
                 web_df[c] = web_df[c].apply(lambda v: f"{_money_to_float(v):,.0f}".replace(',', '.'))
             web_df['Số tài khoản ngân hàng'] = web_df['Số tài khoản ngân hàng'].astype(str).str.replace("'", "", regex=False).replace({'nan':'','None':''})
+            # V46: ghi nhớ dòng Thực nhận <= 0 trước khi đổi định dạng/đổi tên cột để
+            # có thể tô vàng toàn bộ dòng trên bảng Thống kê lương nhân viên.
+            _web_non_positive_mask = final_df['Số tiền thực nhận'].apply(_money_to_float).le(0).tolist()
+
             # Chỉ đổi tên cột lúc hiển thị; dữ liệu nội bộ vẫn giữ tên chuẩn để tính toán/lưu lịch sử.
             web_df = web_df.rename(columns={c: PAYROLL_DISPLAY_LABELS.get(c, c) for c in web_df.columns})
             payroll_html = web_df.to_html(index=False, escape=True, classes='vera-payroll-table')
+
+            # Gắn class cho từng <tr> trong <tbody> theo đúng thứ tự dòng.
+            # Không phụ thuộc alternating row color nên dòng <= 0 luôn nổi bật màu vàng.
+            try:
+                _head_html, _body_tail = payroll_html.split('<tbody>', 1)
+                _body_html, _tail_html = _body_tail.split('</tbody>', 1)
+                _row_counter = {'i': 0}
+                def _mark_payroll_non_positive_row(_match):
+                    _i = _row_counter['i']
+                    _row_counter['i'] += 1
+                    if _i < len(_web_non_positive_mask) and _web_non_positive_mask[_i]:
+                        return '<tr class="payroll-nonpositive">'
+                    return '<tr>'
+                _body_html = re.sub(r'<tr>', _mark_payroll_non_positive_row, _body_html)
+                payroll_html = _head_html + '<tbody>' + _body_html + '</tbody>' + _tail_html
+            except Exception:
+                pass
+
             width_total = max(1, sum(int(payroll_web_widths.get(c, 140)) for c in payroll_internal_order))
             colgroup = '<colgroup>' + ''.join(
                 f'<col style="width:{(int(payroll_web_widths.get(c, 140)) / width_total) * 100:.3f}%">'
@@ -6055,6 +6103,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 table.vera-payroll-table th{{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 3px;border:1px solid #c9c9c9;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;line-height:1.15!important;vertical-align:middle!important;}}
                 table.vera-payroll-table td{{padding:4px 3px;border:1px solid #dedede;white-space:normal;word-break:break-word;vertical-align:middle;}}
                 table.vera-payroll-table tbody tr:nth-child(even){{background:#fafafa;}}
+                table.vera-payroll-table tbody tr.payroll-nonpositive td{{background:#FFF2CC!important;}}
                 @media(max-width:800px){{table.vera-payroll-table{{font-size:7px;}}table.vera-payroll-table th,table.vera-payroll-table td{{padding:3px 1px;}}}}
                 </style>""" + f"<div class='vera-payroll-wrap'>{payroll_html}</div>",
                 unsafe_allow_html=True

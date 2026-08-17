@@ -7816,31 +7816,14 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                             disabled=(c in {"Tích lũy", "Vi phạm kỳ trước"})
                         )
 
-                # V57: trong phần Mở lại và chỉnh sửa bản lương, tô vàng toàn bộ dòng
-                # có Thực nhận = 0 hoặc nhỏ hơn 0, giống bảng lương tổng hợp hiện tại.
-                # Dùng Pandas Styler để giữ nguyên khả năng chỉnh sửa của st.data_editor.
-                def _highlight_history_non_positive_row(_row):
-                    try:
-                        _net = _money_to_float(_row.get("Số tiền thực nhận", 0))
-                    except Exception:
-                        _net = 0.0
-                    if _net <= 0:
-                        return ["background-color:#FFF2CC !important;"] * len(_row)
-                    return [""] * len(_row)
-
-                hist_editor_styler = hist_editor_df.style.apply(
-                    _highlight_history_non_positive_row, axis=1
-                )
-                try:
-                    hist_editor_styler = apply_table_visual_styler(
-                        hist_editor_styler, "payroll_history", list(hist_editor_df.columns)
-                    )
-                except Exception:
-                    pass
-
+                # V58: Streamlit chỉ áp dụng Pandas Styler cho các cột KHÔNG chỉnh sửa
+                # trong st.data_editor. Ở V57 việc ép màu bằng !important khiến một số ô
+                # disabled bị render thành màu đen, trong khi các ô editable vẫn không thể
+                # nhận màu theo hàng. Vì vậy editor dùng nền chuẩn để không còn ô đen;
+                # ngay bên dưới sẽ có bảng xem trước tô vàng TOÀN BỘ hàng Thực nhận <= 0.
                 hist_editor_version = int(st.session_state.get(hist_editor_version_key, 0) or 0)
                 edited_hist = st.data_editor(
-                    hist_editor_styler,
+                    hist_editor_df,
                     key=f"payroll_history_editor_{batch}_{hist_editor_version}",
                     width="stretch", height="content", hide_index=True,
                     row_height=layout_row_height("payroll_history"),
@@ -7854,6 +7837,69 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         edited_saved_table[c] = edited_hist[c].values
                 edited_saved_table = recalculate_payroll_net(edited_saved_table)
                 edited_saved_table = _filter_real_payroll_rows(edited_saved_table)
+
+                # V58: Bảng xem trước sau chỉnh sửa. Dùng HTML để bảo đảm TẤT CẢ ô trong
+                # hàng có Thực nhận <= 0 đều nền vàng, không phụ thuộc giới hạn Styler của
+                # st.data_editor và không bị theme tối ghi đè thành màu đen.
+                try:
+                    _hist_preview_cols = [c for c in history_edit_cols if c in edited_saved_table.columns]
+                    _hist_preview = edited_saved_table[_hist_preview_cols].copy()
+                    _hist_non_positive = _hist_preview.get(
+                        "Số tiền thực nhận", pd.Series([0] * len(_hist_preview), index=_hist_preview.index)
+                    ).apply(_money_to_float).le(0).tolist()
+
+                    _hist_money_cols = {
+                        "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
+                        "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương",
+                        "Tiền hỗ trợ Locker", "Số tiền thực nhận"
+                    }
+                    for _c in _hist_preview.columns:
+                        if _c in _hist_money_cols:
+                            _hist_preview[_c] = _hist_preview[_c].apply(
+                                lambda _v: f"{_money_to_float(_v):,.0f}" if _money_to_float(_v) != 0 else "0"
+                            )
+                        elif _c == "TT":
+                            _hist_preview[_c] = pd.to_numeric(_hist_preview[_c], errors="coerce").fillna(0).astype(int)
+                        else:
+                            _hist_preview[_c] = _hist_preview[_c].fillna("").astype(str)
+
+                    _hist_preview = _hist_preview.rename(
+                        columns={c: PAYROLL_DISPLAY_LABELS.get(c, c) for c in _hist_preview.columns}
+                    )
+                    _hist_html = _hist_preview.to_html(
+                        index=False, escape=True, classes="vera-history-payroll-preview"
+                    )
+                    try:
+                        _hh, _hbt = _hist_html.split("<tbody>", 1)
+                        _hb, _ht = _hbt.split("</tbody>", 1)
+                        _hc = {"i": 0}
+                        def _mark_history_nonpositive(_m):
+                            _i = _hc["i"]
+                            _hc["i"] += 1
+                            if _i < len(_hist_non_positive) and _hist_non_positive[_i]:
+                                return '<tr class="history-nonpositive">'
+                            return '<tr>'
+                        _hb = re.sub(r"<tr>", _mark_history_nonpositive, _hb)
+                        _hist_html = _hh + "<tbody>" + _hb + "</tbody>" + _ht
+                    except Exception:
+                        pass
+
+                    st.markdown("**👁 Bảng xem trước sau chỉnh sửa**")
+                    st.markdown(
+                        """
+                        <style>
+                        .vera-history-preview-wrap{width:100%;overflow-x:auto;margin:4px 0 10px 0;}
+                        table.vera-history-payroll-preview{width:100%;border-collapse:collapse;table-layout:auto;font-size:12px;}
+                        table.vera-history-payroll-preview th{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 4px;border:1px solid #c9c9c9;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;}
+                        table.vera-history-payroll-preview td{background:#fff;color:#000;padding:4px;border:1px solid #dedede;white-space:normal;word-break:break-word;}
+                        table.vera-history-payroll-preview tbody tr:nth-child(even) td{background:#fafafa;}
+                        table.vera-history-payroll-preview tbody tr.history-nonpositive td{background:#FFF2CC!important;color:#000!important;}
+                        </style>
+                        """ + f"<div class='vera-history-preview-wrap'>{_hist_html}</div>",
+                        unsafe_allow_html=True,
+                    )
+                except Exception:
+                    pass
 
                 # Hiển thị nhanh tổng sau khi sửa để Admin kiểm tra trước khi ghi đè.
                 h1, h2, h3 = st.columns(3)

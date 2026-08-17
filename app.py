@@ -3959,7 +3959,9 @@ def get_employee_violation_details(employee_name, start_date, end_date, leave_df
             d = d.rename(columns={'Loại nghỉ':'Lý do nghỉ'})
         for c in cols:
             if c not in d.columns: d[c] = ''
-        d['__date'] = pd.to_datetime(d['Ngày'], dayfirst=True, errors='coerce').dt.date
+        # Dùng cùng bộ parse ngày với logic tổng Vi phạm để email/Excel chi tiết
+        # luôn khớp 100% với số tiền trên bảng lương.
+        d['__date'] = d['Ngày'].apply(_parse_vn_date)
         d['__key'] = d['Tên nhân viên'].apply(normalize_login_name)
         d['__penalty'] = d['Phạt vi phạm'].apply(_money_to_float)
         key = normalize_login_name(employee_name)
@@ -4125,21 +4127,61 @@ def resolve_payroll_period(preset, today=None, custom_range=None):
 
 
 def _period_penalty_by_employee(start_date, end_date, leave_primary=None, leave_secondary=None):
-    """Tiền phạt CHỈ lấy từ Google Sheet 1Kz0... (SHEET_DU_PHONG_ID), theo kỳ đang chọn."""
+    """
+    Tiền phạt CHỈ lấy từ Google Sheet 1Kz0... (SHEET_DU_PHONG_ID), theo kỳ đang chọn.
+
+    Quan trọng: parse ngày từng ô bằng _parse_vn_date để hỗ trợ đồng thời
+    dd-mm-yyyy, dd/mm/yyyy, yyyy-mm-dd và Excel/Google Sheets serial date.
+    Cách cũ dùng pd.to_datetime cho cả Series có thể bỏ sót một số dòng khi
+    dữ liệu ngày trong cùng Sheet không đồng nhất định dạng.
+    """
     try:
         d = leave_primary.copy() if isinstance(leave_primary, pd.DataFrame) else load_backup_sheet_data()
         if d is None or d.empty:
             return {}
         if 'Ngày' not in d.columns or 'Tên nhân viên' not in d.columns or 'Phạt vi phạm' not in d.columns:
             return {}
+
         d = d.copy()
-        d['Ngày_DT'] = pd.to_datetime(d['Ngày'], dayfirst=True, errors='coerce').dt.date
-        d['Phạt vi phạm'] = d['Phạt vi phạm'].apply(_money_to_float)
-        d = d[(d['Ngày_DT'] >= start_date) & (d['Ngày_DT'] <= end_date)]
+        d['Ngày_DT'] = d['Ngày'].apply(_parse_vn_date)
+        d['__penalty'] = d['Phạt vi phạm'].apply(_money_to_float)
         d['__key'] = d['Tên nhân viên'].apply(normalize_login_name)
-        return d.groupby('__key')['Phạt vi phạm'].sum().to_dict()
+
+        # Chỉ giữ các dòng ngày hợp lệ, nằm trọn trong kỳ lương (inclusive 2 đầu).
+        d = d[
+            d['Ngày_DT'].notna()
+            & (d['Ngày_DT'] >= start_date)
+            & (d['Ngày_DT'] <= end_date)
+        ].copy()
+        if d.empty:
+            return {}
+
+        # Cộng trực tiếp TẤT CẢ dòng Phạt vi phạm của cùng nhân viên trong kỳ.
+        # Không dedupe theo ngày/lý do vì một nhân viên có thể có nhiều vi phạm cùng ngày.
+        return d.groupby('__key', dropna=False)['__penalty'].sum().to_dict()
     except Exception:
         return {}
+
+
+def get_period_penalty_audit(employee_name, start_date, end_date, leave_primary=None):
+    """Trả chi tiết các dòng phạt đã được cộng cho một nhân viên trong kỳ, không phát sinh thêm API read nếu đã truyền DataFrame."""
+    try:
+        d = leave_primary.copy() if isinstance(leave_primary, pd.DataFrame) else load_backup_sheet_data()
+        if d is None or d.empty:
+            return pd.DataFrame(columns=['Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 'Phạt vi phạm'])
+        for c in ['Ngày','Tên nhân viên','Lý do nghỉ','Chi tiết','Phạt vi phạm']:
+            if c not in d.columns:
+                d[c] = ''
+        d['__date'] = d['Ngày'].apply(_parse_vn_date)
+        d['__key'] = d['Tên nhân viên'].apply(normalize_login_name)
+        d['__penalty'] = d['Phạt vi phạm'].apply(_money_to_float)
+        key = normalize_login_name(employee_name)
+        d = d[(d['__key'] == key) & d['__date'].notna() & (d['__date'] >= start_date) & (d['__date'] <= end_date) & (d['__penalty'] != 0)].copy()
+        d['Ngày'] = d['__date'].apply(lambda x: x.strftime('%d/%m/%Y') if x else '')
+        d['Phạt vi phạm'] = d['__penalty']
+        return d[['Ngày','Tên nhân viên','Lý do nghỉ','Chi tiết','Phạt vi phạm']].reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=['Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 'Phạt vi phạm'])
 
 
 def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_primary=None, leave_secondary=None, default_living_expense=150000, default_locker_support=80000):

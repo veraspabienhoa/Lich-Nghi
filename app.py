@@ -537,6 +537,13 @@ PAYROLL_SOURCE_SHEET_ID = "1WtYsbEAlifL1PZ-nSGBojgL4Bnur-1vF"
 PAYROLL_SOURCE_WORKSHEET = "Báo cáo doanh thu hóa đơn"
 PAYROLL_STORAGE_WORKSHEET = "BangLuong"
 PAYROLL_CONFIG_WORKSHEET = "CauHinhLuong"
+TICHLUY_WORKSHEET = "TichLuy"
+TICHLUY_TARGET_DEFAULT = 5000000
+TICHLUY_PERIOD_DEFAULT = 500000
+TICHLUY_HEADERS = [
+    "Tên nhân viên", "Ngày bắt đầu làm", "Mục tiêu tích lũy", "Đã tích lũy",
+    "Còn lại", "Kỳ gần nhất", "Số tiền kỳ gần nhất", "Chi tiết các kỳ"
+]
 
 @st.cache_resource
 def get_gspread_client():
@@ -606,6 +613,7 @@ def _clear_dynamic_data_caches():
         'load_backup_sheet_data',
         'load_secondary_leave_sheet_data',
         'load_loai_nghi_from_gsheet',
+        'load_tichluy_tracking',
     ):
         try:
             fn = globals().get(fn_name)
@@ -2583,6 +2591,365 @@ def _filter_real_payroll_rows(df):
     return d
 
 
+
+# ==========================================================
+# TÍCH LŨY NHÂN VIÊN
+# ==========================================================
+TICHLUY_HEADER_ALIASES = {
+    "Tên nhân viên": ["Tên nhân viên", "Tên Hệ thống", "Nhân viên", "Username"],
+    "Ngày bắt đầu làm": ["Ngày bắt đầu làm", "Ngày bắt đầu đi làm", "Ngày vào làm", "Ngày bắt đầu"],
+    "Mục tiêu tích lũy": ["Mục tiêu tích lũy", "Mục tiêu", "Tổng cần tích lũy"],
+    "Đã tích lũy": ["Đã tích lũy", "Tích lũy", "Số tiền tích lũy", "Đã đóng"],
+    "Còn lại": ["Còn lại", "Còn phải tích lũy", "Số tiền còn lại"],
+    "Kỳ gần nhất": ["Kỳ gần nhất", "Kỳ đóng gần nhất"],
+    "Số tiền kỳ gần nhất": ["Số tiền kỳ gần nhất", "Tiền kỳ gần nhất"],
+    "Chi tiết các kỳ": ["Chi tiết các kỳ", "Lịch sử kỳ", "Lịch sử tích lũy"],
+}
+
+
+def _tichluy_header_positions(header):
+    """Map tên cột chuẩn -> index 0-based, chấp nhận các tên cột người dùng đã tạo trước đó."""
+    positions = {}
+    normalized = [normalize_login_name(x) for x in (header or [])]
+    for canonical in TICHLUY_HEADERS:
+        aliases = TICHLUY_HEADER_ALIASES.get(canonical, [canonical])
+        alias_keys = {normalize_login_name(x) for x in aliases}
+        for i, key in enumerate(normalized):
+            if key in alias_keys:
+                positions[canonical] = i
+                break
+    return positions
+
+
+@st.cache_resource(show_spinner=False)
+def _ensure_tichluy_sheet():
+    """
+    Lấy/tạo sheet TichLuy. Nếu người dùng đã tạo cột trước đó thì GIỮ NGUYÊN,
+    chỉ bổ sung các cột hệ thống còn thiếu ở bên phải, tránh ghi đè dữ liệu hiện hữu.
+    """
+    client = get_gspread_client()
+    if not client:
+        return None, "Chưa cấu hình quyền Google Sheets."
+    try:
+        ss = client.open_by_key(SHEET_MAT_KHAU_ID)
+        ws = _get_or_create_worksheet(ss, TICHLUY_WORKSHEET, rows=1000, cols=20)
+        header = _gs_call_with_backoff(ws.row_values, 1)
+        if not header or not any(str(x).strip() for x in header):
+            gspread_update_range(ws, "A1:H1", [TICHLUY_HEADERS])
+        else:
+            positions = _tichluy_header_positions(header)
+            missing = [h for h in TICHLUY_HEADERS if h not in positions]
+            if missing:
+                start_col = len(header) + 1
+                # gspread.utils.rowcol_to_a1 có sẵn trong gspread; chỉ cần phần chữ cột.
+                start_a1 = gspread.utils.rowcol_to_a1(1, start_col)
+                end_a1 = gspread.utils.rowcol_to_a1(1, start_col + len(missing) - 1)
+                gspread_update_range(ws, f"{start_a1}:{end_a1}", [missing])
+        return ws, ""
+    except Exception as e:
+        return None, f"Không mở được sheet TichLuy: {e}"
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_tichluy_tracking():
+    """Đọc TichLuy một lần/cache; tự nhận diện vị trí cột để tương thích sheet đã có."""
+    try:
+        ws, err = _ensure_tichluy_sheet()
+        if err or ws is None:
+            return pd.DataFrame(columns=TICHLUY_HEADERS)
+        values = _gs_call_with_backoff(ws.get_all_values)
+        if not values:
+            return pd.DataFrame(columns=TICHLUY_HEADERS)
+        header = values[0]
+        positions = _tichluy_header_positions(header)
+        rows = []
+        for sheet_row, row in enumerate(values[1:], start=2):
+            if not any(str(v).strip() for v in row):
+                continue
+            item = {}
+            for canonical in TICHLUY_HEADERS:
+                pos = positions.get(canonical)
+                item[canonical] = row[pos] if pos is not None and pos < len(row) else ''
+            item['__sheet_row'] = sheet_row
+            rows.append(item)
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=TICHLUY_HEADERS + ['__sheet_row'])
+    except Exception:
+        return pd.DataFrame(columns=TICHLUY_HEADERS + ['__sheet_row'])
+
+
+def _parse_vn_date(value):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or '').strip()
+    if not text or text.casefold() in {'nan','none','nat'}:
+        return None
+    for fmt in ('%d/%m/%Y','%d-%m-%Y','%Y-%m-%d','%d/%m/%y'):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except Exception:
+            pass
+    try:
+        dt = pd.to_datetime(text, dayfirst=True, errors='coerce')
+        return None if pd.isna(dt) else dt.date()
+    except Exception:
+        return None
+
+
+def _tichluy_period_key(start_date, end_date):
+    return f"{start_date.isoformat()}|{end_date.isoformat()}"
+
+
+def _parse_tichluy_history(value):
+    try:
+        data = json.loads(str(value or '{}'))
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): float(_money_to_float(v)) for k, v in data.items()}
+    except Exception:
+        return {}
+
+
+def _first_pay_period_for_start(start_work_date):
+    """Kỳ 1 = 1-15, Kỳ 2 = 16-cuối tháng."""
+    if start_work_date.day <= 15:
+        return date(start_work_date.year, start_work_date.month, 1), date(start_work_date.year, start_work_date.month, 15)
+    last_day = calendar.monthrange(start_work_date.year, start_work_date.month)[1]
+    return date(start_work_date.year, start_work_date.month, 16), date(start_work_date.year, start_work_date.month, last_day)
+
+
+def get_tichluy_charge_map(start_date, end_date, employee_names=None, for_existing_snapshot=False):
+    """
+    Số Tích lũy tự động của kỳ:
+    - mục tiêu mặc định 5.000.000;
+    - mỗi kỳ 500.000, kỳ cuối chỉ thu phần còn thiếu;
+    - kỳ đầu tiên kể từ ngày bắt đầu làm: nếu số ngày từ ngày vào làm đến cuối kỳ < 10 thì không thu;
+    - khi một kỳ đã được ghi nhận trong TichLuy, bảng lương MỚI không thu lại;
+      còn bản lương lịch sử đang sửa giữ đúng số của kỳ đã ghi nhận.
+    """
+    tracking = load_tichluy_tracking()
+    wanted = {normalize_login_name(x) for x in (employee_names or []) if str(x).strip()} if employee_names else None
+    result, info = {}, {}
+    if tracking is None or tracking.empty:
+        return result, info
+    period_key = _tichluy_period_key(start_date, end_date)
+    for _, r in tracking.iterrows():
+        name = str(r.get('Tên nhân viên','')).strip()
+        key = normalize_login_name(name)
+        if not key or (wanted is not None and key not in wanted):
+            continue
+        start_work = _parse_vn_date(r.get('Ngày bắt đầu làm',''))
+        target = float(_money_to_float(r.get('Mục tiêu tích lũy', TICHLUY_TARGET_DEFAULT)) or TICHLUY_TARGET_DEFAULT)
+        accumulated = float(_money_to_float(r.get('Đã tích lũy',0)))
+        remaining = max(0.0, target - accumulated)
+        hist = _parse_tichluy_history(r.get('Chi tiết các kỳ',''))
+        existing_amount = float(hist.get(period_key, 0))
+        charge = 0.0
+        reason = ''
+        if existing_amount > 0:
+            charge = existing_amount if for_existing_snapshot else 0.0
+            reason = 'Kỳ này đã được ghi nhận trước đó.'
+        elif remaining <= 0:
+            reason = 'Đã đủ mục tiêu tích lũy.'
+        elif start_work is None:
+            reason = 'Chưa có Ngày bắt đầu làm trong sheet TichLuy.'
+        elif end_date < start_work:
+            reason = 'Kỳ lương trước ngày bắt đầu làm.'
+        else:
+            first_start, first_end = _first_pay_period_for_start(start_work)
+            is_first_period = not (end_date < first_start or start_date > first_end)
+            first_days = (first_end - start_work).days + 1
+            if is_first_period and first_days < 10:
+                reason = f'Kỳ đầu chỉ có {first_days} ngày kể từ ngày bắt đầu làm (<10 ngày), tạm không thu.'
+            else:
+                charge = min(float(TICHLUY_PERIOD_DEFAULT), remaining)
+                reason = 'Thu tích lũy theo kỳ.'
+        result[key] = float(charge)
+        info[key] = {
+            'name': name, 'start_date': start_work, 'target': target, 'accumulated': accumulated,
+            'remaining': remaining, 'charge': float(charge), 'reason': reason,
+        }
+    return result, info
+
+
+def ensure_employee_in_tichluy(employee_name, start_work_date=None):
+    """Thêm nhân viên vào TichLuy nếu chưa có; ngày bắt đầu = ngày tạo tài khoản."""
+    try:
+        name = str(employee_name or '').strip()
+        if not name:
+            return False, 'Thiếu tên nhân viên.'
+        start_work_date = start_work_date or get_vn_today()
+        ws, err = _ensure_tichluy_sheet()
+        if err or ws is None:
+            return False, err or 'Không mở được TichLuy.'
+        values = _gs_call_with_backoff(ws.get_all_values)
+        header = values[0] if values else list(TICHLUY_HEADERS)
+        pos = _tichluy_header_positions(header)
+        key = normalize_login_name(name)
+        name_pos = pos.get('Tên nhân viên', 0)
+        for row in values[1:] if values else []:
+            if name_pos < len(row) and normalize_login_name(row[name_pos]) == key:
+                return True, 'Nhân viên đã có trong TichLuy.'
+        row = [''] * len(header)
+        defaults = {
+            'Tên nhân viên': name,
+            'Ngày bắt đầu làm': start_work_date.strftime('%d/%m/%Y'),
+            'Mục tiêu tích lũy': TICHLUY_TARGET_DEFAULT,
+            'Đã tích lũy': 0,
+            'Còn lại': TICHLUY_TARGET_DEFAULT,
+            'Kỳ gần nhất': '', 'Số tiền kỳ gần nhất': 0, 'Chi tiết các kỳ': '{}'
+        }
+        for canonical, value in defaults.items():
+            if canonical in pos:
+                row[pos[canonical]] = value
+        ws.append_row(row, value_input_option='USER_ENTERED')
+        try: load_tichluy_tracking.clear()
+        except Exception: pass
+        return True, 'Đã thêm vào TichLuy.'
+    except Exception as e:
+        return False, f'Lỗi thêm TichLuy: {e}'
+
+
+def ensure_employee_in_leave_employee_list(employee_name, start_work_date=None):
+    """
+    Đồng bộ nhân viên mới sang file lịch nghỉ 1Kz0... vào sheet DanhSachNV.
+    Không chèn dòng giả vào Sheet1 A:J vì Sheet1 là dữ liệu lịch nghỉ nghiệp vụ.
+    """
+    try:
+        name = str(employee_name or '').strip()
+        if not name:
+            return False, 'Thiếu tên nhân viên.'
+        start_work_date = start_work_date or get_vn_today()
+        client = get_gspread_client()
+        if not client:
+            return False, 'Chưa cấu hình Google Sheets.'
+        ss = client.open_by_key(SHEET_DU_PHONG_ID)
+        ws = None
+        for title in ('DanhSachNV', 'Danh sách NV', 'NhanVien', 'Nhân viên'):
+            try:
+                ws = ss.worksheet(title)
+                break
+            except Exception:
+                pass
+        if ws is None:
+            ws = ss.add_worksheet(title='DanhSachNV', rows=1000, cols=5)
+        header = _gs_call_with_backoff(ws.row_values, 1)
+        if not header or normalize_login_name(header[0] if header else '') not in {'ten nhan vien','ten he thong'}:
+            gspread_update_range(ws, 'A1:B1', [['Tên nhân viên','Ngày bắt đầu làm']])
+        values = _gs_call_with_backoff(ws.get, 'A:B')
+        key = normalize_login_name(name)
+        for row in values[1:] if values else []:
+            if row and normalize_login_name(row[0]) == key:
+                return True, 'Nhân viên đã có trong DanhSachNV của file lịch nghỉ.'
+        ws.append_row([name, start_work_date.strftime('%d/%m/%Y')], value_input_option='USER_ENTERED')
+        return True, 'Đã thêm vào DanhSachNV của file lịch nghỉ.'
+    except Exception as e:
+        return False, f'Lỗi đồng bộ danh sách nhân viên lịch nghỉ: {e}'
+
+
+def record_tichluy_contributions(payroll_df, start_date, end_date):
+    """Ghi/ghi đè số Tích lũy của kỳ vào TichLuy theo khóa kỳ, tránh cộng trùng khi lưu lại."""
+    try:
+        if payroll_df is None or payroll_df.empty:
+            return True, 'Không có dữ liệu Tích lũy cần cập nhật.'
+        ws, err = _ensure_tichluy_sheet()
+        if err or ws is None:
+            return False, err or 'Không mở được TichLuy.'
+        values = _gs_call_with_backoff(ws.get_all_values)
+        if not values:
+            return False, 'Sheet TichLuy chưa có tiêu đề.'
+        header = values[0]
+        pos = _tichluy_header_positions(header)
+        rows_by_key = {}
+        name_pos = pos.get('Tên nhân viên', 0)
+        for r_idx, row in enumerate(values[1:], start=2):
+            if name_pos < len(row) and str(row[name_pos]).strip():
+                full_row = list(row) + [''] * max(0, len(header)-len(row))
+                rows_by_key[normalize_login_name(full_row[name_pos])] = (r_idx, full_row[:len(header)])
+        period_key = _tichluy_period_key(start_date, end_date)
+        updates = []
+        created = 0
+        for _, pr in payroll_df.iterrows():
+            name = str(pr.get('Tên Hệ thống','')).strip()
+            key = normalize_login_name(name)
+            if not key:
+                continue
+            amount = max(0.0, float(_money_to_float(pr.get('Tích lũy',0))))
+            if key not in rows_by_key:
+                # Dữ liệu cũ thiếu hồ sơ TichLuy: tạo dòng để Admin bổ sung Ngày bắt đầu làm.
+                new_row = [''] * len(header)
+                defaults = {
+                    'Tên nhân viên': name, 'Ngày bắt đầu làm': '', 'Mục tiêu tích lũy': TICHLUY_TARGET_DEFAULT,
+                    'Đã tích lũy': 0, 'Còn lại': TICHLUY_TARGET_DEFAULT, 'Kỳ gần nhất': '',
+                    'Số tiền kỳ gần nhất': 0, 'Chi tiết các kỳ': '{}'
+                }
+                for canonical, value in defaults.items():
+                    if canonical in pos: new_row[pos[canonical]] = value
+                ws.append_row(new_row, value_input_option='USER_ENTERED')
+                created += 1
+                continue
+            r_idx, row = rows_by_key[key]
+            def g(canonical, default=''):
+                i = pos.get(canonical)
+                return row[i] if i is not None and i < len(row) else default
+            target = float(_money_to_float(g('Mục tiêu tích lũy')) or TICHLUY_TARGET_DEFAULT)
+            current_total = float(_money_to_float(g('Đã tích lũy')))
+            hist = _parse_tichluy_history(g('Chi tiết các kỳ'))
+            old_amount = float(hist.get(period_key, 0))
+            amount_to_record = old_amount if old_amount > 0 and amount <= 0 else amount
+            new_total = max(0.0, min(target, current_total - old_amount + amount_to_record))
+            hist[period_key] = float(amount_to_record)
+            remaining = max(0.0, target - new_total)
+            values_to_set = {
+                'Mục tiêu tích lũy': target,
+                'Đã tích lũy': new_total,
+                'Còn lại': remaining,
+                'Kỳ gần nhất': f"{start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}",
+                'Số tiền kỳ gần nhất': amount_to_record,
+                'Chi tiết các kỳ': json.dumps(hist, ensure_ascii=False, separators=(',',':')),
+            }
+            for canonical, value in values_to_set.items():
+                if canonical in pos:
+                    row[pos[canonical]] = value
+            updates.append((r_idx, row[:len(header)]))
+        # Ghi full row để giữ nguyên mọi cột do người dùng tự thêm trong TichLuy.
+        end_col_a1 = gspread.utils.rowcol_to_a1(1, len(header)).rstrip('1')
+        for r_idx, row in updates:
+            gspread_update_range(ws, f'A{r_idx}:{end_col_a1}{r_idx}', [row])
+        try: load_tichluy_tracking.clear()
+        except Exception: pass
+        return True, f'Đã cập nhật Tích lũy cho {len(updates)} nhân viên' + (f'; tạo bổ sung {created} hồ sơ thiếu.' if created else '.')
+    except Exception as e:
+        return False, f'Lỗi cập nhật TichLuy: {e}'
+
+
+def get_employee_violation_details(employee_name, start_date, end_date, leave_df=None):
+    """Chi tiết các dòng có Phạt vi phạm > 0 của một nhân viên trong đúng kỳ lương."""
+    cols = ['Ngày', 'Lý do nghỉ', 'Chi tiết', 'Phạt vi phạm']
+    try:
+        d = leave_df.copy() if isinstance(leave_df, pd.DataFrame) else load_backup_sheet_data()
+        if d is None or d.empty or 'Tên nhân viên' not in d.columns:
+            return pd.DataFrame(columns=cols)
+        d = d.copy()
+        if 'Lý do nghỉ' not in d.columns and 'Loại nghỉ' in d.columns:
+            d = d.rename(columns={'Loại nghỉ':'Lý do nghỉ'})
+        for c in cols:
+            if c not in d.columns: d[c] = ''
+        d['__date'] = pd.to_datetime(d['Ngày'], dayfirst=True, errors='coerce').dt.date
+        d['__key'] = d['Tên nhân viên'].apply(normalize_login_name)
+        d['__penalty'] = d['Phạt vi phạm'].apply(_money_to_float)
+        key = normalize_login_name(employee_name)
+        d = d[(d['__key'] == key) & (d['__date'] >= start_date) & (d['__date'] <= end_date) & (d['__penalty'] > 0)].copy()
+        if d.empty:
+            return pd.DataFrame(columns=cols)
+        d['Ngày'] = d['__date'].apply(lambda x: x.strftime('%d/%m/%Y') if x else '')
+        d['Phạt vi phạm'] = d['__penalty']
+        return d[cols].reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=cols)
+
+
 def _standardize_payroll_source(raw_df):
     """Chuẩn hóa đúng theo quy tắc người dùng: B=Thời gian, F=Loại, G=Tiền, I=Nhân viên."""
     if raw_df is None or raw_df.empty:
@@ -2705,12 +3072,16 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
         'ten nhan vien', 'ten he thong', 'username', 'user name'
     })].copy()
     if 'Phân quyền' in creds.columns:
-        # Không tạo dòng lương cho Admin hoặc Lễ tân.
+        # Không tạo dòng lương cho Admin hoặc Lễ tân. Vai trò Locker vẫn là nhân viên và vẫn có thể có bảng lương.
         roles = creds['Phân quyền'].astype(str).str.strip().str.lower()
         creds = creds[~roles.isin(['admin', 'letan'])]
     creds['__key'] = creds['Tên nhân viên'].apply(normalize_login_name)
     penalty_map = _period_penalty_by_employee(start_date, end_date, leave_primary, leave_secondary)
     employee_overrides = get_payroll_employee_overrides()
+    # Tích lũy tự động lấy từ sheet TichLuy. Bảng lương mới không thu lại một kỳ đã ghi nhận.
+    tichluy_map, _tichluy_info = get_tichluy_charge_map(
+        start_date, end_date, creds['Tên nhân viên'].astype(str).tolist(), for_existing_snapshot=False
+    )
 
     rows = []
     for idx, (_, c) in enumerate(creds.iterrows(), start=1):
@@ -2724,7 +3095,7 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
             "Họ và tên": str(c.get('Họ và tên đầy đủ', '')).strip(),
             "Tiền Lương": float(salary_map.get(k, 0)),
             "Tiền Hỗ Trợ Hoàn Lại": 0.0,
-            "Tích lũy": 0.0,
+            "Tích lũy": float(tichluy_map.get(k, 0)),
             "Chi Phí Sinh Hoạt": float(_money_to_float(emp_living)),
             "Tiền phạt trong tháng": float(penalty_map.get(k, 0)),
             "Tiền ứng lương": 0.0,
@@ -2749,6 +3120,7 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
 
     Tự cập nhật:
     - Tiền phạt trong kỳ từ Google Sheet lịch nghỉ chính 1Kz0...
+    - Tích lũy theo sheet TichLuy và quy tắc kỳ lương
     - Phí Sinh Hoạt / Hỗ trợ Locker theo mức mặc định hoặc mức riêng hiện hành
     - Tài khoản ngân hàng / Tên ngân hàng / Email từ hồ sơ nhân viên
     - Thực nhận sau khi các khoản trên thay đổi
@@ -2767,6 +3139,10 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
     default_living, default_locker = get_payroll_default_amounts()
     overrides = get_payroll_employee_overrides()
     penalty_map = _period_penalty_by_employee(start_date, end_date, leave_df, None)
+    tichluy_map, _ = get_tichluy_charge_map(
+        start_date, end_date, d.get('Tên Hệ thống', pd.Series(dtype=str)).astype(str).tolist(),
+        for_existing_snapshot=True
+    )
 
     cred_map = {}
     if isinstance(creds, pd.DataFrame) and not creds.empty and 'Tên nhân viên' in creds.columns:
@@ -2787,6 +3163,9 @@ def refresh_saved_payroll_from_system(payroll_df, start_date, end_date, credenti
         new_penalty = float(_money_to_float(penalty_map.get(key, 0)))
         if 'Tiền phạt trong tháng' in d.columns:
             d.at[idx, 'Tiền phạt trong tháng'] = new_penalty
+        # Tích lũy của bản lịch sử lấy đúng số kỳ đã ghi nhận; nếu chưa ghi thì tính theo quy tắc hiện tại.
+        if 'Tích lũy' in d.columns:
+            d.at[idx, 'Tích lũy'] = float(_money_to_float(tichluy_map.get(key, d.at[idx, 'Tích lũy'])))
 
         # Mức khấu trừ/hỗ trợ dùng mức riêng nếu có, nếu không dùng mức chung.
         ov = overrides.get(key, {}) if isinstance(overrides, dict) else {}
@@ -2860,11 +3239,15 @@ def save_payroll_snapshot(payroll_df, start_date, end_date, source_label, saved_
             rows.append(row)
         if rows:
             ws_pay.append_rows(rows, value_input_option='USER_ENTERED')
+        tl_ok, tl_msg = record_tichluy_contributions(payroll_df, start_date, end_date)
         try:
             load_payroll_history.clear()
         except Exception:
             pass
-        return True, f"Đã lưu bảng lương {len(rows)} nhân viên vào hệ thống.", batch_id
+        msg = f"Đã lưu bảng lương {len(rows)} nhân viên vào hệ thống."
+        if not tl_ok:
+            msg += f" ⚠️ {tl_msg}"
+        return True, msg, batch_id
     except Exception as e:
         return False, f"Lỗi lưu bảng lương: {e}", ""
 
@@ -2912,11 +3295,15 @@ def overwrite_payroll_snapshot(batch_id, payroll_df, start_date, end_date, sourc
 
         if rows:
             ws_pay.append_rows(rows, value_input_option='USER_ENTERED')
+        tl_ok, tl_msg = record_tichluy_contributions(payroll_df, start_date, end_date)
         try:
             load_payroll_history.clear()
         except Exception:
             pass
-        return True, f"Đã ghi đè cập nhật bản lương {batch_id} cho {len(rows)} nhân viên."
+        msg = f"Đã ghi đè cập nhật bản lương {batch_id} cho {len(rows)} nhân viên."
+        if not tl_ok:
+            msg += f" ⚠️ {tl_msg}"
+        return True, msg
     except Exception as e:
         return False, f"Lỗi ghi đè bảng lương: {e}"
 
@@ -3080,7 +3467,7 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
 
 
 
-def build_employee_payroll_excel_bytes(employee_row, start_date, end_date):
+def build_employee_payroll_excel_bytes(employee_row, start_date, end_date, violation_details=None):
     """Tạo phiếu lương cá nhân theo đúng bố cục nội dung email gửi nhân viên."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -3184,11 +3571,55 @@ def build_employee_payroll_excel_bytes(employee_row, start_date, end_date):
     ws.print_area = f'A1:B{sign_row + 1}'
     ws.sheet_view.zoomScale = 90
 
+    # Sheet chi tiết vi phạm để nhân viên đối chiếu đúng kỳ lương.
+    ws_vp = wb.create_sheet('Chi tiết vi phạm')
+    ws_vp.sheet_view.showGridLines = False
+    vp_headers = ['Ngày', 'Lý do nghỉ', 'Chi tiết', 'Phạt vi phạm']
+    for j, h in enumerate(vp_headers, start=1):
+        c = ws_vp.cell(1, j, h)
+        c.font = Font(name='Arial', size=10, bold=True, color='000000')
+        c.fill = header_fill
+        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        c.border = border
+    vp_df = violation_details.copy() if isinstance(violation_details, pd.DataFrame) else pd.DataFrame(columns=vp_headers)
+    for c in vp_headers:
+        if c not in vp_df.columns: vp_df[c] = ''
+    if vp_df.empty:
+        ws_vp.merge_cells('A2:D2')
+        ws_vp['A2'] = 'Không có vi phạm bị phạt trong kỳ lương này.'
+        ws_vp['A2'].font = Font(name='Arial', size=10, italic=True)
+    else:
+        for i, (_, vr) in enumerate(vp_df[vp_headers].iterrows(), start=2):
+            for j, h in enumerate(vp_headers, start=1):
+                val = float(_money_to_float(vr.get(h,0))) if h == 'Phạt vi phạm' else str(vr.get(h,'') or '')
+                cell = ws_vp.cell(i, j, val)
+                cell.border = border
+                cell.font = Font(name='Arial', size=10)
+                cell.alignment = Alignment(vertical='top', wrap_text=(h in {'Lý do nghỉ','Chi tiết'}))
+                if h == 'Phạt vi phạm':
+                    cell.number_format = '#,##0 "VNĐ"'
+                    cell.alignment = Alignment(horizontal='right', vertical='top')
+        total_r = len(vp_df) + 2
+        ws_vp.cell(total_r, 3, 'TỔNG VI PHẠM').font = Font(name='Arial', size=10, bold=True)
+        ws_vp.cell(total_r, 4, float(vp_df['Phạt vi phạm'].apply(_money_to_float).sum()))
+        ws_vp.cell(total_r, 4).font = Font(name='Arial', size=10, bold=True)
+        ws_vp.cell(total_r, 4).number_format = '#,##0 "VNĐ"'
+    ws_vp.column_dimensions['A'].width = 14
+    ws_vp.column_dimensions['B'].width = 24
+    ws_vp.column_dimensions['C'].width = 42
+    ws_vp.column_dimensions['D'].width = 18
+    ws_vp.freeze_panes = 'A2'
+    ws_vp.page_setup.orientation = ws_vp.ORIENTATION_LANDSCAPE
+    ws_vp.page_setup.paperSize = ws_vp.PAPERSIZE_A4
+    ws_vp.sheet_properties.pageSetUpPr.fitToPage = True
+    ws_vp.page_setup.fitToWidth = 1
+    ws_vp.page_setup.fitToHeight = 0
+
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
 
-def send_payroll_email(sender_email, sender_password, to_email, employee_row, start_date, end_date):
+def send_payroll_email(sender_email, sender_password, to_email, employee_row, start_date, end_date, violation_details=None):
     try:
         emp = str(employee_row.get('Tên Hệ thống',''))
         full = str(employee_row.get('Họ và tên',''))
@@ -3201,6 +3632,25 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
             f"<tr><td style='padding:6px;border:1px solid #ddd'>{field}</td><td style='padding:6px;border:1px solid #ddd;text-align:right'>{_money_to_float(employee_row.get(field,0)):,.0f} VNĐ</td></tr>"
             for field in money_fields
         )
+        vp_df = violation_details.copy() if isinstance(violation_details, pd.DataFrame) else pd.DataFrame()
+        if not vp_df.empty:
+            vp_rows = "".join(
+                f"<tr><td style='padding:5px;border:1px solid #ddd'>{str(vr.get('Ngày',''))}</td>"
+                f"<td style='padding:5px;border:1px solid #ddd'>{str(vr.get('Lý do nghỉ',''))}</td>"
+                f"<td style='padding:5px;border:1px solid #ddd'>{str(vr.get('Chi tiết',''))}</td>"
+                f"<td style='padding:5px;border:1px solid #ddd;text-align:right'>{_money_to_float(vr.get('Phạt vi phạm',0)):,.0f} VNĐ</td></tr>"
+                for _, vr in vp_df.iterrows()
+            )
+            vp_total = vp_df['Phạt vi phạm'].apply(_money_to_float).sum() if 'Phạt vi phạm' in vp_df.columns else 0
+            violation_html = f"""
+            <p><b>Chi tiết vi phạm trong kỳ:</b></p>
+            <table style='border-collapse:collapse;min-width:620px'>
+            <tr><th style='padding:6px;border:1px solid #ddd;background:#A1948C'>Ngày</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C'>Lý do</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C'>Chi tiết</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C'>Phạt</th></tr>
+            {vp_rows}
+            </table><p><b>Tổng vi phạm: {vp_total:,.0f} VNĐ</b></p>
+            """
+        else:
+            violation_html = "<p><b>Chi tiết vi phạm trong kỳ:</b> Không có vi phạm bị phạt.</p>"
         html = f"""
         <html><body style='font-family:Arial,sans-serif'>
         <p>Chào <b>{full or emp}</b>,</p>
@@ -3210,6 +3660,7 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
         {html_rows}
         </table>
         <p><b>Số tiền thực nhận: {_money_to_float(employee_row.get('Số tiền thực nhận',0)):,.0f} VNĐ</b></p>
+        {violation_html}
         <p>Vui lòng kiểm tra và phản hồi nếu có sai sót.</p><p>Trân trọng,<br><b>VERA SPA</b></p>
         </body></html>
         """
@@ -3218,7 +3669,7 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
         msg['To'] = to_email
         msg['Subject'] = subject
         msg.attach(MIMEText(html, 'html'))
-        attachment = build_employee_payroll_excel_bytes(employee_row, start_date, end_date)
+        attachment = build_employee_payroll_excel_bytes(employee_row, start_date, end_date, violation_details)
         part = MIMEApplication(attachment, _subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         part.add_header('Content-Disposition', 'attachment', filename=f"BangLuong_{normalize_login_name(emp).replace(' ','_')}_{start_date.strftime('%d%m%Y')}_{end_date.strftime('%d%m%Y')}.xlsx")
         msg.attach(part)
@@ -3415,6 +3866,9 @@ elif st.session_state.current_role == "letan":
     ]
     if payroll_letan_enabled:
         allowed_pages.insert(1, "💰 Thống kê lương")
+elif st.session_state.current_role == "locker":
+    # Locker chỉ được xem Bảng Tour và tự cập nhật hồ sơ; không hiện các bảng/chức năng đính kèm khác.
+    allowed_pages = ["🧭 Bảng Tour", "👤 Hồ sơ cá nhân"]
 else:
     allowed_pages = [
         "🧭 Bảng Tour", "📅 Đăng ký & Thống kê nghỉ phép", "✏️ Quản lý lịch nghỉ",
@@ -3439,7 +3893,7 @@ def open_app_page(page_name):
     st.rerun()
 
 # Nhân viên vẫn ẩn sidebar; Admin/Lễ tân dùng mỗi chức năng = một nút riêng.
-if st.session_state.current_role == "nhanvien":
+if st.session_state.current_role in ["nhanvien", "locker"]:
     st.markdown("""
         <style>
             [data-testid="collapsedControl"] { display: none !important; }
@@ -3491,7 +3945,7 @@ with col_logout:
         st.rerun()
 
 # Nhân viên: thanh nút điều hướng ngay trên nội dung, phù hợp điện thoại.
-if st.session_state.current_role == "nhanvien":
+if st.session_state.current_role in ["nhanvien", "locker"]:
     nav_cols = st.columns(2)
     for idx, page_name in enumerate(allowed_pages):
         with nav_cols[idx % 2]:
@@ -3625,7 +4079,7 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
         with col1:
             new_usr = st.text_input("Tên đăng nhập (Bắt buộc)")
             new_pwd = st.text_input("Mật khẩu", value="123456")
-            new_role = st.selectbox("Phân quyền", ["nhanvien", "letan", "admin"], filter_mode="contains")
+            new_role = st.selectbox("Phân quyền", ["nhanvien", "locker", "letan", "admin"], filter_mode="contains")
         with col2:
             new_fn = st.text_input("Họ và tên đầy đủ")
             new_phone = st.text_input("Số điện thoại")
@@ -3647,9 +4101,22 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
                         stt_new, new_usr, str(new_pwd), new_role, new_fn, "", new_phone, "", "",
                         new_bank_account, new_bank_name, "0", "0", "0", "", "", "", "", "", ""
                     ]
-                        sheet_mk.append_row(row_data)
+                        sheet_mk.append_row(row_data, value_input_option='USER_ENTERED')
+                        start_work_date = get_vn_today()
+                        if str(new_role).strip().lower() in ['nhanvien', 'locker']:
+                            tl_ok, tl_msg = ensure_employee_in_tichluy(new_usr, start_work_date)
+                            lv_ok, lv_msg = ensure_employee_in_leave_employee_list(new_usr, start_work_date)
+                        else:
+                            tl_ok = lv_ok = True
+                            tl_msg = lv_msg = 'Không áp dụng cho tài khoản quản trị/lễ tân.'
                         _clear_dynamic_data_caches()
-                        st.success(f"Đã thêm thành công: {new_usr}")
+                        if tl_ok and lv_ok:
+                            if str(new_role).strip().lower() in ['nhanvien', 'locker']:
+                                st.success(f"Đã thêm thành công: {new_usr} · Ngày bắt đầu làm {start_work_date.strftime('%d/%m/%Y')} · đã đồng bộ TichLuy và DanhSachNV.")
+                            else:
+                                st.success(f"Đã thêm thành công tài khoản: {new_usr}")
+                        else:
+                            st.warning(f"Đã tạo tài khoản {new_usr}, nhưng có đồng bộ phụ chưa hoàn tất: {tl_msg} | {lv_msg}")
                 except Exception as e:
                     st.error(f"Lỗi: {e}")
             else:
@@ -4040,14 +4507,15 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS["Tên Hệ thống"], disabled=True, width="small"),
                 "Tiền Lương": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền Lương"], format="%.0f", disabled=True, width="small"),
                 "Tiền phạt trong tháng": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền phạt trong tháng"], format="%.0f", disabled=True, width="small"),
+                "Tích lũy": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tích lũy"], format="%.0f", disabled=True, width="small"),
             }
-            for c in PAYROLL_ADJUSTMENT_COLUMNS:
+            for c in [x for x in PAYROLL_ADJUSTMENT_COLUMNS if x != "Tích lũy"]:
                 col_cfg[c] = st.column_config.NumberColumn(
                     PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%.0f", width="small"
                 )
             edited = st.data_editor(
                 editor_df, key="payroll_adjustment_editor", width="stretch", height="content", hide_index=True,
-                column_config=col_cfg, disabled=["TT", "Tên Hệ thống", "Tiền Lương", "Tiền phạt trong tháng"]
+                column_config=col_cfg, disabled=["TT", "Tên Hệ thống", "Tiền Lương", "Tích lũy", "Tiền phạt trong tháng"]
             )
             final_df = current.copy()
             for c in editor_cols:
@@ -4130,9 +4598,15 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         sender_pass = "zvtgbysfmdaqxaau"
                         progress = st.progress(0)
                         ok_count, errors = 0, []
+                        # Chỉ đọc Sheet1 lịch nghỉ một lần rồi lọc theo từng nhân viên, tránh quota 429.
+                        email_leave_df = load_backup_sheet_data()
                         for idx, emp in enumerate(selected_email_emps):
                             row = emailable[emailable['Tên Hệ thống'] == emp].iloc[0]
-                            ok, msg = send_payroll_email(sender_email, sender_pass, str(row['Email']).strip(), row, current_start, current_end)
+                            emp_violations = get_employee_violation_details(emp, current_start, current_end, email_leave_df)
+                            ok, msg = send_payroll_email(
+                                sender_email, sender_pass, str(row['Email']).strip(), row,
+                                current_start, current_end, emp_violations
+                            )
                             if ok: ok_count += 1
                             else: errors.append(f"{emp}: {msg}")
                             progress.progress((idx + 1) / len(selected_email_emps))
@@ -4231,7 +4705,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     except Exception:
                         pass
 
-                # Không hiển thị/tính dòng Lễ tân kể cả với bản lịch sử cũ đã lưu từ V18.
+                # Không hiển thị/tính dòng Lễ tân kể cả với bản lịch sử cũ.
                 try:
                     letan_keys = set(
                         df_credentials.loc[
@@ -4335,7 +4809,8 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 ]:
                     if c in hist_editor_df.columns:
                         hist_col_cfg[c] = st.column_config.NumberColumn(
-                            PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%.0f", width="small"
+                            PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%.0f", width="small",
+                            disabled=(c == "Tích lũy")
                         )
 
                 hist_editor_version = int(st.session_state.get(hist_editor_version_key, 0) or 0)
@@ -4344,7 +4819,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     key=f"payroll_history_editor_{batch}_{hist_editor_version}",
                     width="stretch", height="content", hide_index=True,
                     column_config=hist_col_cfg,
-                    disabled=[c for c in ["TT", "Tên Hệ thống", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"] if c in hist_editor_df.columns]
+                    disabled=[c for c in ["TT", "Tên Hệ thống", "Tích lũy", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"] if c in hist_editor_df.columns]
                 )
 
                 edited_saved_table = saved_table.copy()
@@ -4446,6 +4921,8 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                             sender_pass = "zvtgbysfmdaqxaau"
                             progress_hist_email = st.progress(0)
                             hist_ok_count, hist_errors = 0, []
+                            # Một snapshot lịch vi phạm dùng chung cho toàn bộ email trong lần gửi.
+                            hist_email_leave_df = load_backup_sheet_data()
                             for idx, emp in enumerate(hist_selected_email_emps):
                                 matched_emp = hist_emailable[
                                     hist_emailable['Tên Hệ thống'].astype(str) == str(emp)
@@ -4455,8 +4932,9 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                                 else:
                                     row = matched_emp.iloc[0]
                                     to_email = str(row.get('Email', '')).strip()
+                                    emp_violations = get_employee_violation_details(emp, hs, he, hist_email_leave_df)
                                     ok, msg = send_payroll_email(
-                                        sender_email, sender_pass, to_email, row, hs, he
+                                        sender_email, sender_pass, to_email, row, hs, he, emp_violations
                                     )
                                     if ok:
                                         hist_ok_count += 1

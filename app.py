@@ -691,9 +691,14 @@ TICHLUY_WORKSHEET = "TichLuy"
 TICHLUY_TARGET_DEFAULT = 5000000
 TICHLUY_PERIOD_DEFAULT = 500000
 TICHLUY_HEADERS = [
-    "Tên nhân viên", "Ngày bắt đầu làm", "Mục tiêu tích lũy", "Đã tích lũy",
+    "STT", "Tên nhân viên", "Ngày bắt đầu làm", "Mục tiêu tích lũy", "Đã tích lũy",
     "Còn lại", "Kỳ gần nhất", "Số tiền kỳ gần nhất", "Chi tiết các kỳ"
 ]
+
+# Các bộ phận không tham gia đăng ký lịch nghỉ / Tích lũy.
+LEAVE_EXCLUDED_ROLES = {"letan", "locker", "tapvu"}
+TICHLUY_EXCLUDED_ROLES = {"admin", "letan", "locker", "tapvu"}
+FRONTDESK_ROLES = {"letan", "quanly"}
 
 @st.cache_resource
 def get_gspread_client():
@@ -2918,6 +2923,7 @@ def _filter_real_payroll_rows(df):
 # TÍCH LŨY NHÂN VIÊN
 # ==========================================================
 TICHLUY_HEADER_ALIASES = {
+    "STT": ["STT", "TT", "Thứ tự", "Số thứ tự"],
     "Tên nhân viên": ["Tên nhân viên", "Tên Hệ thống", "Nhân viên", "Username"],
     "Ngày bắt đầu làm": ["Ngày bắt đầu làm", "Ngày bắt đầu đi làm", "Ngày vào làm", "Ngày bắt đầu"],
     "Mục tiêu tích lũy": ["Mục tiêu tích lũy", "Mục tiêu", "Tổng cần tích lũy"],
@@ -2957,13 +2963,35 @@ def _ensure_tichluy_sheet():
         ws = _get_or_create_worksheet(ss, TICHLUY_WORKSHEET, rows=1000, cols=20)
         header = _gs_call_with_backoff(ws.row_values, 1)
         if not header or not any(str(x).strip() for x in header):
-            gspread_update_range(ws, "A1:H1", [TICHLUY_HEADERS])
+            gspread_update_range(ws, "A1:I1", [TICHLUY_HEADERS])
         else:
             positions = _tichluy_header_positions(header)
+            # STT luôn ở cột A. Nếu sheet cũ chưa có STT, chèn một cột mới ở đầu
+            # để KHÔNG ghi đè / làm mất cột Tên nhân viên hiện có.
+            if "STT" not in positions or positions.get("STT") != 0:
+                try:
+                    _gs_call_with_backoff(ss.batch_update, {
+                        "requests": [{
+                            "insertDimension": {
+                                "range": {
+                                    "sheetId": ws.id, "dimension": "COLUMNS",
+                                    "startIndex": 0, "endIndex": 1
+                                },
+                                "inheritFromBefore": False
+                            }
+                        }]
+                    })
+                    gspread_update_range(ws, "A1:A1", [["STT"]])
+                    header = ["STT"] + list(header)
+                except Exception:
+                    # Fallback tương thích gspread cũ.
+                    _gs_call_with_backoff(ws.insert_cols, [["STT"]], col=1)
+                    header = ["STT"] + list(header)
+                positions = _tichluy_header_positions(header)
+
             missing = [h for h in TICHLUY_HEADERS if h not in positions]
             if missing:
                 start_col = len(header) + 1
-                # gspread.utils.rowcol_to_a1 có sẵn trong gspread; chỉ cần phần chữ cột.
                 start_a1 = gspread.utils.rowcol_to_a1(1, start_col)
                 end_a1 = gspread.utils.rowcol_to_a1(1, start_col + len(missing) - 1)
                 gspread_update_range(ws, f"{start_a1}:{end_a1}", [missing])
@@ -2985,6 +3013,9 @@ def load_tichluy_tracking():
         header = values[0]
         positions = _tichluy_header_positions(header)
         rows = []
+        # Dùng cache tài khoản hiện có để ẩn hoàn toàn letan/locker/tapvu/admin khỏi
+        # nghiệp vụ TichLuy, kể cả khi sheet cũ vẫn còn dòng từ phiên bản trước.
+        role_map = _credential_role_map(load_credentials())
         for sheet_row, row in enumerate(values[1:], start=2):
             if not any(str(v).strip() for v in row):
                 continue
@@ -2992,6 +3023,10 @@ def load_tichluy_tracking():
             for canonical in TICHLUY_HEADERS:
                 pos = positions.get(canonical)
                 item[canonical] = row[pos] if pos is not None and pos < len(row) else ''
+            emp_key = normalize_login_name(item.get('Tên nhân viên', ''))
+            emp_role = role_map.get(emp_key, 'nhanvien')
+            if emp_role in TICHLUY_EXCLUDED_ROLES:
+                continue
             item['__sheet_row'] = sheet_row
             rows.append(item)
         return pd.DataFrame(rows) if rows else pd.DataFrame(columns=TICHLUY_HEADERS + ['__sheet_row'])
@@ -3095,6 +3130,128 @@ def get_tichluy_charge_map(start_date, end_date, employee_names=None, for_existi
     return result, info
 
 
+
+def _credential_role_map(credentials_df=None):
+    """Tên đăng nhập chuẩn hóa -> vai trò, dùng chung để lọc danh sách nghiệp vụ."""
+    credentials_df = load_credentials() if credentials_df is None else credentials_df
+    result = {}
+    if credentials_df is None or credentials_df.empty:
+        return result
+    for _, r in credentials_df.iterrows():
+        key = normalize_login_name(r.get('Tên nhân viên', ''))
+        if key:
+            result[key] = str(r.get('Phân quyền', 'nhanvien')).strip().lower()
+    return result
+
+
+def get_leave_eligible_employee_names(credentials_df, excel_df=None):
+    """Danh sách đăng ký nghỉ: ẩn letan, locker, tapvu kể cả khi tên còn nằm trong file Excel cũ."""
+    role_map = _credential_role_map(credentials_df)
+    excluded_names = {k for k, role in role_map.items() if role in LEAVE_EXCLUDED_ROLES}
+    names = []
+    if credentials_df is not None and not credentials_df.empty and 'Tên nhân viên' in credentials_df.columns:
+        for _, r in credentials_df.iterrows():
+            name = str(r.get('Tên nhân viên', '')).strip()
+            role = str(r.get('Phân quyền', 'nhanvien')).strip().lower()
+            if name and role not in LEAVE_EXCLUDED_ROLES:
+                names.append(name)
+    if excel_df is not None and not excel_df.empty and 'Tên nhân viên' in excel_df.columns:
+        for name in excel_df['Tên nhân viên'].dropna().astype(str).str.strip().tolist():
+            if name and normalize_login_name(name) not in excluded_names:
+                names.append(name)
+    # Giữ tên hiển thị gốc nhưng loại trùng theo chuẩn hóa.
+    by_key = {}
+    for name in names:
+        by_key.setdefault(normalize_login_name(name), name)
+    return sorted(by_key.values(), key=lambda x: normalize_login_name(x))
+
+
+def renumber_credential_sheet_stt(sheet=None):
+    """Đánh lại STT cột A của Sheet1 theo các tài khoản có tên ở cột B, chỉ 1 read + 1 write."""
+    try:
+        if sheet is None:
+            client = get_gspread_client()
+            if not client:
+                return False, 'Chưa cấu hình Google Sheets.'
+            sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
+        names = _gs_call_with_backoff(sheet.col_values, 2)
+        if len(names) <= 1:
+            return True, 'Sheet1 chưa có nhân viên để đánh STT.'
+        seq = 0
+        values = []
+        for name in names[1:]:
+            if str(name).strip():
+                seq += 1
+                values.append([seq])
+            else:
+                values.append([''])
+        if values:
+            gspread_update_range(sheet, f"A2:A{len(values)+1}", values, value_input_option='USER_ENTERED')
+        return True, f'Đã sắp xếp lại STT Sheet1: {seq} tài khoản.'
+    except Exception as e:
+        return False, f'Lỗi đánh STT Sheet1: {e}'
+
+
+def sync_tichluy_roles_and_stt(credentials_df=None):
+    """
+    TichLuy chỉ giữ nhân sự hợp lệ; xóa letan/locker/tapvu/admin nếu còn dữ liệu cũ,
+    sau đó đánh lại STT ở cột A. Gộp xóa nhiều dòng thành một batch request để giảm quota.
+    """
+    try:
+        credentials_df = load_credentials() if credentials_df is None else credentials_df
+        role_map = _credential_role_map(credentials_df)
+        ws, err = _ensure_tichluy_sheet()
+        if err or ws is None:
+            return False, err or 'Không mở được TichLuy.'
+        values = _gs_call_with_backoff(ws.get_all_values)
+        if not values:
+            return True, 'TichLuy chưa có dữ liệu.'
+        header = values[0]
+        pos = _tichluy_header_positions(header)
+        name_pos = pos.get('Tên nhân viên')
+        if name_pos is None:
+            return False, 'TichLuy chưa có cột Tên nhân viên.'
+
+        delete_sheet_rows = []
+        keep_rows = []
+        for sheet_row, row in enumerate(values[1:], start=2):
+            name = row[name_pos] if name_pos < len(row) else ''
+            if not str(name).strip():
+                continue
+            role = role_map.get(normalize_login_name(name))
+            if role is None or role in TICHLUY_EXCLUDED_ROLES:
+                delete_sheet_rows.append(sheet_row)
+            else:
+                keep_rows.append(name)
+
+        if delete_sheet_rows:
+            client = get_gspread_client()
+            ss = client.open_by_key(SHEET_MAT_KHAU_ID)
+            # Xóa từ dưới lên; mỗi request dùng index 0-based [start,end).
+            requests = []
+            for r in sorted(delete_sheet_rows, reverse=True):
+                requests.append({
+                    'deleteDimension': {
+                        'range': {
+                            'sheetId': ws.id, 'dimension': 'ROWS',
+                            'startIndex': r - 1, 'endIndex': r
+                        }
+                    }
+                })
+            _gs_call_with_backoff(ss.batch_update, {'requests': requests})
+
+        if keep_rows:
+            stt_values = [[i] for i in range(1, len(keep_rows) + 1)]
+            gspread_update_range(ws, f"A2:A{len(keep_rows)+1}", stt_values, value_input_option='USER_ENTERED')
+        try:
+            load_tichluy_tracking.clear()
+        except Exception:
+            pass
+        return True, f'Đã cập nhật TichLuy: {len(keep_rows)} nhân viên hợp lệ.'
+    except Exception as e:
+        return False, f'Lỗi đồng bộ STT TichLuy: {e}'
+
+
 def ensure_employee_in_tichluy(employee_name, start_work_date=None):
     """Thêm nhân viên vào TichLuy nếu chưa có; ngày bắt đầu = ngày tạo tài khoản."""
     try:
@@ -3115,6 +3272,7 @@ def ensure_employee_in_tichluy(employee_name, start_work_date=None):
                 return True, 'Nhân viên đã có trong TichLuy.'
         row = [''] * len(header)
         defaults = {
+            'STT': '',
             'Tên nhân viên': name,
             'Ngày bắt đầu làm': start_work_date.strftime('%d/%m/%Y'),
             'Mục tiêu tích lũy': TICHLUY_TARGET_DEFAULT,
@@ -3396,7 +3554,7 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
     if 'Phân quyền' in creds.columns:
         # Không tạo dòng lương cho Admin hoặc Lễ tân. Vai trò Locker vẫn là nhân viên và vẫn có thể có bảng lương.
         roles = creds['Phân quyền'].astype(str).str.strip().str.lower()
-        creds = creds[~roles.isin(['admin', 'letan'])]
+        creds = creds[~roles.isin(['admin', 'letan', 'quanly'])]
     creds['__key'] = creds['Tên nhân viên'].apply(normalize_login_name)
     penalty_map = _period_penalty_by_employee(start_date, end_date, leave_primary, leave_secondary)
     employee_overrides = get_payroll_employee_overrides()
@@ -4150,10 +4308,38 @@ if not st.session_state.logged_in:
     st.stop()
 
 
+# Vai trò tạp vụ không được hiển thị bất kỳ dữ liệu/chức năng nghiệp vụ nào.
+# Chỉ giữ nút Đăng xuất để tài khoản không bị kẹt phiên đăng nhập.
+if st.session_state.current_role == "tapvu":
+    st.markdown("""
+        <style>
+            [data-testid="collapsedControl"] { display: none !important; }
+            [data-testid="stSidebar"] { display: none !important; }
+            .custom-main-title { display: none !important; }
+        </style>
+    """, unsafe_allow_html=True)
+    _blank1, _blank2, _logout_col = st.columns([6, 2, 2])
+    with _logout_col:
+        if st.button("🚪 Đăng xuất", use_container_width=True, key="tapvu_logout"):
+            if st.session_state.current_user and st.session_state.current_user != "Quản Trị Viên":
+                revoke_remember_token(st.session_state.current_user)
+            st.session_state.logged_in = False
+            st.session_state.current_user = ""
+            st.session_state.current_role = ""
+            st.session_state.pop("app_page", None)
+            st.query_params['forget_login'] = '1'
+            try: del st.query_params['remember_token']
+            except Exception: pass
+            try: del st.query_params['page']
+            except Exception: pass
+            st.rerun()
+    st.stop()
+
+
 # ==========================================
 # ĐIỀU HƯỚNG THEO TỪNG TRANG CHỨC NĂNG
 # ==========================================
-is_admin_letan = st.session_state.current_role in ["admin", "letan"]
+is_admin_letan = st.session_state.current_role in ["admin", "letan", "quanly"]
 
 PAGE_SLUGS = {
     "🧭 Bảng Tour": "bang-tour",
@@ -4181,7 +4367,7 @@ if st.session_state.current_role == "admin":
         "✏️ Sửa / Xóa nhân viên", "🔒 Khóa đăng nhập", "🔐 Khóa quyền đăng ký",
         "🔄 Đồng bộ dữ liệu", "⚙️ Cấu hình cột"
     ]
-elif st.session_state.current_role == "letan":
+elif st.session_state.current_role in ["letan", "quanly"]:
     allowed_pages = [
         "🧭 Bảng Tour", "📅 Đăng ký & Thống kê nghỉ phép", "✏️ Quản lý lịch nghỉ",
         "⏰ Thiết lập ca làm việc", "👥 Danh sách nhân sự", "➕ Thêm nhân viên",
@@ -4215,7 +4401,7 @@ def open_app_page(page_name):
     st.query_params["page"] = PAGE_SLUGS[page_name]
     st.rerun()
 
-# Nhân viên vẫn ẩn sidebar; Admin/Lễ tân dùng mỗi chức năng = một nút riêng.
+# Nhân viên vẫn ẩn sidebar; Admin/Lễ tân/Quản lý dùng mỗi chức năng = một nút riêng.
 if st.session_state.current_role in ["nhanvien", "locker"]:
     st.markdown("""
         <style>
@@ -4464,7 +4650,7 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
     with col1:
         new_usr = st.text_input("Tên đăng nhập (Bắt buộc)", key="new_emp_username")
         new_pwd = st.text_input("Mật khẩu", value="123456", key="new_emp_password")
-        new_role = st.selectbox("Phân quyền", ["nhanvien", "locker", "letan", "admin"], filter_mode="contains", key="new_emp_role")
+        new_role = st.selectbox("Phân quyền", ["nhanvien", "quanly", "locker", "tapvu", "letan", "admin"], filter_mode="contains", key="new_emp_role")
         new_fn = st.text_input("Họ và tên đầy đủ", key="new_emp_fullname")
         new_phone = st.text_input("Số điện thoại", key="new_emp_phone")
         new_email = st.text_input("Email", key="new_emp_email")
@@ -4491,20 +4677,31 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
                     ]
                     _gs_call_with_backoff(sheet_mk.append_row, row_data, value_input_option='USER_ENTERED')
                     start_work_date = get_vn_today()
-                    if str(new_role).strip().lower() in ['nhanvien', 'locker']:
+                    role_new = str(new_role).strip().lower()
+                    # Chỉ nhanvien/quanly tham gia TichLuy. Letan/locker/tapvu không xuất hiện ở TichLuy.
+                    if role_new not in TICHLUY_EXCLUDED_ROLES:
                         tl_ok, tl_msg = ensure_employee_in_tichluy(new_usr, start_work_date)
-                        lv_ok, lv_msg = ensure_employee_in_leave_employee_list(new_usr, start_work_date)
                     else:
-                        tl_ok = lv_ok = True
-                        tl_msg = lv_msg = 'Không áp dụng cho tài khoản quản trị/lễ tân.'
+                        tl_ok, tl_msg = True, 'Vai trò này không tham gia TichLuy.'
+
+                    # KHÔNG đồng bộ nhân viên mới sang file 1Kz0... theo yêu cầu mới.
+                    # Sau khi thêm phải đánh lại STT cột A của Sheet1 và TichLuy.
+                    stt_ok, stt_msg = renumber_credential_sheet_stt(sheet_mk)
+                    try:
+                        load_credentials.clear()
+                    except Exception:
+                        pass
+                    tl_sync_ok, tl_sync_msg = sync_tichluy_roles_and_stt()
                     _clear_dynamic_data_caches()
-                    if tl_ok and lv_ok:
-                        if str(new_role).strip().lower() in ['nhanvien', 'locker']:
-                            st.success(f"Đã thêm thành công: {new_usr} · Ngày bắt đầu làm {start_work_date.strftime('%d/%m/%Y')} · đã đồng bộ TichLuy và DanhSachNV.")
-                        else:
-                            st.success(f"Đã thêm thành công tài khoản: {new_usr}")
+
+                    if tl_ok and stt_ok and tl_sync_ok:
+                        extra = f" · Ngày bắt đầu làm {start_work_date.strftime('%d/%m/%Y')}" if role_new not in TICHLUY_EXCLUDED_ROLES else ""
+                        st.success(f"Đã thêm thành công: {new_usr}{extra} · đã sắp xếp lại STT Sheet1/TichLuy.")
                     else:
-                        st.warning(f"Đã tạo tài khoản {new_usr}, nhưng có đồng bộ phụ chưa hoàn tất: {tl_msg} | {lv_msg}")
+                        st.warning(
+                            f"Đã tạo tài khoản {new_usr}, nhưng có bước phụ chưa hoàn tất: "
+                            f"{tl_msg} | {stt_msg} | {tl_sync_msg}"
+                        )
             except Exception as e:
                 st.error(f"Lỗi: {e}")
         else:
@@ -4526,8 +4723,14 @@ elif selected_page == "✏️ Sửa / Xóa nhân viên" and is_admin_letan:
                     cells = sheet_mk.findall(del_usr, in_column=2)
                     if cells:
                         sheet_mk.delete_rows(cells[0].row)
+                        renumber_credential_sheet_stt(sheet_mk)
+                        try:
+                            load_credentials.clear()
+                        except Exception:
+                            pass
+                        sync_tichluy_roles_and_stt()
                         _clear_dynamic_data_caches()
-                        st.success(f"Đã xóa nhân viên: {del_usr}")
+                        st.success(f"Đã xóa nhân viên: {del_usr} · đã sắp xếp lại STT Sheet1/TichLuy.")
                         st.rerun()
                 except Exception as e:
                     st.error(f"Lỗi xóa: {e}")
@@ -4552,7 +4755,7 @@ elif selected_page == "✏️ Sửa / Xóa nhân viên" and is_admin_letan:
                     (st.success if ok else st.error)(msg)
                     if ok: st.rerun()
         else:
-            st.info("Lễ tân được phép xóa theo quyền hiện tại; chỉnh sửa chi tiết hồ sơ chỉ dành cho Admin.")
+            st.info("Lễ tân/Quản lý được phép xóa theo quyền hiện tại; chỉnh sửa chi tiết hồ sơ chỉ dành cho Admin.")
 
 elif selected_page == "🔒 Khóa đăng nhập" and st.session_state.current_role == "admin":
     st.markdown("### 🔒 Khóa / mở khóa đăng nhập")
@@ -4629,7 +4832,7 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and st.session_state.curre
             else:
                 st.info("Excel gốc đã có đủ dữ liệu, không có dòng mới.")
 
-elif selected_page == "💰 Thống kê lương" and (st.session_state.current_role == "admin" or (st.session_state.current_role == "letan" and payroll_letan_enabled)):
+elif selected_page == "💰 Thống kê lương" and (st.session_state.current_role == "admin" or (st.session_state.current_role in ["letan", "quanly"] and payroll_letan_enabled)):
     st.subheader("💰 Thống kê lương nhân viên")
     st.caption("Tiền Lương được tính theo đúng quy tắc: cột F bắt đầu bằng 'Tip' → cộng cột G theo tên nhân viên ở cột I.")
 
@@ -4665,7 +4868,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 })]
                 if 'Phân quyền' in payroll_emp_choices_df.columns:
                     _pay_roles = payroll_emp_choices_df['Phân quyền'].astype(str).str.strip().str.lower()
-                    payroll_emp_choices_df = payroll_emp_choices_df[~_pay_roles.isin(['admin', 'letan'])]
+                    payroll_emp_choices_df = payroll_emp_choices_df[~_pay_roles.isin(['admin', 'letan', 'quanly'])]
                 payroll_employee_options = payroll_emp_choices_df['Tên nhân viên'].astype(str).str.strip().drop_duplicates().tolist()
             else:
                 payroll_employee_options = []
@@ -5019,7 +5222,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     letan_df = df_credentials.copy()
                     if not letan_df.empty and 'Phân quyền' in letan_df.columns:
                         letan_df = letan_df[
-                            letan_df['Phân quyền'].astype(str).str.strip().str.lower().eq('letan')
+                            letan_df['Phân quyền'].astype(str).str.strip().str.lower().isin(['letan', 'quanly'])
                         ].copy()
                         if 'Tên nhân viên' in letan_df.columns:
                             letan_df = letan_df[
@@ -5107,7 +5310,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 try:
                     letan_keys = set(
                         df_credentials.loc[
-                            df_credentials['Phân quyền'].astype(str).str.strip().str.lower().eq('letan'), 'Tên nhân viên'
+                            df_credentials['Phân quyền'].astype(str).str.strip().str.lower().isin(['letan', 'quanly']), 'Tên nhân viên'
                         ].apply(normalize_login_name).tolist()
                     )
                     if 'Tên Hệ thống' in saved_table.columns and letan_keys:
@@ -5280,7 +5483,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         st.warning(f"Không tạo được file export lịch sử: {e}")
 
                 # --- GỬI EMAIL TỪ BẢN LƯƠNG ĐANG MỞ / ĐANG CHỈNH SỬA ---
-                # Dùng trực tiếp edited_saved_table để email phản ánh đúng số liệu Admin/Lễ tân
+                # Dùng trực tiếp edited_saved_table để email phản ánh đúng số liệu Admin/Lễ tân/Quản lý
                 # đang nhìn thấy trên màn hình, kể cả trước khi bấm Ghi đè.
                 with st.expander("📧 GỬI BẢNG LƯƠNG QUA EMAIL (BẢN ĐANG CHỈNH SỬA)"):
                     st.caption(
@@ -5355,7 +5558,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         hist_letan_df = df_credentials.copy()
                         if not hist_letan_df.empty and 'Phân quyền' in hist_letan_df.columns:
                             hist_letan_df = hist_letan_df[
-                                hist_letan_df['Phân quyền'].astype(str).str.strip().str.lower().eq('letan')
+                                hist_letan_df['Phân quyền'].astype(str).str.strip().str.lower().isin(['letan', 'quanly'])
                             ].copy()
                             if 'Tên nhân viên' in hist_letan_df.columns:
                                 hist_letan_df = hist_letan_df[
@@ -5499,9 +5702,7 @@ elif selected_page == "🧭 Bảng Tour":
 
 elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
     st.subheader("➕ Đăng ký lịch nghỉ")
-    users_s = df_credentials['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_credentials.empty else []
-    users_e = df_nv_excel['Tên nhân viên'].dropna().astype(str).str.strip().tolist() if not df_nv_excel.empty else []
-    all_users = sorted(list(set(users_s + users_e)))
+    all_users = get_leave_eligible_employee_names(df_credentials, df_nv_excel)
     if st.session_state.current_role == "nhanvien" and system_status["lock_nv"]:
         st.error("🔒 Tính năng đăng ký lịch nghỉ hiện đang bị Admin tạm khóa. Vui lòng liên hệ Admin hoặc Lễ Tân để được hỗ trợ!")
     else:
@@ -5533,6 +5734,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
         list_loai_nghi = []
         loai_nghi_dict = {}
         current_role = st.session_state.current_role.lower()
+        role_for_leave_rules = "letan" if current_role == "quanly" else current_role
 
         if not df_loai_nghi.empty:
             for idx, row in df_loai_nghi.iterrows():
@@ -5547,7 +5749,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
 
                     role_allowed = True
                     if dk_role and dk_role not in ["nan", "none", "tất cả", "all", ""]:
-                        if current_role not in dk_role: role_allowed = False
+                        if role_for_leave_rules not in dk_role: role_allowed = False
 
                     day_allowed = True
                     if dk_ngay and dk_ngay not in ["nan", "none", "tất cả", "all", ""]:
@@ -5695,8 +5897,8 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                     if start_date < emp_min_date or end_date > emp_max_date:
                         st.error(f"❌ Tài khoản NHÂN VIÊN chỉ được đăng ký từ hôm nay đến hết ngày {emp_max_date.strftime('%d/%m/%Y')} (tháng hiện tại và 1 tháng kế tiếp).")
                         can_proceed = False
-                elif current_role == "letan" and start_date < today:
-                    st.error("❌ Lỗi: Tài khoản LỄ TÂN không được đăng ký lịch trong **QUÁ KHỨ**. Muốn sửa lịch cũ, vui lòng liên hệ Admin.")
+                elif current_role in ["letan", "quanly"] and start_date < today:
+                    st.error("❌ Lỗi: Tài khoản LỄ TÂN/QUẢN LÝ không được đăng ký lịch trong **QUÁ KHỨ**. Muốn sửa lịch cũ, vui lòng liên hệ Admin.")
                     can_proceed = False
 
                 if can_proceed:
@@ -5880,7 +6082,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             else: start_date = end_date = today
 
     with col_name:
-        list_nv = ["- Tất cả nhân viên -"] + sorted(list(set(df_credentials['Tên nhân viên'].dropna().tolist() + (df_nv_excel['Tên nhân viên'].dropna().tolist() if not df_nv_excel.empty else []))))
+        list_nv = ["- Tất cả nhân viên -"] + get_leave_eligible_employee_names(df_credentials, df_nv_excel)
         selected_nv = st.selectbox("👤 Tìm kiếm nhân viên:", list_nv, filter_mode="contains")
 
     with col_refresh:
@@ -6111,8 +6313,8 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
     with tab1:
         if export_df.empty:
             st.info("Trống.")
-        elif st.session_state.current_role in ["admin", "letan"]:
-            # Admin/Lễ tân: checkbox chọn 1 hoặc nhiều dòng và sửa trực tiếp tại bảng.
+        elif st.session_state.current_role in ["admin", "letan", "quanly"]:
+            # Admin/Lễ tân/Quản lý: checkbox chọn 1 hoặc nhiều dòng và sửa trực tiếp tại bảng.
             raw_detail_full = filtered_df.copy().reset_index(drop=True)
             raw_detail = raw_detail_full.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore').copy()
             if 'Lý do nghỉ' in raw_detail.columns:
@@ -6263,7 +6465,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                             # Lễ tân không được sửa lịch quá khứ; Admin được phép.
                             original_date = pd.to_datetime(original.get('Ngày'), errors='coerce').date() if pd.notna(pd.to_datetime(original.get('Ngày'), errors='coerce')) else today_edit
                             edited_date_obj = pd.to_datetime(edited.get('Ngày'), errors='coerce')
-                            if st.session_state.current_role == 'letan' and (original_date < today_edit or (pd.notna(edited_date_obj) and edited_date_obj.date() < today_edit)):
+                            if st.session_state.current_role in ['letan', 'quanly'] and (original_date < today_edit or (pd.notna(edited_date_obj) and edited_date_obj.date() < today_edit)):
                                 st.error("❌ Lễ tân không được sửa lịch trong quá khứ.")
                                 can_edit_all = False
                                 break
@@ -6291,7 +6493,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                     else:
                         originals = [raw_detail_full.iloc[pos].copy() for pos in selected_positions]
                         today_del = get_vn_today()
-                        if st.session_state.current_role == 'letan':
+                        if st.session_state.current_role in ['letan', 'quanly']:
                             has_past = False
                             for r in originals:
                                 dt = pd.to_datetime(r.get('Ngày'), errors='coerce')
@@ -6398,7 +6600,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
                         if sel_date < emp_min_date or sel_date > emp_max_date:
                             st.error(f"❌ Nhân viên chỉ được xóa lịch từ hôm nay đến hết {emp_max_date.strftime('%d/%m/%Y')}.")
                             can_delete = False
-                    elif st.session_state.current_role == "letan" and sel_date < today:
+                    elif st.session_state.current_role in ["letan", "quanly"] and sel_date < today:
                         st.error("❌ Lỗi: Tài khoản LỄ TÂN không được xóa lịch trong **QUÁ KHỨ**. Vui lòng liên hệ Admin.")
                         can_delete = False
 

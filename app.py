@@ -669,20 +669,77 @@ st.markdown("""
             padding-left: 14px !important;
         }
 
-        /* Tô nền các vị trí tiêu đề */
-        h1, h2, h3 {
-            background: #f7e8ef !important;
-            border-left: 5px solid #c27ba0 !important;
+        /* V62 - NỀN TIÊU ĐỀ/NHÃN TOÀN HỆ THỐNG: RGB(217,217,217) = #D9D9D9.
+           Áp dụng cho heading và toàn bộ nhãn widget như "Chọn ngày nghỉ", "Chọn nhân viên", ... */
+        h1, h2, h3, h4, h5, h6 {
+            background: #D9D9D9 !important;
+            border-left: 5px solid #A6A6A6 !important;
             border-radius: 7px !important;
             padding: 0.38rem 0.65rem !important;
             margin-top: 0.28rem !important;
             margin-bottom: 0.4rem !important;
+            color: #222222 !important;
         }
         .custom-main-title {
-            background: #f7e8ef !important;
-            border-left: 5px solid #c27ba0 !important;
+            background: #D9D9D9 !important;
+            border-left: 5px solid #A6A6A6 !important;
             border-radius: 7px !important;
             padding: 0.45rem 0.7rem !important;
+            color: #222222 !important;
+        }
+
+        /* Nhãn của input/select/date/multiselect/radio/checkbox/file uploader/data editor... */
+        [data-testid="stWidgetLabel"],
+        label[data-testid="stWidgetLabel"],
+        div[data-testid="stWidgetLabel"] {
+            display: block !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+            background-color: #D9D9D9 !important;
+            border-radius: 5px !important;
+            padding: 0.28rem 0.5rem !important;
+            margin-bottom: 0.22rem !important;
+            color: #222222 !important;
+        }
+        [data-testid="stWidgetLabel"] p,
+        [data-testid="stWidgetLabel"] span,
+        [data-testid="stWidgetLabel"] div {
+            background: transparent !important;
+            color: #222222 !important;
+        }
+
+        /* Một số phiên bản Streamlit dùng label/legend riêng cho widget. */
+        [data-testid="stSelectbox"] > label,
+        [data-testid="stMultiSelect"] > label,
+        [data-testid="stDateInput"] > label,
+        [data-testid="stTextInput"] > label,
+        [data-testid="stTextArea"] > label,
+        [data-testid="stNumberInput"] > label,
+        [data-testid="stFileUploader"] > label,
+        [data-testid="stRadio"] > label,
+        [data-testid="stCheckbox"] > label,
+        [data-testid="stSlider"] > label,
+        [data-testid="stTimeInput"] > label,
+        [data-testid="stColorPicker"] > label,
+        [data-testid="stDataEditor"] > label,
+        [data-testid="stDataFrame"] > label,
+        fieldset > legend {
+            display: block !important;
+            width: 100% !important;
+            box-sizing: border-box !important;
+            background-color: #D9D9D9 !important;
+            border-radius: 5px !important;
+            padding: 0.28rem 0.5rem !important;
+            color: #222222 !important;
+        }
+
+        /* Dòng tiêu đề của Expander cũng dùng cùng nền xám. */
+        [data-testid="stExpander"] details > summary {
+            background-color: #D9D9D9 !important;
+            border-radius: 6px !important;
+            padding-left: 0.55rem !important;
+            padding-right: 0.55rem !important;
         }
 
         @media (max-width: 768px) {

@@ -22,6 +22,13 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 
+# --- CLOUD RUN + POSTGRESQL SHARED DATA LAYER (V75) ---
+try:
+    import vera_postgres as vpg
+except Exception:
+    vpg = None
+
+
 # --- CẤU HÌNH MÚI GIỜ VIỆT NAM ---
 VN_TZ = timezone(timedelta(hours=7))
 
@@ -1117,13 +1124,46 @@ def render_manual_birthday_check(credentials_df, key_prefix="birthday_manual"):
 
 @st.cache_resource
 def get_gspread_client():
+    """Google API client phù hợp cả Streamlit Cloud lẫn Cloud Run.
+
+    Ưu tiên: GOOGLE_SERVICE_ACCOUNT_JSON -> st.secrets[gcp_service_account]
+    -> Application Default Credentials của Cloud Run service account.
+    """
     try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+        scope = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        env_json = str(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")).strip()
+        if env_json:
+            creds_dict = json.loads(env_json)
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+            return gspread.authorize(creds)
+        try:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+        except Exception:
+            creds_dict = {}
+        if creds_dict:
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+            return gspread.authorize(creds)
+        # Cloud Run: có thể dùng chính runtime service account (ADC).
+        import google.auth
+        creds, _ = google.auth.default(scopes=scope)
         return gspread.authorize(creds)
-    except Exception as e:
+    except Exception:
         return None
+
+
+def get_smtp_sender_credentials():
+    """Lấy Gmail sender/app-password từ Secret Manager env hoặc Streamlit secrets."""
+    sender_email = str(os.getenv("SMTP_SENDER_EMAIL", "veraspabienhoa@gmail.com")).strip()
+    sender_pass = str(os.getenv("SMTP_APP_PASSWORD", "")).strip()
+    if not sender_pass:
+        try:
+            sender_pass = str(st.secrets.get("smtp_app_password", "")).strip()
+        except Exception:
+            pass
+    return sender_email, sender_pass
 
 
 def gspread_update_range(sheet, range_name, values, **kwargs):
@@ -1364,6 +1404,13 @@ def _clear_dynamic_data_caches():
     Xóa đúng các cache dữ liệu nghiệp vụ có thể vừa thay đổi.
     Tuyệt đối không dùng st.cache_data.clear() vì nó làm mất mọi cache và gây bão request Google Sheets.
     """
+    if vpg is not None and vpg.is_enabled():
+        # Invalidation dùng chung giữa mọi Cloud Run instance; lần đọc tiếp theo chỉ 1 instance refresh Sheet.
+        try:
+            vpg.invalidate_many("credentials", "leave_primary", "leave_secondary", "tichluy")
+        except Exception:
+            pass
+
     for fn_name in (
         'load_credentials',
         'load_credentials_recent',
@@ -1379,6 +1426,16 @@ def _clear_dynamic_data_caches():
                 fn.clear()
         except Exception:
             pass
+
+def get_postgres_runtime_status():
+    """Dùng cho kiểm tra triển khai: không làm app lỗi nếu PostgreSQL tạm unavailable."""
+    if vpg is None or not vpg.is_enabled():
+        return False, "PostgreSQL chưa bật; hệ thống đang dùng chế độ Google Sheets dự phòng."
+    try:
+        return vpg.healthcheck()
+    except Exception as exc:
+        return False, f"PostgreSQL lỗi: {exc}"
+
 
 # --- ĐỒNG BỘ EXCEL SANG GOOGLE SHEETS (CHỈ THÊM MỚI) ---
 def admin_sync_excel_to_gsheet():
@@ -1471,8 +1528,7 @@ def ensure_credential_control_columns():
     except Exception:
         pass
 
-@st.cache_data(ttl=120, show_spinner=False)
-def load_credentials():
+def _load_credentials_from_sheets():
     try:
         client = get_gspread_client()
         if client:
@@ -1529,6 +1585,17 @@ def load_credentials():
         'Remember Token Hash', 'Remember Token Expiry'
     ])
 
+@st.cache_data(ttl=120, show_spinner=False)
+def load_credentials():
+    """V75: đọc qua PostgreSQL dùng chung giữa các Cloud Run instance; Google Sheets là nguồn đồng bộ dự phòng."""
+    if vpg is not None and vpg.is_enabled():
+        return vpg.load_dataset(
+            "credentials",
+            _load_credentials_from_sheets,
+            ttl_seconds=int(os.getenv("VERA_PG_TTL_CREDENTIALS", "30")),
+        )
+    return _load_credentials_from_sheets()
+
 @st.cache_data(ttl=10, show_spinner=False)
 def load_credentials_recent():
     """Ảnh chụp Sheet1 gần thời gian thực cho TOÀN BỘ trường hồ sơ.
@@ -1544,7 +1611,7 @@ def load_credentials_recent():
     return load_credentials()
 
 def load_credentials_fresh():
-    """Đọc trực tiếp hồ sơ nhân sự mới nhất từ Sheet1 cho tác vụ cần dữ liệu tuyệt đối mới."""
+    """Đọc hồ sơ mới nhất; trên Cloud Run refresh một lần rồi chia sẻ snapshot cho mọi instance."""
     try:
         load_credentials.clear()
     except Exception:
@@ -1553,7 +1620,16 @@ def load_credentials_fresh():
         load_credentials_recent.clear()
     except Exception:
         pass
-    return load_credentials()
+    if vpg is not None and vpg.is_enabled():
+        try:
+            return vpg.load_dataset(
+                "credentials", _load_credentials_from_sheets,
+                ttl_seconds=int(os.getenv("VERA_PG_TTL_CREDENTIALS", "30")),
+                force_refresh=True,
+            )
+        except Exception:
+            pass
+    return _load_credentials_from_sheets()
 
 def load_credentials_fresh_for_email():
     """Giữ tương thích tên hàm cũ; thực tế làm mới TOÀN BỘ hồ sơ, không chỉ Email."""
@@ -1890,8 +1966,7 @@ def batch_update_shift_schedule(edited_df):
         return False, f"Lỗi cập nhật: {e}"
 
 # --- TẢI DỮ LIỆU TỪ GOOGLE SHEET DỰ PHÒNG ---
-@st.cache_data(ttl=30, show_spinner=False)
-def load_backup_sheet_data():
+def _load_backup_sheet_data_from_sheets():
     """Đọc trực tiếp A:J của sheet lịch nghỉ chính, không phụ thuộc tên header và luôn giữ source row."""
     expected = [
         "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
@@ -1923,8 +1998,18 @@ def load_backup_sheet_data():
     except Exception:
         return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
 
-@st.cache_data(ttl=30, show_spinner=False)
-def load_secondary_leave_sheet_data():
+@st.cache_data(ttl=20, show_spinner=False)
+def load_backup_sheet_data():
+    """V75: đọc qua PostgreSQL dùng chung giữa các Cloud Run instance; Google Sheets là nguồn đồng bộ dự phòng."""
+    if vpg is not None and vpg.is_enabled():
+        return vpg.load_dataset(
+            "leave_primary",
+            _load_backup_sheet_data_from_sheets,
+            ttl_seconds=int(os.getenv("VERA_PG_TTL_LEAVE_PRIMARY", "45")),
+        )
+    return _load_backup_sheet_data_from_sheets()
+
+def _load_secondary_leave_sheet_data_from_sheets():
     """Đọc Sheet1 của Google Sheet thứ hai, chuẩn hóa về đúng A:J của lịch nghỉ."""
     expected = [
         "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
@@ -1956,6 +2041,17 @@ def load_secondary_leave_sheet_data():
         return pd.DataFrame(rows) if rows else pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
     except Exception:
         return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_secondary_leave_sheet_data():
+    """V75: đọc qua PostgreSQL dùng chung giữa các Cloud Run instance; Google Sheets là nguồn đồng bộ dự phòng."""
+    if vpg is not None and vpg.is_enabled():
+        return vpg.load_dataset(
+            "leave_secondary",
+            _load_secondary_leave_sheet_data_from_sheets,
+            ttl_seconds=int(os.getenv("VERA_PG_TTL_LEAVE_SECONDARY", "90")),
+        )
+    return _load_secondary_leave_sheet_data_from_sheets()
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_loai_nghi_from_gsheet():
@@ -4672,8 +4768,7 @@ def _ensure_tichluy_sheet():
         return None, f"Không mở được sheet TichLuy: {e}"
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def load_tichluy_tracking():
+def _load_tichluy_tracking_from_sheets():
     """Đọc TichLuy một lần/cache; tự nhận diện vị trí cột để tương thích sheet đã có."""
     try:
         ws, err = _ensure_tichluy_sheet()
@@ -4704,6 +4799,17 @@ def load_tichluy_tracking():
         return pd.DataFrame(rows) if rows else pd.DataFrame(columns=TICHLUY_HEADERS + ['__sheet_row'])
     except Exception:
         return pd.DataFrame(columns=TICHLUY_HEADERS + ['__sheet_row'])
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_tichluy_tracking():
+    """V75: đọc qua PostgreSQL dùng chung giữa các Cloud Run instance; Google Sheets là nguồn đồng bộ dự phòng."""
+    if vpg is not None and vpg.is_enabled():
+        return vpg.load_dataset(
+            "tichluy",
+            _load_tichluy_tracking_from_sheets,
+            ttl_seconds=int(os.getenv("VERA_PG_TTL_TICHLUY", "90")),
+        )
+    return _load_tichluy_tracking_from_sheets()
 
 
 def _parse_vn_date(value):
@@ -5173,6 +5279,11 @@ def sync_tichluy_roles_and_stt(credentials_df=None):
 
         try:
             load_tichluy_tracking.clear()
+            if vpg is not None and vpg.is_enabled():
+                try:
+                    vpg.invalidate_dataset("tichluy")
+                except Exception:
+                    pass
         except Exception:
             pass
         return True, (
@@ -5627,8 +5738,7 @@ def _ensure_violation_debt_storage():
         return None, f"Lỗi khởi tạo sheet {VIOLATION_DEBT_WORKSHEET}: {e}"
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def load_violation_debt_ledger():
+def _load_violation_debt_ledger_from_sheets():
     """Đọc sổ nợ Vi phạm một lần, có cache để tránh quota Sheets."""
     ws, err = _ensure_violation_debt_storage()
     if err or ws is None:
@@ -5650,10 +5760,26 @@ def load_violation_debt_ledger():
     except Exception:
         return pd.DataFrame(columns=VIOLATION_DEBT_HEADERS + ['__sheet_row'])
 
+@st.cache_data(ttl=30, show_spinner=False)
+def load_violation_debt_ledger():
+    """V75: đọc qua PostgreSQL dùng chung giữa các Cloud Run instance; Google Sheets là nguồn đồng bộ dự phòng."""
+    if vpg is not None and vpg.is_enabled():
+        return vpg.load_dataset(
+            "violation_debt",
+            _load_violation_debt_ledger_from_sheets,
+            ttl_seconds=int(os.getenv("VERA_PG_TTL_VIOLATION_DEBT", "60")),
+        )
+    return _load_violation_debt_ledger_from_sheets()
+
 
 def _clear_violation_debt_cache():
     try:
         load_violation_debt_ledger.clear()
+        if vpg is not None and vpg.is_enabled():
+            try:
+                vpg.invalidate_dataset("violation_debt")
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -6487,6 +6613,11 @@ def save_payroll_snapshot(payroll_df, start_date, end_date, source_label, saved_
         debt_ok, debt_msg = commit_violation_debts_after_payroll(payroll_df, start_date, end_date, saved_by)
         try:
             load_payroll_history.clear()
+            if vpg is not None and vpg.is_enabled():
+                try:
+                    vpg.invalidate_dataset("payroll_history")
+                except Exception:
+                    pass
         except Exception:
             pass
         msg = f"Đã lưu bảng lương {len(rows)} nhân viên vào hệ thống."
@@ -6549,6 +6680,11 @@ def overwrite_payroll_snapshot(batch_id, payroll_df, start_date, end_date, sourc
         debt_ok, debt_msg = commit_violation_debts_after_payroll(payroll_df, start_date, end_date, saved_by)
         try:
             load_payroll_history.clear()
+            if vpg is not None and vpg.is_enabled():
+                try:
+                    vpg.invalidate_dataset("payroll_history")
+                except Exception:
+                    pass
         except Exception:
             pass
         msg = f"Đã ghi đè cập nhật bản lương {batch_id} cho {len(rows)} nhân viên."
@@ -6618,6 +6754,11 @@ def delete_payroll_snapshots(batch_ids):
 
         try:
             load_payroll_history.clear()
+            if vpg is not None and vpg.is_enabled():
+                try:
+                    vpg.invalidate_dataset("payroll_history")
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -6634,8 +6775,7 @@ def delete_payroll_snapshots(batch_ids):
         return False, f"Lỗi xóa lịch sử bảng lương: {e}", []
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def load_payroll_history():
+def _load_payroll_history_from_sheets():
     try:
         ws_pay, _, err = _ensure_payroll_storage()
         if err or ws_pay is None:
@@ -6651,6 +6791,17 @@ def load_payroll_history():
         return pd.DataFrame(rows, columns=header if len(header)==len(PAYROLL_HISTORY_HEADERS) else PAYROLL_HISTORY_HEADERS)
     except Exception:
         return pd.DataFrame(columns=PAYROLL_HISTORY_HEADERS)
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_payroll_history():
+    """V75: đọc qua PostgreSQL dùng chung giữa các Cloud Run instance; Google Sheets là nguồn đồng bộ dự phòng."""
+    if vpg is not None and vpg.is_enabled():
+        return vpg.load_dataset(
+            "payroll_history",
+            _load_payroll_history_from_sheets,
+            ttl_seconds=int(os.getenv("VERA_PG_TTL_PAYROLL_HISTORY", "90")),
+        )
+    return _load_payroll_history_from_sheets()
 
 
 def payroll_history_to_table(history_df):
@@ -7811,6 +7962,39 @@ elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff
 elif selected_page == "⚙️ Giao diện tùy chỉnh" and st.session_state.current_role == "admin":
     st.subheader("⚙️ Giao diện tùy chỉnh")
     render_admin_theme_config_panel()
+
+    with st.expander("⚡ Hạ tầng & hiệu năng (Cloud Run + PostgreSQL)", expanded=False):
+        if vpg is None or not vpg.is_enabled():
+            st.warning("PostgreSQL chưa được bật. Khi deploy Cloud Run hãy đặt VERA_DB_ENABLED=1 và cấu hình DB/Cloud SQL.")
+        else:
+            _pg_ok, _pg_msg = get_postgres_runtime_status()
+            (st.success if _pg_ok else st.error)(_pg_msg)
+            if _pg_ok:
+                _pg_status = vpg.get_status()
+                if isinstance(_pg_status, pd.DataFrame) and not _pg_status.empty:
+                    st.dataframe(_pg_status, width="stretch", hide_index=True, height="content")
+                if st.button("⚡ Đồng bộ dữ liệu nặng Google Sheets → PostgreSQL", use_container_width=True, key="admin_pg_prewarm_v75"):
+                    _sync_jobs = [
+                        ("credentials", _load_credentials_from_sheets, 30),
+                        ("leave_primary", _load_backup_sheet_data_from_sheets, 45),
+                        ("leave_secondary", _load_secondary_leave_sheet_data_from_sheets, 90),
+                        ("tichluy", _load_tichluy_tracking_from_sheets, 90),
+                        ("violation_debt", _load_violation_debt_ledger_from_sheets, 60),
+                        ("payroll_history", _load_payroll_history_from_sheets, 90),
+                    ]
+                    _sync_errors = []
+                    _progress = st.progress(0)
+                    for _i, (_key, _loader, _ttl) in enumerate(_sync_jobs, start=1):
+                        try:
+                            vpg.load_dataset(_key, _loader, ttl_seconds=_ttl, force_refresh=True)
+                        except Exception as _exc:
+                            _sync_errors.append(f"{_key}: {_exc}")
+                        _progress.progress(_i / len(_sync_jobs))
+                    if _sync_errors:
+                        st.error("Một số nhóm chưa đồng bộ: " + " | ".join(_sync_errors))
+                    else:
+                        st.success("Đã đưa các nhóm dữ liệu đọc nhiều vào PostgreSQL dùng chung cho mọi Cloud Run instance.")
+
     st.info(
         "Admin có thể tùy chỉnh thứ tự, độ rộng cột, độ cao dòng, font, cỡ chữ, kiểu chữ, "
         "căn lề và Wrap Text. Sau khi lưu, cấu hình được dùng chung cho toàn bộ tài khoản."
@@ -8995,6 +9179,11 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                         (st.success if ok else st.error)(msg)
                         if ok:
                             load_payroll_history.clear()
+                            if vpg is not None and vpg.is_enabled():
+                                try:
+                                    vpg.invalidate_dataset("payroll_history")
+                                except Exception:
+                                    pass
                             st.caption(f"Mã bản lưu: {batch_id}")
                 with c_export:
                     excel_bytes = build_payroll_excel_bytes(final_df, current_start, current_end)
@@ -9026,8 +9215,7 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                             if not selected_email_emps:
                                 st.warning("Vui lòng chọn ít nhất 1 nhân viên.")
                             else:
-                                sender_email = "veraspabienhoa@gmail.com"
-                                sender_pass = "zvtgbysfmdaqxaau"
+                                sender_email, sender_pass = get_smtp_sender_credentials()
                                 progress = st.progress(0)
                                 ok_count, errors = 0, []
                                 # V59: đọc hồ sơ nhân sự MỚI NHẤT đúng 1 lần cho cả lượt gửi.
@@ -9117,8 +9305,7 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                                             if not letan_email or '@' not in letan_email:
                                                 st.error(f"⚠️ Tài khoản {selected_letan} chưa có Email hợp lệ trong Sheet1 mới nhất.")
                                             else:
-                                                sender_email = "veraspabienhoa@gmail.com"
-                                                sender_pass = "zvtgbysfmdaqxaau"
+                                                sender_email, sender_pass = get_smtp_sender_credentials()
                                                 ok, msg = send_payroll_summary_email(
                                                     sender_email, sender_pass, letan_email,
                                                     selected_letan, final_df, current_start, current_end
@@ -9344,6 +9531,11 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                             # Bắt buộc làm mới TichLuy để nút cập nhật không dùng snapshot cache 120 giây cũ.
                             try:
                                 load_tichluy_tracking.clear()
+                                if vpg is not None and vpg.is_enabled():
+                                    try:
+                                        vpg.invalidate_dataset("tichluy")
+                                    except Exception:
+                                        pass
                             except Exception:
                                 pass
                             refreshed_df, refresh_meta = refresh_saved_payroll_from_system(
@@ -9522,6 +9714,11 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                             )
                             if ok:
                                 load_payroll_history.clear()
+                                if vpg is not None and vpg.is_enabled():
+                                    try:
+                                        vpg.invalidate_dataset("payroll_history")
+                                    except Exception:
+                                        pass
                                 try:
                                     st.session_state.pop(hist_refresh_key, None)
                                     st.session_state[hist_editor_version_key] = hist_editor_version + 1
@@ -9591,8 +9788,7 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                                     if not hist_selected_email_emps:
                                         st.warning("Vui lòng chọn ít nhất 1 nhân viên.")
                                     else:
-                                        sender_email = "veraspabienhoa@gmail.com"
-                                        sender_pass = "zvtgbysfmdaqxaau"
+                                        sender_email, sender_pass = get_smtp_sender_credentials()
                                         progress_hist_email = st.progress(0)
                                         hist_ok_count, hist_errors = 0, []
                                         # V59: đọc Email MỚI NHẤT trực tiếp từ Sheet1 một lần cho cả lượt gửi lịch sử.
@@ -9691,8 +9887,7 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                                                             f"⚠️ Tài khoản {hist_selected_letan} chưa có Email hợp lệ trong Sheet1 mới nhất."
                                                         )
                                                     else:
-                                                        sender_email = "veraspabienhoa@gmail.com"
-                                                        sender_pass = "zvtgbysfmdaqxaau"
+                                                        sender_email, sender_pass = get_smtp_sender_credentials()
                                                         ok, msg = send_payroll_summary_email(
                                                             sender_email, sender_pass, hist_letan_email,
                                                             hist_selected_letan, edited_saved_table, hs, he
@@ -10357,8 +10552,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 )
 
                 # Đã lưu cứng thông tin Email và Mật khẩu ứng dụng vào code
-                sender_email = "veraspabienhoa@gmail.com"
-                sender_pass = "zvtgbysfmdaqxaau" # Đã bỏ khoảng trắng
+                sender_email, sender_pass = get_smtp_sender_credentials()
 
                 st.write(f"📧 **Email gửi đi mặc định:** `{sender_email}`")
 
@@ -10872,3 +11066,4 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
                     if ok:
                         _clear_dynamic_data_caches()
                         st.rerun()
+

@@ -896,7 +896,7 @@ FEATURE_DEFINITIONS = {
     "account_lock": "🔒 Khóa đăng nhập",
     "registration_lock": "🔐 Khóa quyền đăng ký",
     "sync": "🔄 Đồng bộ dữ liệu",
-    "column_config": "⚙️ Cấu hình cột",
+    "column_config": "⚙️ Giao diện tùy chỉnh",
     "profile": "👤 Hồ sơ cá nhân",
     "birthday": "🎂 Kiểm tra sinh nhật",
     "permission_admin": "🔐 Phân quyền chức năng",
@@ -3841,7 +3841,7 @@ def _ensure_ui_layout_storage():
             gspread_update_range(ws, "A1:G1", [wanted])
         return ws, ""
     except Exception as e:
-        return None, f"Lỗi khởi tạo cấu hình cột: {e}"
+        return None, f"Lỗi khởi tạo giao diện tùy chỉnh: {e}"
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -3878,7 +3878,7 @@ def load_table_layouts():
             }
         return result, ""
     except Exception as e:
-        return {}, f"Lỗi đọc cấu hình cột: {e}"
+        return {}, f"Lỗi đọc giao diện tùy chỉnh: {e}"
 
 
 def _clear_table_layout_cache():
@@ -4124,7 +4124,7 @@ def layout_width(table_key, column_name, fallback=None):
 def save_table_layout_config(table_key, order, widths, username, visual=None):
     ws, err = _ensure_ui_layout_storage()
     if err or ws is None:
-        return False, err or "Không mở được sheet cấu hình cột."
+        return False, err or "Không mở được sheet giao diện tùy chỉnh."
     try:
         layouts, _ = load_table_layouts()
         cfg = layouts.get(table_key, {})
@@ -4145,7 +4145,7 @@ def save_table_layout_config(table_key, order, widths, username, visual=None):
         _clear_table_layout_cache()
         return True, "Đã lưu cấu hình hiển thị và áp dụng cho toàn hệ thống."
     except Exception as e:
-        return False, f"Lỗi lưu cấu hình cột: {e}"
+        return False, f"Lỗi lưu giao diện tùy chỉnh: {e}"
 
 
 def render_admin_quick_layout_default(table_key, columns, key_suffix=""):
@@ -4746,6 +4746,65 @@ def _parse_vn_date(value):
     except Exception:
         return None
 
+
+
+def prepare_leave_editor_types(df):
+    """Chuẩn hóa dtype trước khi truyền vào st.data_editor.
+
+    Google Sheets trả phần lớn dữ liệu dưới dạng chuỗi. Streamlit các bản mới kiểm tra
+    chặt kiểu dữ liệu giữa DataFrame và column_config; vì vậy DateColumn/NumberColumn
+    có thể ném StreamlitAPIException nếu cột nguồn vẫn là object/string.
+
+    Hàm này chỉ chuẩn hóa bản sao dùng cho giao diện editor, KHÔNG thay đổi dữ liệu nguồn.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return df
+    d = df.copy()
+
+    if 'Chọn' in d.columns:
+        d['Chọn'] = d['Chọn'].fillna(False).astype(bool)
+
+    if 'Ngày' in d.columns:
+        def _to_editor_date(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            if isinstance(v, datetime):
+                return v.date()
+            if isinstance(v, date):
+                return v
+            parsed = pd.to_datetime(str(v).strip(), errors='coerce', dayfirst=True)
+            return None if pd.isna(parsed) else parsed.date()
+        d['Ngày'] = d['Ngày'].apply(_to_editor_date)
+
+    for col in ['Số ngày tính', 'Số ngày phép cộng dồn', 'Phạt vi phạm']:
+        if col in d.columns:
+            is_money = col == 'Phạt vi phạm'
+            def _to_editor_number(v, _money=is_money):
+                if v is None:
+                    return None
+                s = str(v).strip()
+                if not s or s.casefold() in {'nan', 'none', 'nat', '-'}:
+                    return None
+                try:
+                    return float(_parse_leave_number(v, 0.0, money=_money))
+                except Exception:
+                    try:
+                        return float(v)
+                    except Exception:
+                        return None
+            d[col] = pd.to_numeric(d[col].apply(_to_editor_number), errors='coerce')
+
+    # Các cột cấu hình TextColumn/SelectboxColumn phải luôn là chuỗi thuần.
+    for col in [
+        'Tên nhân viên', 'Lý do nghỉ', 'Loại nghỉ', 'Chi tiết',
+        'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật'
+    ]:
+        if col in d.columns:
+            d[col] = d[col].apply(
+                lambda v: '' if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
+            )
+
+    return d
 
 def _tichluy_period_key(start_date, end_date):
     return f"{start_date.isoformat()}|{end_date.isoformat()}"
@@ -7189,7 +7248,7 @@ PAGE_SLUGS = {
     "🔒 Khóa đăng nhập": "khoa-dang-nhap",
     "🔐 Khóa quyền đăng ký": "khoa-quyen-dang-ky",
     "🔄 Đồng bộ dữ liệu": "dong-bo-du-lieu",
-    "⚙️ Cấu hình cột": "cau-hinh-cot",
+    "⚙️ Giao diện tùy chỉnh": "cau-hinh-cot",
     "🔐 Phân quyền chức năng": "phan-quyen-chuc-nang",
     "🎂 Sinh nhật nhân sự": "sinh-nhat-nhan-su",
     "👤 Hồ sơ cá nhân": "ho-so-ca-nhan",
@@ -7210,7 +7269,7 @@ PAGE_FEATURE_KEYS = {
     "🔒 Khóa đăng nhập": "account_lock",
     "🔐 Khóa quyền đăng ký": "registration_lock",
     "🔄 Đồng bộ dữ liệu": "sync",
-    "⚙️ Cấu hình cột": "column_config",
+    "⚙️ Giao diện tùy chỉnh": "column_config",
     "🔐 Phân quyền chức năng": "permission_admin",
     "🎂 Sinh nhật nhân sự": "birthday",
     "👤 Hồ sơ cá nhân": "profile",
@@ -7223,8 +7282,8 @@ PAGE_FEATURE_GROUPS = {
 }
 
 def has_page_access(page_name):
-    # Cấu hình cột/lưu mặc định chỉ dành cho Admin, không cho phép override xuống vai trò khác.
-    if page_name == "⚙️ Cấu hình cột" and st.session_state.get('current_role') != 'admin':
+    # Giao diện tùy chỉnh/lưu mặc định chỉ dành cho Admin, không cho phép override xuống vai trò khác.
+    if page_name == "⚙️ Giao diện tùy chỉnh" and st.session_state.get('current_role') != 'admin':
         return False
     features = PAGE_FEATURE_GROUPS.get(page_name)
     if features:
@@ -7749,8 +7808,8 @@ elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff
     )
     render_admin_quick_layout_default("staff_list", list(staff_df.columns), "staff_list_page")
 
-elif selected_page == "⚙️ Cấu hình cột" and st.session_state.current_role == "admin":
-    st.subheader("⚙️ Cấu hình hiển thị cột toàn hệ thống")
+elif selected_page == "⚙️ Giao diện tùy chỉnh" and st.session_state.current_role == "admin":
+    st.subheader("⚙️ Giao diện tùy chỉnh")
     render_admin_theme_config_panel()
     st.info(
         "Admin có thể tùy chỉnh thứ tự, độ rộng cột, độ cao dòng, font, cỡ chữ, kiểu chữ, "
@@ -10386,6 +10445,8 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             if 'Chọn' not in editor_df.columns:
                 editor_df.insert(0, "Chọn", False)
             editor_df, _ = apply_table_layout_df(editor_df, "leave_detail")
+            # V74: ép đúng dtype trước st.data_editor để tương thích Streamlit mới.
+            editor_df = prepare_leave_editor_types(editor_df)
 
             derived_cols = [
                 "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
@@ -10677,6 +10738,8 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             manage_visible['Lý do nghỉ'] = manage_visible['Lý do nghỉ'].apply(clean_leave_reason_display)
         manage_visible.insert(0, 'Chọn', False)
         manage_visible, _ = apply_table_layout_df(manage_visible, "leave_manage")
+        # V74: ép đúng dtype trước st.data_editor để tương thích Streamlit mới.
+        manage_visible = prepare_leave_editor_types(manage_visible)
 
         manage_reason_options = get_leave_reason_options(
             globals().get('df_loai_nghi', pd.DataFrame()),
@@ -10751,6 +10814,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
         if 'Lý do nghỉ' in manage_original_visible.columns:
             manage_original_visible['Lý do nghỉ'] = manage_original_visible['Lý do nghỉ'].apply(clean_leave_reason_display)
         manage_original_visible = manage_original_visible.reset_index(drop=True)
+        manage_original_visible = prepare_leave_editor_types(manage_original_visible)
         manage_changed = get_changed_schedule_positions(manage_original_visible, manage_edit_only)
         manage_selected = manage_editor.index[manage_editor.get('Chọn', False) == True].tolist() if 'Chọn' in manage_editor.columns else []
 

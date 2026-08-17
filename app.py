@@ -62,10 +62,14 @@ def password_matches(input_password, stored_password):
 def is_locked_value(value):
     return str(value).strip().casefold() in {"1", "true", "yes", "y", "khóa", "khoa", "locked", "x"}
 
+def clean_leave_reason_display(value):
+    """Làm sạch tên lý do nghỉ để hiển thị/dropdown luôn khớp chính xác."""
+    text = str(value or "").replace("🔴", "").strip()
+    return " ".join(text.split())
+
 def normalize_leave_reason(value):
     """Chuẩn hóa loại nghỉ để so sánh trùng dữ liệu ổn định."""
-    text = str(value).replace("🔴", "").strip()
-    return " ".join(text.split()).casefold()
+    return clean_leave_reason_display(value).casefold()
 
 PROGRESSIVE_PENALTY_REASONS = {
     normalize_login_name("Nghỉ không phép"): "Nghỉ không phép",
@@ -2076,7 +2080,7 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
 
         # Bảo vệ dữ liệu ở lớp cuối cùng, kể cả khi giao diện đang dùng cache cũ.
         if _leave_exists_in_sources(combined_live, ngay, nv, loai_nghi):
-            return False, f"Nhân viên '{nv}' đã có loại nghỉ '{str(loai_nghi).replace('🔴 ', '')}' trong ngày {ngay}. Không được đăng ký trùng."
+            return False, f"Nhân viên '{nv}' đã có loại nghỉ '{clean_leave_reason_display(loai_nghi)}' trong ngày {ngay}. Không được đăng ký trùng."
 
         save_detail = str(chi_tiet).strip()
         save_penalty = float(phat_vi_pham) if phat_vi_pham is not None else 0.0
@@ -2091,7 +2095,7 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         row_values = [
             str(ngay),
             str(nv),
-            str(loai_nghi).replace("🔴 ", ""),
+            clean_leave_reason_display(loai_nghi),
             save_detail,
             float(so_ngay) if so_ngay is not None else 0.0,
             float(so_ngay_cong_don),
@@ -2198,7 +2202,7 @@ def build_leave_reason_catalog(source_df=None):
         name = str(vals[1]).strip() if len(vals) > 1 else ""
         if not name or name.lower() in ["nan", "none"]:
             name = str(row.get('Lý do nghỉ', row.get('Loại nghỉ', ''))).strip()
-        name = name.replace('🔴 ', '').strip()
+        name = clean_leave_reason_display(name)
         if not name or name.lower() in ["nan", "none", "loại nghỉ", "lý do nghỉ"]:
             continue
 
@@ -2215,13 +2219,24 @@ def build_leave_reason_catalog(source_df=None):
 def get_leave_reason_options(source_df=None, extra_values=None):
     """Danh sách dropdown Lý do nghỉ, tự lấy từ LoaiNghi và bổ sung giá trị lịch sử đang có."""
     catalog = build_leave_reason_catalog(source_df)
-    options = [v['name'] for v in catalog.values()]
+    # Streamlit SelectboxColumn yêu cầu giá trị hiện tại phải khớp CHÍNH XÁC
+    # với một phần tử trong options. Vì vậy luôn làm sạch biểu tượng 🔴 và khoảng trắng
+    # ở cả danh mục LoaiNghi lẫn dữ liệu lịch sử trước khi dựng dropdown.
+    options = []
+    seen = set()
+    for item in [v['name'] for v in catalog.values()]:
+        clean = clean_leave_reason_display(item)
+        key = normalize_leave_reason(clean)
+        if clean and key and key not in seen:
+            options.append(clean)
+            seen.add(key)
     if extra_values is not None:
         for val in extra_values:
-            clean = str(val).replace('🔴 ', '').strip()
-            if clean and clean.lower() not in ['nan', 'none', 'nat']:
-                if not any(normalize_leave_reason(clean) == normalize_leave_reason(x) for x in options):
-                    options.append(clean)
+            clean = clean_leave_reason_display(val)
+            key = normalize_leave_reason(clean)
+            if clean and clean.lower() not in ['nan', 'none', 'nat'] and key not in seen:
+                options.append(clean)
+                seen.add(key)
     return options
 
 
@@ -2339,7 +2354,7 @@ def recalculate_schedule_fields(original_row, edited_row, updated_by, all_leave_
 
     ngay = normalize_schedule_date(result.get('Ngày', original_row.get('Ngày', '')))
     nv = str(result.get('Tên nhân viên', original_row.get('Tên nhân viên', ''))).strip()
-    reason = str(result.get('Lý do nghỉ', original_row.get('Lý do nghỉ', ''))).replace('🔴 ', '').strip()
+    reason = clean_leave_reason_display(result.get('Lý do nghỉ', original_row.get('Lý do nghỉ', '')))
     key = normalize_leave_reason(reason)
     defaults = catalog.get(key)
 
@@ -2373,7 +2388,7 @@ def recalculate_schedule_fields(original_row, edited_row, updated_by, all_leave_
         # Nếu chỉ sửa nội dung nhưng vẫn cùng ngày + cùng nhóm vi phạm, giữ đúng
         # thứ tự Người Thứ đã ghi trước đó. Nếu đổi ngày/đổi loại thì tính lại thứ tự.
         ordinal = None
-        original_reason = str(original_row.get('Lý do nghỉ', '')).replace('🔴 ', '').strip()
+        original_reason = clean_leave_reason_display(original_row.get('Lý do nghỉ', ''))
         original_canonical = get_progressive_penalty_reason(original_reason)
         original_date = normalize_schedule_date(original_row.get('Ngày', ''))
 
@@ -2470,7 +2485,7 @@ def _progressive_group_key(row):
 
 def _existing_base_penalty(row, catalog):
     """Lấy mức phạt gốc, tách phần lũy tiến khỏi tổng tiền hiện có khi cần."""
-    reason = str(row.get('Lý do nghỉ', '')).replace('🔴 ', '').strip()
+    reason = clean_leave_reason_display(row.get('Lý do nghỉ', ''))
     key = normalize_leave_reason(reason)
     if key in catalog:
         return float(catalog[key].get('penalty', 0) or 0)
@@ -2636,7 +2651,7 @@ def update_schedule_record(original_row, edited_row, updated_by):
 
         ngay = normalize_schedule_date(recalculated.get('Ngày', ''))
         nv = str(recalculated.get('Tên nhân viên', '')).strip()
-        lydo = str(recalculated.get('Lý do nghỉ', '')).replace('🔴 ', '').strip()
+        lydo = clean_leave_reason_display(recalculated.get('Lý do nghỉ', ''))
         if not nv or not lydo:
             return False, "Tên nhân viên và Lý do nghỉ không được để trống."
 
@@ -9188,7 +9203,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             if existing_today:
                 normalized_existing = {normalize_leave_reason(x) for x in existing_today}
                 if normalize_leave_reason(chosen_loai) in normalized_existing:
-                    st.error(f"❌ Nhân viên này đã có Lý do nghỉ: '{chosen_loai.replace('🔴 ', '')}' vào ngày này rồi. KHÔNG THỂ trùng cùng 1 loại nghỉ!")
+                    st.error(f"❌ Nhân viên này đã có Lý do nghỉ: '{clean_leave_reason_display(chosen_loai)}' vào ngày này rồi. KHÔNG THỂ trùng cùng 1 loại nghỉ!")
                     confirm_multiple = False
                 else:
                     st.warning(f"⚠️ CẢNH BÁO: Nhân viên '{chosen_nv}' đã có các lịch sau trong ngày {start_date.strftime('%d/%m/%Y')}: {', '.join(existing_today)}")
@@ -9219,7 +9234,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                     elif early_warning:
                         st.error(f"❌ Không thể lưu: {early_warning}")
                     else:
-                        norm_loai = chosen_loai.strip().lower().replace("🔴 ", "")
+                        norm_loai = normalize_leave_reason(chosen_loai)
                         num_days_selected = (end_date - start_date).days + 1
 
                         if is_loi_vi_pham:
@@ -9289,7 +9304,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                                     latest_registration_df = combine_leave_sources_for_daily_stats(df_lich, df_leave_secondary, df_backup)
                                     if _leave_exists_in_sources(latest_registration_df, curr_date_iter, chosen_nv, chosen_loai):
                                         st.error(
-                                            f"❌ {chosen_nv} đã có '{chosen_loai.replace('🔴 ', '')}' ngày "
+                                            f"❌ {chosen_nv} đã có '{clean_leave_reason_display(chosen_loai)}' ngày "
                                             f"{curr_date_iter.strftime('%d/%m/%Y')}. Không thể đăng ký trùng."
                                         )
                                         all_saved = False
@@ -9323,7 +9338,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
                                     # GỌI HÀM LƯU LÊN GOOGLE SHEETS
                                     penalty_to_save = float(default_phat) if is_progressive_penalty_reason(chosen_loai) else float(val_phat)
                                     success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
-                                        curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, chosen_loai.replace("🔴 ", ""),
+                                        curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, clean_leave_reason_display(chosen_loai),
                                         input_chitiet, val_songay, accumulated_month, penalty_to_save, st.session_state.current_user,
                                         df_main_source=df_lich
                                     )
@@ -9637,7 +9652,7 @@ elif selected_page == "📅 Đăng ký & Thống kê nghỉ phép":
             raw_detail_full = filtered_df.copy().reset_index(drop=True)
             raw_detail = raw_detail_full.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore').copy()
             if 'Lý do nghỉ' in raw_detail.columns:
-                raw_detail['Lý do nghỉ'] = raw_detail['Lý do nghỉ'].astype(str).str.replace('🔴 ', '', regex=False).str.strip()
+                raw_detail['Lý do nghỉ'] = raw_detail['Lý do nghỉ'].apply(clean_leave_reason_display)
 
             # Danh mục Lý do nghỉ dùng trực tiếp trong bảng sửa.
             reason_options = get_leave_reason_options(

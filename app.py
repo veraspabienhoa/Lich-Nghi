@@ -2766,6 +2766,115 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
     return output.getvalue()
 
 
+
+def build_employee_payroll_excel_bytes(employee_row, start_date, end_date):
+    """Tạo phiếu lương cá nhân theo đúng bố cục nội dung email gửi nhân viên."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+    from openpyxl.worksheet.page import PageMargins
+
+    emp = str(employee_row.get('Tên Hệ thống', '')).strip()
+    # Bản V21 đã bỏ cột Họ và Tên khỏi bảng lương; nếu dữ liệu cũ còn cột này thì vẫn ưu tiên dùng.
+    full = str(employee_row.get('Họ và tên', '')).strip()
+    display_name = full if full and full.lower() not in {'nan', 'none'} else emp
+
+    items = [
+        ('Tiền Lương', 'Tiền Lương'),
+        ('Tiền Hỗ Trợ Hoàn Lại', 'Tiền Hỗ Trợ Hoàn Lại'),
+        ('Tích lũy', 'Tích lũy'),
+        ('Chi Phí Sinh Hoạt', 'Chi Phí Sinh Hoạt'),
+        ('Tiền phạt trong tháng', 'Tiền phạt trong tháng'),
+        ('Tiền ứng lương', 'Tiền ứng lương'),
+        ('Tiền hỗ trợ Locker', 'Tiền hỗ trợ Locker'),
+        ('Số tiền thực nhận', 'Số tiền thực nhận'),
+    ]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Bảng lương'
+    ws.sheet_view.showGridLines = False
+
+    thin = Side(style='thin', color='D9D9D9')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_fill = PatternFill('solid', fgColor='A1948C')
+
+    # Lời chào / thông tin kỳ lương giống nội dung email.
+    ws.merge_cells('A1:B1')
+    ws['A1'] = f'Chào {display_name},'
+    ws['A1'].font = Font(name='Arial', size=14, bold=False, color='000000')
+    ws['A1'].alignment = Alignment(horizontal='left', vertical='center')
+    ws.row_dimensions[1].height = 24
+
+    ws.merge_cells('A3:B3')
+    ws['A3'] = f"VERA SPA gửi bảng lương kỳ từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}."
+    ws['A3'].font = Font(name='Arial', size=12, color='000000')
+    ws['A3'].alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+    ws.row_dimensions[3].height = 30
+
+    # Bảng Khoản mục / Số tiền.
+    ws['A5'] = 'Khoản mục'
+    ws['B5'] = 'Số tiền'
+    for c in ('A5', 'B5'):
+        ws[c].font = Font(name='Arial', size=11, bold=True, color='000000')
+        ws[c].fill = header_fill
+        ws[c].alignment = Alignment(horizontal='center', vertical='center')
+        ws[c].border = border
+    ws.row_dimensions[5].height = 25
+
+    row = 6
+    for label, source_col in items:
+        ws.cell(row=row, column=1, value=label)
+        ws.cell(row=row, column=2, value=float(_money_to_float(employee_row.get(source_col, 0))))
+        ws.cell(row=row, column=1).font = Font(name='Arial', size=11, bold=False)
+        ws.cell(row=row, column=2).font = Font(name='Arial', size=11, bold=(source_col == 'Số tiền thực nhận'))
+        ws.cell(row=row, column=1).alignment = Alignment(horizontal='left', vertical='center')
+        ws.cell(row=row, column=2).alignment = Alignment(horizontal='right', vertical='center')
+        ws.cell(row=row, column=2).number_format = '#,##0 "VNĐ"'
+        ws.cell(row=row, column=1).border = border
+        ws.cell(row=row, column=2).border = border
+        ws.row_dimensions[row].height = 23
+        row += 1
+
+    net = float(_money_to_float(employee_row.get('Số tiền thực nhận', 0)))
+    net_row = row + 1
+    ws.merge_cells(start_row=net_row, start_column=1, end_row=net_row, end_column=2)
+    ws.cell(net_row, 1, f'Số tiền thực nhận: {net:,.0f} VNĐ')
+    ws.cell(net_row, 1).font = Font(name='Arial', size=13, bold=True, color='000000')
+    ws.cell(net_row, 1).alignment = Alignment(horizontal='left', vertical='center')
+    ws.row_dimensions[net_row].height = 28
+
+    note_row = net_row + 2
+    ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=2)
+    ws.cell(note_row, 1, 'Vui lòng kiểm tra và phản hồi nếu có sai sót.')
+    ws.cell(note_row, 1).font = Font(name='Arial', size=11)
+    ws.cell(note_row, 1).alignment = Alignment(horizontal='left', vertical='center')
+
+    sign_row = note_row + 2
+    ws.merge_cells(start_row=sign_row, start_column=1, end_row=sign_row, end_column=2)
+    ws.cell(sign_row, 1, 'Trân trọng,')
+    ws.cell(sign_row, 1).font = Font(name='Arial', size=11)
+
+    ws.merge_cells(start_row=sign_row + 1, start_column=1, end_row=sign_row + 1, end_column=2)
+    ws.cell(sign_row + 1, 1, 'VERA SPA')
+    ws.cell(sign_row + 1, 1).font = Font(name='Arial', size=12, bold=True)
+
+    # Căn vừa trang và dễ đọc trên điện thoại/PC khi mở file.
+    ws.column_dimensions['A'].width = 32
+    ws.column_dimensions['B'].width = 22
+    ws.page_setup.orientation = ws.ORIENTATION_PORTRAIT
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
+    ws.page_margins = PageMargins(left=0.45, right=0.45, top=0.5, bottom=0.5, header=0.2, footer=0.2)
+    ws.print_options.horizontalCentered = True
+    ws.print_area = f'A1:B{sign_row + 1}'
+    ws.sheet_view.zoomScale = 90
+
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
 def send_payroll_email(sender_email, sender_password, to_email, employee_row, start_date, end_date):
     try:
         emp = str(employee_row.get('Tên Hệ thống',''))
@@ -2796,8 +2905,7 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
         msg['To'] = to_email
         msg['Subject'] = subject
         msg.attach(MIMEText(html, 'html'))
-        one_df = pd.DataFrame([employee_row])
-        attachment = build_payroll_excel_bytes(one_df, start_date, end_date)
+        attachment = build_employee_payroll_excel_bytes(employee_row, start_date, end_date)
         part = MIMEApplication(attachment, _subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         part.add_header('Content-Disposition', 'attachment', filename=f"BangLuong_{normalize_login_name(emp).replace(' ','_')}_{start_date.strftime('%d%m%Y')}_{end_date.strftime('%d%m%Y')}.xlsx")
         msg.attach(part)

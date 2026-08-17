@@ -2211,17 +2211,17 @@ def to_excel(df):
 
 
 # ==========================================================
-# THỐNG KÊ LƯƠNG - ADMIN / LỄ TÂN ĐƯỢC ADMIN MỞ QUYỀN
+# THỐNG KÊ LƯƠNG - ADMIN; LỄ TÂN CHỈ ĐƯỢC XEM KHI ADMIN MỞ QUYỀN, KHÔNG CÓ DÒNG LƯƠNG
 # ==========================================================
 PAYROLL_COLUMNS = [
     "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
-    "Hỗ trợ dạy nghề", "Học phí", "Tích lũy", "Chi Phí Sinh Hoạt",
-    "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker",
-    "Số tiền thực nhận", "Email", "Số tài khoản ngân hàng", "Tên ngân hàng", "Số dòng Tip"
+    "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
+    "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Email",
+    "Số tài khoản ngân hàng", "Tên ngân hàng", "Số dòng Tip"
 ]
 PAYROLL_ADJUSTMENT_COLUMNS = [
-    "Tiền Hỗ Trợ Hoàn Lại", "Hỗ trợ dạy nghề", "Học phí", "Tích lũy",
-    "Chi Phí Sinh Hoạt", "Tiền ứng lương", "Tiền hỗ trợ Locker"
+    "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
+    "Tiền ứng lương", "Tiền hỗ trợ Locker"
 ]
 PAYROLL_HISTORY_HEADERS = [
     "Mã bản lưu", "Từ ngày", "Đến ngày", "Ngày lưu", "Giờ lưu", "Người lưu", "Nguồn dữ liệu",
@@ -2255,7 +2255,24 @@ def _ensure_payroll_storage():
             if header[:len(PAYROLL_HISTORY_HEADERS)] != PAYROLL_HISTORY_HEADERS:
                 gspread_update_range(ws_pay, f"A1:X1", [PAYROLL_HISTORY_HEADERS])
         if not ws_cfg.row_values(1):
-            gspread_update_range(ws_cfg, "A1:B2", [["Key", "Value"], ["letan_payroll_access", "0"]])
+            gspread_update_range(ws_cfg, "A1:B4", [
+                ["Key", "Value"],
+                ["letan_payroll_access", "0"],
+                ["default_living_expense", "150000"],
+                ["default_locker_support", "80000"],
+            ])
+        else:
+            # Bổ sung cấu hình mặc định nếu file hệ thống đã tồn tại từ bản cũ.
+            cfg_vals = ws_cfg.get('A:B')
+            existing_keys = {str(r[0]).strip() for r in cfg_vals[1:] if r}
+            next_row = max(2, len(cfg_vals) + 1)
+            additions = []
+            if "default_living_expense" not in existing_keys:
+                additions.append(["default_living_expense", "150000"])
+            if "default_locker_support" not in existing_keys:
+                additions.append(["default_locker_support", "80000"])
+            if additions:
+                gspread_update_range(ws_cfg, f"A{next_row}:B{next_row + len(additions) - 1}", additions)
         return ws_pay, ws_cfg, ""
     except Exception as e:
         return None, None, f"Lỗi khởi tạo vùng lưu bảng lương: {e}"
@@ -2294,6 +2311,48 @@ def set_payroll_letan_enabled(enabled):
         return True, "Đã mở quyền xem Bảng lương cho Lễ tân." if enabled else "Đã đóng quyền xem Bảng lương của Lễ tân."
     except Exception as e:
         return False, f"Lỗi cập nhật quyền Lễ tân: {e}"
+
+
+def get_payroll_default_amounts():
+    """Đọc hai mức mặc định dùng cho mọi nhân viên/kỳ lương."""
+    living, locker = 150000.0, 80000.0
+    try:
+        _, ws_cfg, err = _ensure_payroll_storage()
+        if not err and ws_cfg is not None:
+            vals = ws_cfg.get('A:B')
+            cfg = {str(r[0]).strip(): (r[1] if len(r) > 1 else '') for r in vals[1:] if r}
+            living = _money_to_float(cfg.get('default_living_expense', living)) or living
+            locker = _money_to_float(cfg.get('default_locker_support', locker)) or locker
+    except Exception:
+        pass
+    return float(living), float(locker)
+
+
+def set_payroll_default_amounts(living_expense, locker_support):
+    """Lưu mức mặc định để áp dụng cho các kỳ lương tiếp theo."""
+    try:
+        _, ws_cfg, err = _ensure_payroll_storage()
+        if err or ws_cfg is None:
+            return False, err or "Không mở được sheet cấu hình."
+        vals = ws_cfg.get('A:B')
+        key_rows = {}
+        for idx, row in enumerate(vals[1:], start=2):
+            if row:
+                key_rows[str(row[0]).strip()] = idx
+        for key, value in [
+            ('default_living_expense', int(round(_money_to_float(living_expense)))),
+            ('default_locker_support', int(round(_money_to_float(locker_support)))),
+        ]:
+            row_idx = key_rows.get(key)
+            if row_idx is None:
+                row_idx = max(2, len(vals) + 1)
+                vals.append([key, str(value)])
+                gspread_update_range(ws_cfg, f"A{row_idx}:B{row_idx}", [[key, str(value)]])
+            else:
+                ws_cfg.update_cell(row_idx, 2, str(value))
+        return True, "Đã lưu mức Chi phí sinh hoạt và Hỗ trợ Locker mặc định."
+    except Exception as e:
+        return False, f"Lỗi lưu mức mặc định: {e}"
 
 
 def _money_to_float(value):
@@ -2395,14 +2454,17 @@ def resolve_payroll_period(preset, today=None, custom_range=None):
     return None, None, "Không xác định được kỳ lương."
 
 
-def _period_penalty_by_employee(start_date, end_date, leave_primary, leave_secondary):
+def _period_penalty_by_employee(start_date, end_date, leave_primary=None, leave_secondary=None):
+    """Tiền phạt CHỈ lấy từ Google Sheet 1Kz0... (SHEET_DU_PHONG_ID), theo kỳ đang chọn."""
     try:
-        combined = combine_leave_sources_for_daily_stats(leave_secondary, leave_primary)
-        if combined.empty:
+        d = leave_primary.copy() if isinstance(leave_primary, pd.DataFrame) else load_backup_sheet_data()
+        if d is None or d.empty:
             return {}
-        d = combined.copy()
+        if 'Ngày' not in d.columns or 'Tên nhân viên' not in d.columns or 'Phạt vi phạm' not in d.columns:
+            return {}
+        d = d.copy()
         d['Ngày_DT'] = pd.to_datetime(d['Ngày'], dayfirst=True, errors='coerce').dt.date
-        d['Phạt vi phạm'] = pd.to_numeric(d['Phạt vi phạm'], errors='coerce').fillna(0)
+        d['Phạt vi phạm'] = d['Phạt vi phạm'].apply(_money_to_float)
         d = d[(d['Ngày_DT'] >= start_date) & (d['Ngày_DT'] <= end_date)]
         d['__key'] = d['Tên nhân viên'].apply(normalize_login_name)
         return d.groupby('__key')['Phạt vi phạm'].sum().to_dict()
@@ -2410,7 +2472,7 @@ def _period_penalty_by_employee(start_date, end_date, leave_primary, leave_secon
         return {}
 
 
-def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_primary=None, leave_secondary=None):
+def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_primary=None, leave_secondary=None, default_living_expense=150000, default_locker_support=80000):
     """Tổng hợp lương: chỉ cộng G khi F bắt đầu bằng 'Tip', nhóm theo tên nhân viên ở cột I."""
     if source_df is None or source_df.empty:
         return pd.DataFrame(columns=PAYROLL_COLUMNS), []
@@ -2428,7 +2490,9 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
         return pd.DataFrame(columns=PAYROLL_COLUMNS), sorted(set(tip['NV tư vấn'].tolist())) if not tip.empty else []
     creds = creds[creds['Tên nhân viên'].astype(str).str.strip() != ''].copy()
     if 'Phân quyền' in creds.columns:
-        creds = creds[creds['Phân quyền'].astype(str).str.lower().ne('admin')]
+        # Không tạo dòng lương cho Admin hoặc Lễ tân.
+        roles = creds['Phân quyền'].astype(str).str.strip().str.lower()
+        creds = creds[~roles.isin(['admin', 'letan'])]
     creds['__key'] = creds['Tên nhân viên'].apply(normalize_login_name)
     penalty_map = _period_penalty_by_employee(start_date, end_date, leave_primary, leave_secondary)
 
@@ -2441,13 +2505,11 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
             "Họ và tên": str(c.get('Họ và tên đầy đủ', '')).strip(),
             "Tiền Lương": float(salary_map.get(k, 0)),
             "Tiền Hỗ Trợ Hoàn Lại": 0.0,
-            "Hỗ trợ dạy nghề": 0.0,
-            "Học phí": 0.0,
             "Tích lũy": 0.0,
-            "Chi Phí Sinh Hoạt": 0.0,
+            "Chi Phí Sinh Hoạt": float(_money_to_float(default_living_expense)),
             "Tiền phạt trong tháng": float(penalty_map.get(k, 0)),
             "Tiền ứng lương": 0.0,
-            "Tiền hỗ trợ Locker": 0.0,
+            "Tiền hỗ trợ Locker": float(_money_to_float(default_locker_support)),
             "Số tiền thực nhận": 0.0,
             "Email": str(c.get('Email', '')).strip(),
             "Số tài khoản ngân hàng": str(c.get('Số tài khoản ngân hàng', '')).strip().replace("'", ""),
@@ -2464,15 +2526,16 @@ def build_payroll_table(source_df, credentials_df, start_date, end_date, leave_p
 def recalculate_payroll_net(df):
     d = df.copy()
     money_cols = [
-        "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Hỗ trợ dạy nghề", "Học phí", "Tích lũy",
+        "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy",
         "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker"
     ]
     for col in money_cols:
-        if col not in d.columns: d[col] = 0
+        if col not in d.columns:
+            d[col] = 0
         d[col] = pd.to_numeric(d[col], errors='coerce').fillna(0)
     net = (
-        d["Tiền Lương"] + d["Tiền Hỗ Trợ Hoàn Lại"] + d["Hỗ trợ dạy nghề"]
-        - d["Học phí"] - d["Tích lũy"] - d["Chi Phí Sinh Hoạt"]
+        d["Tiền Lương"] + d["Tiền Hỗ Trợ Hoàn Lại"]
+        - d["Tích lũy"] - d["Chi Phí Sinh Hoạt"]
         - d["Tiền phạt trong tháng"] - d["Tiền ứng lương"] - d["Tiền hỗ trợ Locker"]
     )
     d["Số tiền thực nhận"] = net.clip(lower=0)
@@ -2530,7 +2593,7 @@ def load_payroll_history():
 def payroll_history_to_table(history_df):
     cols = [c for c in PAYROLL_COLUMNS if c in history_df.columns]
     d = history_df[cols].copy()
-    for col in [c for c in PAYROLL_COLUMNS if c.startswith('Tiền') or c in {'Học phí','Tích lũy','Chi Phí Sinh Hoạt','Số tiền thực nhận'}]:
+    for col in [c for c in PAYROLL_COLUMNS if c.startswith('Tiền') or c in {'Tích lũy','Chi Phí Sinh Hoạt','Số tiền thực nhận'}]:
         if col in d.columns: d[col] = pd.to_numeric(d[col], errors='coerce').fillna(0)
     if 'TT' in d.columns: d['TT'] = pd.to_numeric(d['TT'], errors='coerce').fillna(0).astype(int)
     if 'Số dòng Tip' in d.columns: d['Số dòng Tip'] = pd.to_numeric(d['Số dòng Tip'], errors='coerce').fillna(0).astype(int)
@@ -2538,17 +2601,28 @@ def payroll_history_to_table(history_df):
 
 
 def build_payroll_excel_bytes(payroll_df, start_date, end_date):
-    """Xuất Excel theo mẫu bảng lương: A4 ngang, fit 1 trang chiều ngang, căn cột/dòng gọn."""
+    """Xuất toàn bộ bảng lương: A4 ngang, fit 1 trang chiều rộng, có đầy đủ tài khoản/ngân hàng."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.page import PageMargins
 
     d = recalculate_payroll_net(payroll_df).copy()
+    export_cols = [
+        "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
+        "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
+        "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng", "Email"
+    ]
+    for c in export_cols:
+        if c not in d.columns:
+            d[c] = "" if c in {"Tên Hệ thống","Họ và tên","Số tài khoản ngân hàng","Tên ngân hàng","Email"} else 0
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Bảng lương"
-    ws.merge_cells('A1:T1')
+    last_col = len(export_cols)
+    last_letter = get_column_letter(last_col)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_col)
     ws['A1'] = "BẢNG LƯƠNG NHÂN VIÊN"
     ws['A1'].font = Font(name='Arial', size=18, bold=True)
     ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
@@ -2556,87 +2630,84 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
     ws.row_dimensions[1].height = 30
     ws['A2'] = "KỲ LƯƠNG"
     ws['A2'].font = Font(name='Arial', size=11, bold=True)
-    ws.merge_cells('B2:T2')
+    ws.merge_cells(start_row=2, start_column=2, end_row=2, end_column=last_col)
     ws['B2'] = f"Từ ngày {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}"
     ws['B2'].font = Font(name='Arial', size=11, bold=True)
 
-    left_headers = [
-        "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Hỗ trợ dạy nghề",
-        "Học phí", "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
-        "Tiền hỗ trợ Locker", "Số tiền thực nhận"
-    ]
-    right_headers = ["TT", "Tên Hệ thống", "Tên người nhận", "Số tài khoản nhận", "Số tiền chuyển", "Nội dung giao dịch", "Tên ngân hàng nhận"]
-    headers = left_headers + right_headers
-    for c, h in enumerate(headers, start=1):
+    for c, h in enumerate(export_cols, start=1):
         cell = ws.cell(row=3, column=c, value=h)
-        cell.font = Font(name='Arial', size=9, bold=True)
+        cell.font = Font(name='Arial', size=9, bold=True, color='000000')
         cell.fill = PatternFill('solid', fgColor='A1948C')
         cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    ws.row_dimensions[3].height = 58
+    ws.row_dimensions[3].height = 52
     thin = Side(style='thin', color='A6A6A6')
 
     start_row = 4
+    money_cols = {"Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker", "Số tiền thực nhận"}
     for i, (_, r) in enumerate(d.iterrows(), start=start_row):
-        net = float(_money_to_float(r.get('Số tiền thực nhận', 0)))
-        left_vals = [
-            int(_money_to_float(r.get('TT', i-start_row+1))), str(r.get('Tên Hệ thống','')), str(r.get('Họ và tên','')),
-            _money_to_float(r.get('Tiền Lương',0)), _money_to_float(r.get('Tiền Hỗ Trợ Hoàn Lại',0)),
-            _money_to_float(r.get('Hỗ trợ dạy nghề',0)), _money_to_float(r.get('Học phí',0)), _money_to_float(r.get('Tích lũy',0)),
-            _money_to_float(r.get('Chi Phí Sinh Hoạt',0)), _money_to_float(r.get('Tiền phạt trong tháng',0)),
-            _money_to_float(r.get('Tiền ứng lương',0)), _money_to_float(r.get('Tiền hỗ trợ Locker',0)), net
-        ]
-        right_vals = [
-            int(_money_to_float(r.get('TT', i-start_row+1))), str(r.get('Tên Hệ thống','')), str(r.get('Họ và tên','')),
-            str(r.get('Số tài khoản ngân hàng','')).replace("'", ""), net, "TRA NO CA NHAN", str(r.get('Tên ngân hàng',''))
-        ]
-        for j, val in enumerate(left_vals + right_vals, start=1):
+        for j, col in enumerate(export_cols, start=1):
+            val = r.get(col, '')
+            if col in money_cols:
+                val = float(_money_to_float(val))
+            elif col == 'TT':
+                val = int(_money_to_float(val))
+            elif col == 'Số tài khoản ngân hàng':
+                val = str(val).replace("'", "")
             ws.cell(row=i, column=j, value=val)
-        ws.cell(row=i, column=17).number_format = '@'  # Q: Số tài khoản
+        # Tài khoản ngân hàng buộc kiểu Text để giữ số 0 đầu.
+        bank_col = export_cols.index('Số tài khoản ngân hàng') + 1
+        ws.cell(row=i, column=bank_col).number_format = '@'
 
     total_row = start_row + len(d)
-    ws.cell(total_row, 3, "Tổng")
-    ws.cell(total_row, 16, "Tổng")
-    sum_cols = [4,5,6,7,8,9,10,11,12,13,18]
-    for col in sum_cols:
-        if col == 18:
-            val = d['Số tiền thực nhận'].apply(_money_to_float).sum()
-        else:
-            mapping = {4:'Tiền Lương',5:'Tiền Hỗ Trợ Hoàn Lại',6:'Hỗ trợ dạy nghề',7:'Học phí',8:'Tích lũy',9:'Chi Phí Sinh Hoạt',10:'Tiền phạt trong tháng',11:'Tiền ứng lương',12:'Tiền hỗ trợ Locker',13:'Số tiền thực nhận'}
-            val = d[mapping[col]].apply(_money_to_float).sum() if mapping[col] in d.columns else 0
-        ws.cell(total_row, col, float(val))
-    for c in range(1, 21):
+    ws.cell(total_row, 3, "TỔNG")
+    for j, col in enumerate(export_cols, start=1):
+        if col in money_cols:
+            ws.cell(total_row, j, float(d[col].apply(_money_to_float).sum()))
+    for c in range(1, last_col + 1):
         ws.cell(total_row, c).font = Font(name='Arial', size=10, bold=True)
         ws.cell(total_row, c).fill = PatternFill('solid', fgColor='E2E3E5')
 
-    for row in ws.iter_rows(min_row=3, max_row=total_row, min_col=1, max_col=20):
+    for row in ws.iter_rows(min_row=3, max_row=total_row, min_col=1, max_col=last_col):
         for cell in row:
             cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
             if cell.row >= 4:
                 cell.font = Font(name='Arial', size=9, bold=(cell.row == total_row))
                 cell.alignment = Alignment(vertical='center', wrap_text=True)
-    for col in list(range(4,14)) + [18]:
-        for row in range(4, total_row+1):
-            ws.cell(row, col).number_format = '#,##0'
-            ws.cell(row, col).alignment = Alignment(horizontal='right', vertical='center')
+    for j, col in enumerate(export_cols, start=1):
+        if col in money_cols:
+            for row in range(4, total_row + 1):
+                ws.cell(row, j).number_format = '#,##0'
+                ws.cell(row, j).alignment = Alignment(horizontal='right', vertical='center')
 
-    widths = {
-        'A':5, 'B':16, 'C':23, 'D':14, 'E':16, 'F':15, 'G':11, 'H':11, 'I':15, 'J':16, 'K':14, 'L':15, 'M':15,
-        'N':5, 'O':16, 'P':23, 'Q':19, 'R':16, 'S':20, 'T':20
-    }
-    for col, width in widths.items(): ws.column_dimensions[col].width = width
-    for r in range(4, total_row+1): ws.row_dimensions[r].height = 20
+    # Auto-fit có giới hạn để vẫn vừa A4 ngang.
+    for j, col in enumerate(export_cols, start=1):
+        max_len = len(col)
+        for row in range(4, min(total_row, 60) + 1):
+            max_len = max(max_len, len(str(ws.cell(row, j).value or '')))
+        if col in money_cols:
+            width = min(max(max_len + 2, 12), 17)
+        elif col in {'Họ và tên', 'Tên ngân hàng'}:
+            width = min(max(max_len + 2, 16), 24)
+        elif col == 'Email':
+            width = min(max(max_len + 2, 16), 25)
+        else:
+            width = min(max(max_len + 2, 6), 19)
+        ws.column_dimensions[get_column_letter(j)].width = width
+    for r in range(4, total_row + 1):
+        ws.row_dimensions[r].height = 20
+
     ws.freeze_panes = 'A4'
-    ws.auto_filter.ref = f"A3:T{max(3,total_row-1)}"
+    ws.auto_filter.ref = f"A3:{last_letter}{max(3,total_row-1)}"
     ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
-    ws.page_margins = PageMargins(left=0.2, right=0.2, top=0.35, bottom=0.35, header=0.15, footer=0.15)
+    ws.page_margins = PageMargins(left=0.18, right=0.18, top=0.3, bottom=0.3, header=0.12, footer=0.12)
     ws.print_options.horizontalCentered = True
     ws.print_title_rows = '1:3'
-    ws.print_area = f"A1:T{total_row}"
-    ws.sheet_view.zoomScale = 70
+    ws.print_area = f"A1:{last_letter}{total_row}"
+    ws.sheet_view.zoomScale = 65
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
@@ -2648,8 +2719,8 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
         full = str(employee_row.get('Họ và tên',''))
         subject = f"Bảng lương {emp} - {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}"
         money_fields = [
-            "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Hỗ trợ dạy nghề", "Học phí", "Tích lũy",
-            "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker", "Số tiền thực nhận"
+            "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
+            "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker", "Số tiền thực nhận"
         ]
         html_rows = "".join(
             f"<tr><td style='padding:6px;border:1px solid #ddd'>{field}</td><td style='padding:6px;border:1px solid #ddd;text-align:right'>{_money_to_float(employee_row.get(field,0)):,.0f} VNĐ</td></tr>"
@@ -2685,6 +2756,42 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
         return True, "Thành công"
     except Exception as e:
         return False, str(e)
+
+def send_payroll_summary_email(sender_email, sender_password, to_email, recipient_name, payroll_df, start_date, end_date):
+    """Gửi file bảng lương TỔNG HỢP cho đúng một Lễ tân được Admin chỉ định."""
+    try:
+        subject = f"Bảng lương tổng hợp - {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}"
+        total_salary = recalculate_payroll_net(payroll_df)['Tiền Lương'].apply(_money_to_float).sum()
+        total_net = recalculate_payroll_net(payroll_df)['Số tiền thực nhận'].apply(_money_to_float).sum()
+        html = f"""
+        <html><body style='font-family:Arial,sans-serif'>
+        <p>Chào <b>{recipient_name}</b>,</p>
+        <p>VERA SPA gửi file <b>bảng lương tổng hợp</b> kỳ <b>{start_date.strftime('%d/%m/%Y')}</b> đến <b>{end_date.strftime('%d/%m/%Y')}</b>.</p>
+        <p>Số nhân viên: <b>{len(payroll_df)}</b><br>
+        Tổng tiền lương: <b>{total_salary:,.0f} VNĐ</b><br>
+        Tổng thực nhận: <b>{total_net:,.0f} VNĐ</b></p>
+        <p>File Excel đầy đủ được đính kèm email này.</p>
+        <p>Trân trọng,<br><b>VERA SPA</b></p>
+        </body></html>
+        """
+        msg = MIMEMultipart()
+        msg['From'] = f"Vera Spa <{sender_email}>"
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(html, 'html'))
+        attachment = build_payroll_excel_bytes(payroll_df, start_date, end_date)
+        part = MIMEApplication(attachment, _subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        part.add_header('Content-Disposition', 'attachment', filename=f"BangLuong_TongHop_{start_date.strftime('%d%m%Y')}_{end_date.strftime('%d%m%Y')}.xlsx")
+        msg.attach(part)
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.send_message(msg)
+        server.quit()
+        return True, "Đã gửi bảng lương tổng hợp thành công."
+    except Exception as e:
+        return False, str(e)
+
 
 # Tải dữ liệu
 ensure_credential_control_columns()
@@ -3198,6 +3305,26 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
 
     tab_calc, tab_history = st.tabs(["🧮 Tính lương kỳ hiện tại", "🗂 Lịch sử bảng lương đã lưu"])
     with tab_calc:
+        default_living_db, default_locker_db = get_payroll_default_amounts()
+        st.markdown("### ⚙️ Mức khấu trừ mặc định")
+        cfg1, cfg2, cfg3 = st.columns([3, 3, 2])
+        with cfg1:
+            payroll_default_living = st.number_input(
+                "Chi phí sinh hoạt / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
+                value=float(default_living_db), key="payroll_default_living"
+            )
+        with cfg2:
+            payroll_default_locker = st.number_input(
+                "Hỗ trợ Locker / nhân viên", min_value=0.0, step=10000.0, format="%.0f",
+                value=float(default_locker_db), key="payroll_default_locker"
+            )
+        with cfg3:
+            st.write("")
+            if st.button("💾 Lưu mức mặc định", use_container_width=True, key="save_payroll_defaults"):
+                ok, msg = set_payroll_default_amounts(payroll_default_living, payroll_default_locker)
+                (st.success if ok else st.error)(msg)
+        st.caption("Hai mức này được áp dụng cho toàn bộ nhân viên khi tạo bảng lương mới; trường hợp ngoại lệ có thể sửa trực tiếp trên bảng bên dưới.")
+
         c_period, c_source = st.columns(2)
         with c_period:
             preset = st.selectbox(
@@ -3239,9 +3366,12 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 if src_err:
                     st.error(src_err)
                 else:
+                    # Tiền phạt chỉ dùng dữ liệu ở Google Sheet 1Kz0...; không lấy nguồn lịch nghỉ thứ hai.
                     payroll_df, unmatched_names = build_payroll_table(
                         src_df, df_credentials, p_start, p_end,
-                        leave_primary=df_backup, leave_secondary=df_leave_secondary
+                        leave_primary=load_backup_sheet_data(), leave_secondary=None,
+                        default_living_expense=payroll_default_living,
+                        default_locker_support=payroll_default_locker
                     )
                     st.session_state.payroll_current_df = payroll_df
                     st.session_state.payroll_current_start = p_start.isoformat()
@@ -3258,21 +3388,22 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             if unmatched:
                 st.warning("Có tên ở dữ liệu Tip nhưng không khớp tài khoản hệ thống: " + ", ".join(map(str, unmatched)))
 
-            # Bảng nhập các khoản điều chỉnh. Tiền Lương / Phạt được tự động lấy, các khoản khác cho Admin/Lễ tân chỉnh.
+            # Bảng nhập điều chỉnh: không tạo lương cho Lễ tân; bỏ Học phí/Hỗ trợ dạy nghề.
+            # Chi phí sinh hoạt và Locker đã được đổ mặc định cho tất cả, ngoại lệ sửa trực tiếp tại đây.
             editor_cols = [
-                "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Hỗ trợ dạy nghề",
-                "Học phí", "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker"
+                "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
+                "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker"
             ]
             editor_df = current[editor_cols].copy()
             col_cfg = {
                 "TT": st.column_config.NumberColumn("TT", format="%d", disabled=True, width="small"),
-                "Tên Hệ thống": st.column_config.TextColumn("Tên Hệ thống", disabled=True, width="medium"),
-                "Họ và tên": st.column_config.TextColumn("Họ và tên", disabled=True, width="large"),
-                "Tiền Lương": st.column_config.NumberColumn("Tiền Lương", format="%.0f", disabled=True),
-                "Tiền phạt trong tháng": st.column_config.NumberColumn("Tiền phạt trong tháng", format="%.0f", disabled=True),
+                "Tên Hệ thống": st.column_config.TextColumn("Tên Hệ thống", disabled=True, width="small"),
+                "Họ và tên": st.column_config.TextColumn("Họ và tên", disabled=True, width="medium"),
+                "Tiền Lương": st.column_config.NumberColumn("Tiền Lương", format="%.0f", disabled=True, width="small"),
+                "Tiền phạt trong tháng": st.column_config.NumberColumn("Tiền phạt", format="%.0f", disabled=True, width="small"),
             }
             for c in PAYROLL_ADJUSTMENT_COLUMNS:
-                col_cfg[c] = st.column_config.NumberColumn(c, min_value=0.0, step=50000.0, format="%.0f")
+                col_cfg[c] = st.column_config.NumberColumn(c, min_value=0.0, step=50000.0, format="%.0f", width="small")
             edited = st.data_editor(
                 editor_df, key="payroll_adjustment_editor", width="stretch", height="content", hide_index=True,
                 column_config=col_cfg, disabled=["TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền phạt trong tháng"]
@@ -3293,11 +3424,29 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             c3.metric("Tổng tiền phạt", f"{total_penalty:,.0f} đ".replace(',', '.'))
             c4.metric("Tổng thực nhận", f"{total_net:,.0f} đ".replace(',', '.'))
 
-            display_cols = [c for c in PAYROLL_COLUMNS if c not in {"Email", "Số tài khoản ngân hàng", "Tên ngân hàng"}]
+            display_cols = [
+                "TT", "Tên Hệ thống", "Họ và tên", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
+                "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương",
+                "Tiền hỗ trợ Locker", "Số tiền thực nhận", "Số tài khoản ngân hàng", "Tên ngân hàng"
+            ]
             st.markdown("### 📋 Bảng lương tổng hợp")
-            st.dataframe(
-                final_df[display_cols].style.format({c: '{:,.0f}' for c in final_df[display_cols].columns if c.startswith('Tiền') or c in {'Học phí','Tích lũy','Chi Phí Sinh Hoạt','Số tiền thực nhận'}}),
-                width="stretch", height="content", hide_index=True
+            # HTML table dùng width:100% + table-layout:fixed để không tạo thanh cuộn ngang/dọc.
+            web_df = final_df[display_cols].copy()
+            money_web_cols = [c for c in display_cols if c.startswith('Tiền') or c in {'Tích lũy','Chi Phí Sinh Hoạt','Số tiền thực nhận'}]
+            for c in money_web_cols:
+                web_df[c] = web_df[c].apply(lambda v: f"{_money_to_float(v):,.0f}".replace(',', '.'))
+            web_df['Số tài khoản ngân hàng'] = web_df['Số tài khoản ngân hàng'].astype(str).str.replace("'", "", regex=False).replace({'nan':'','None':''})
+            payroll_html = web_df.to_html(index=False, escape=True, classes='vera-payroll-table')
+            st.markdown(
+                """<style>
+                .vera-payroll-wrap{width:100%;overflow:visible;}
+                table.vera-payroll-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:clamp(8px,.68vw,12px);}
+                table.vera-payroll-table th{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 3px;border:1px solid #c9c9c9;white-space:normal;word-break:break-word;}
+                table.vera-payroll-table td{padding:4px 3px;border:1px solid #dedede;white-space:normal;word-break:break-word;vertical-align:middle;}
+                table.vera-payroll-table tbody tr:nth-child(even){background:#fafafa;}
+                @media(max-width:800px){table.vera-payroll-table{font-size:7px;}table.vera-payroll-table th,table.vera-payroll-table td{padding:3px 1px;}}
+                </style>""" + f"<div class='vera-payroll-wrap'>{payroll_html}</div>",
+                unsafe_allow_html=True
             )
 
             c_save, c_export = st.columns(2)
@@ -3347,6 +3496,31 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         if ok_count: st.success(f"Đã gửi thành công {ok_count}/{len(selected_email_emps)} email bảng lương.")
                         for e in errors: st.error(e)
 
+            if st.session_state.current_role == "admin":
+                with st.expander("📨 GỬI BẢNG LƯƠNG TỔNG HỢP CHO LỄ TÂN"):
+                    letan_df = df_credentials.copy()
+                    if not letan_df.empty and 'Phân quyền' in letan_df.columns:
+                        letan_df = letan_df[letan_df['Phân quyền'].astype(str).str.strip().str.lower().eq('letan')].copy()
+                        letan_df = letan_df[letan_df['Email'].astype(str).str.contains('@', na=False)] if 'Email' in letan_df.columns else pd.DataFrame()
+                    if letan_df.empty:
+                        st.info("Không có tài khoản Lễ tân nào có Email hợp lệ trong hồ sơ hệ thống.")
+                    else:
+                        letan_options = letan_df['Tên nhân viên'].astype(str).tolist()
+                        selected_letan = st.selectbox(
+                            "Chọn Lễ tân nhận bảng lương tổng hợp:", letan_options,
+                            filter_mode="contains", key="payroll_summary_letan"
+                        )
+                        if st.button("📤 Gửi bảng lương tổng hợp cho Lễ tân này", use_container_width=True, key="send_payroll_summary_letan"):
+                            rletan = letan_df[letan_df['Tên nhân viên'].astype(str) == str(selected_letan)].iloc[0]
+                            sender_email = "veraspabienhoa@gmail.com"
+                            sender_pass = "zvtgbysfmdaqxaau"
+                            ok, msg = send_payroll_summary_email(
+                                sender_email, sender_pass, str(rletan.get('Email','')).strip(),
+                                str(rletan.get('Họ và tên đầy đủ','')).strip() or str(selected_letan),
+                                final_df, current_start, current_end
+                            )
+                            (st.success if ok else st.error)(msg)
+
     with tab_history:
         history = load_payroll_history()
         if history.empty or 'Mã bản lưu' not in history.columns:
@@ -3363,7 +3537,27 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     f"Lưu bởi {saved.iloc[0].get('Người lưu','')} lúc {saved.iloc[0].get('Giờ lưu','')} ngày {saved.iloc[0].get('Ngày lưu','')}"
                 )
                 saved_table = payroll_history_to_table(saved)
-                st.dataframe(saved_table, width="stretch", height="content", hide_index=True)
+                # Không hiển thị/tính dòng Lễ tân kể cả với bản lịch sử cũ đã lưu từ V18.
+                try:
+                    letan_keys = set(
+                        df_credentials.loc[
+                            df_credentials['Phân quyền'].astype(str).str.strip().str.lower().eq('letan'), 'Tên nhân viên'
+                        ].apply(normalize_login_name).tolist()
+                    )
+                    if 'Tên Hệ thống' in saved_table.columns and letan_keys:
+                        saved_table = saved_table[~saved_table['Tên Hệ thống'].apply(normalize_login_name).isin(letan_keys)].copy()
+                except Exception:
+                    pass
+                hist_display_cols = [c for c in [
+                    "TT","Tên Hệ thống","Họ và tên","Tiền Lương","Tiền Hỗ Trợ Hoàn Lại","Tích lũy",
+                    "Chi Phí Sinh Hoạt","Tiền phạt trong tháng","Tiền ứng lương","Tiền hỗ trợ Locker",
+                    "Số tiền thực nhận","Số tài khoản ngân hàng","Tên ngân hàng"
+                ] if c in saved_table.columns]
+                hist_web = saved_table[hist_display_cols].copy()
+                for c in [x for x in hist_display_cols if x.startswith('Tiền') or x in {'Tích lũy','Chi Phí Sinh Hoạt','Số tiền thực nhận'}]:
+                    hist_web[c] = hist_web[c].apply(lambda v: f"{_money_to_float(v):,.0f}".replace(',', '.'))
+                hist_html = hist_web.to_html(index=False, escape=True, classes='vera-payroll-table')
+                st.markdown(f"<div class='vera-payroll-wrap'>{hist_html}</div>", unsafe_allow_html=True)
                 try:
                     hs = pd.to_datetime(saved.iloc[0]['Từ ngày'], dayfirst=True).date()
                     he = pd.to_datetime(saved.iloc[0]['Đến ngày'], dayfirst=True).date()

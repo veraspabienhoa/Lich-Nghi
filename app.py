@@ -4249,6 +4249,65 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 except Exception:
                     hs, he = get_vn_today(), get_vn_today()
 
+                # Cập nhật các dữ liệu hệ thống có thể thay đổi sau khi bản lương đã được lưu.
+                # Nút được đặt ngay phía trên tiêu đề Mở lại và chỉnh sửa bản lương theo yêu cầu.
+                st.caption(
+                    "Nút cập nhật hệ thống sẽ làm mới: Vi phạm, Phí Sinh Hoạt, Tiền hỗ trợ Locker, "
+                    "Tài khoản ngân hàng, Tên ngân hàng và Email. Tiền Lương không bị thay đổi."
+                )
+                if st.button(
+                    "🔄 Cập nhật bảng lương từ hệ thống",
+                    use_container_width=True,
+                    key=f"refresh_payroll_from_system_{batch}"
+                ):
+                    progress_refresh = st.progress(0)
+                    status_refresh = st.empty()
+                    try:
+                        status_refresh.info("⏳ Đang tải hồ sơ nhân viên mới nhất...")
+                        progress_refresh.progress(20)
+                        try:
+                            load_credentials.clear()
+                        except Exception:
+                            pass
+                        credentials_live = load_credentials()
+
+                        status_refresh.info("⏳ Đang tải tiền phạt trong kỳ từ hệ thống lịch nghỉ...")
+                        progress_refresh.progress(45)
+                        try:
+                            load_backup_sheet_data.clear()
+                        except Exception:
+                            pass
+                        leave_live = load_backup_sheet_data()
+
+                        status_refresh.info("⏳ Đang tải mức Phí sinh hoạt / Locker và cập nhật bảng lương...")
+                        progress_refresh.progress(70)
+                        _clear_payroll_config_cache()
+                        refreshed_df, refresh_meta = refresh_saved_payroll_from_system(
+                            saved_table, hs, he,
+                            credentials_df=credentials_live,
+                            leave_primary=leave_live
+                        )
+
+                        current_hist_version = int(st.session_state.get(hist_editor_version_key, 0) or 0)
+                        st.session_state[hist_refresh_key] = refreshed_df
+                        st.session_state[hist_editor_version_key] = current_hist_version + 1
+                        saved_table = _filter_real_payroll_rows(refreshed_df.copy())
+
+                        progress_refresh.progress(100)
+                        status_refresh.success(
+                            f"✅ Đã cập nhật dữ liệu hệ thống cho {refresh_meta.get('updated', len(refreshed_df))} nhân viên. "
+                            "Tiền Lương và các khoản nhập tay được giữ nguyên; Thực nhận đã tính lại."
+                        )
+                        missing_profiles = refresh_meta.get('missing', [])
+                        if missing_profiles:
+                            st.warning(
+                                "⚠️ Không tìm thấy hồ sơ hệ thống của: " + ", ".join(missing_profiles)
+                                + ". Các thông tin ngân hàng/email cũ của những người này được giữ nguyên."
+                            )
+                    except Exception as e:
+                        progress_refresh.empty()
+                        status_refresh.error(f"❌ Không cập nhật được bảng lương từ hệ thống: {e}")
+
                 st.markdown("#### ✏️ Mở lại và chỉnh sửa bản lương")
                 st.caption(
                     "Bạn có thể sửa trực tiếp các khoản tiền bên dưới. Cột Thực nhận được hệ thống tự tính lại. "
@@ -4294,68 +4353,6 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         edited_saved_table[c] = edited_hist[c].values
                 edited_saved_table = recalculate_payroll_net(edited_saved_table)
                 edited_saved_table = _filter_real_payroll_rows(edited_saved_table)
-
-                # Cập nhật các dữ liệu hệ thống có thể thay đổi sau khi bản lương đã được lưu.
-                # Giữ nguyên Tiền Lương và các khoản Admin nhập tay; chỉ đồng bộ phạt,
-                # mức sinh hoạt/Locker, ngân hàng, email rồi tính lại Thực nhận.
-                if st.button(
-                    "🔄 Cập nhật bảng lương từ hệ thống",
-                    use_container_width=True,
-                    key=f"refresh_payroll_from_system_{batch}"
-                ):
-                    progress_refresh = st.progress(0)
-                    status_refresh = st.empty()
-                    try:
-                        status_refresh.info("⏳ Đang tải hồ sơ nhân viên mới nhất...")
-                        progress_refresh.progress(20)
-                        try:
-                            load_credentials.clear()
-                        except Exception:
-                            pass
-                        credentials_live = load_credentials()
-
-                        status_refresh.info("⏳ Đang tải tiền phạt trong kỳ từ hệ thống lịch nghỉ...")
-                        progress_refresh.progress(45)
-                        try:
-                            load_backup_sheet_data.clear()
-                        except Exception:
-                            pass
-                        leave_live = load_backup_sheet_data()
-
-                        status_refresh.info("⏳ Đang tải mức Phí sinh hoạt / Locker và cập nhật bảng lương...")
-                        progress_refresh.progress(70)
-                        # Làm mới đúng cache cấu hình lương 1 lần; hai hàm get bên trong
-                        # dùng chung snapshot nên không tạo bão request API.
-                        _clear_payroll_config_cache()
-                        refreshed_df, refresh_meta = refresh_saved_payroll_from_system(
-                            edited_saved_table, hs, he,
-                            credentials_df=credentials_live,
-                            leave_primary=leave_live
-                        )
-
-                        st.session_state[hist_refresh_key] = refreshed_df
-                        st.session_state[hist_editor_version_key] = hist_editor_version + 1
-                        progress_refresh.progress(100)
-                        status_refresh.success(
-                            f"✅ Đã cập nhật dữ liệu hệ thống cho {refresh_meta.get('updated', len(refreshed_df))} nhân viên. "
-                            "Tiền Lương và các khoản nhập tay được giữ nguyên; Thực nhận đã tính lại."
-                        )
-                        missing_profiles = refresh_meta.get('missing', [])
-                        if missing_profiles:
-                            st.warning(
-                                "⚠️ Không tìm thấy hồ sơ hệ thống của: " + ", ".join(missing_profiles)
-                                + ". Các thông tin ngân hàng/email cũ của những người này được giữ nguyên."
-                            )
-                        time.sleep(0.35)
-                        st.rerun()
-                    except Exception as e:
-                        progress_refresh.empty()
-                        status_refresh.error(f"❌ Không cập nhật được bảng lương từ hệ thống: {e}")
-
-                st.caption(
-                    "Nút cập nhật hệ thống sẽ làm mới: Vi phạm, Phí Sinh Hoạt, Tiền hỗ trợ Locker, "
-                    "Tài khoản ngân hàng, Tên ngân hàng và Email. Tiền Lương không bị thay đổi."
-                )
 
                 # Hiển thị nhanh tổng sau khi sửa để Admin kiểm tra trước khi ghi đè.
                 h1, h2, h3 = st.columns(3)

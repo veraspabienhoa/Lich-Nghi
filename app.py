@@ -4632,7 +4632,11 @@ def build_payroll_excel_bytes(payroll_df, start_date, end_date):
     ws.cell(total_row, 2, "TỔNG")
     for j, col in enumerate(export_cols, start=1):
         if col in money_cols:
-            ws.cell(total_row, j, float(d[col].apply(_money_to_float).sum()))
+            values = d[col].apply(_money_to_float)
+            # V44: riêng cột J / Thực nhận, dòng TỔNG chỉ cộng những nhân viên có
+            # Thực nhận > 0. Giá trị âm hoặc 0 không được cộng vào tổng chi trả.
+            total_value = values[values > 0].sum() if col == "Số tiền thực nhận" else values.sum()
+            ws.cell(total_row, j, float(total_value))
     for c in range(1, last_col + 1):
         ws.cell(total_row, c).font = Font(name='Arial', size=10, bold=True)
         ws.cell(total_row, c).fill = PatternFill('solid', fgColor='E2E3E5')
@@ -5835,7 +5839,30 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             unsafe_allow_html=True
         )
 
-        if st.button("🧮 Tính lương nhân viên", use_container_width=True, disabled=bool(period_err)):
+        calc_col, recalc_col = st.columns(2)
+        with calc_col:
+            payroll_calc_clicked = st.button(
+                "🧮 Tính lương nhân viên", use_container_width=True, disabled=bool(period_err),
+                key="payroll_calc_button"
+            )
+        with recalc_col:
+            payroll_clear_recalc_clicked = st.button(
+                "🧹 Xóa dữ liệu bảng lương & tính lại", use_container_width=True, disabled=bool(period_err),
+                key="payroll_clear_recalc_button",
+                help="Xóa bảng lương đang nằm trong phiên làm việc, tải lại hồ sơ/role mới nhất rồi tính lại từ đầu."
+            )
+
+        if payroll_clear_recalc_clicked:
+            # Chỉ xóa dữ liệu bảng lương đang tính trong phiên, KHÔNG xóa lịch sử đã lưu.
+            for _k in [
+                "payroll_current_df", "payroll_current_start", "payroll_current_end",
+                "payroll_current_source", "payroll_unmatched", "payroll_adjustment_editor"
+            ]:
+                st.session_state.pop(_k, None)
+            st.session_state.payroll_process_state = "idle"
+            st.session_state.payroll_process_message = "Đã xóa dữ liệu cũ · Đang tính lại từ đầu..."
+
+        if payroll_calc_clicked or payroll_clear_recalc_clicked:
             progress = st.progress(0, text="0% - Bắt đầu xử lý...")
             status = st.status("🧮 Đang tính lương nhân viên...", expanded=True, state="running")
             try:
@@ -5871,19 +5898,36 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 penalty_rows = len(leave_primary) if isinstance(leave_primary, pd.DataFrame) else 0
                 status.write(f"✅ Đã tải {penalty_rows:,} dòng lịch nghỉ/vi phạm".replace(",", "."))
 
-                status.write("4/5 · Đang đồng bộ TichLuy và tính lương")
-                st.session_state.payroll_process_message = "Đang đồng bộ TichLuy và tính lương..."
+                status.write("4/5 · Đang tải lại vai trò nhân viên, đồng bộ TichLuy và tính lương")
+                st.session_state.payroll_process_message = "Đang tải lại vai trò nhân viên và tính lương..."
                 progress.progress(75, text="75% - Đang tính lương")
+
+                # V44: luôn lấy hồ sơ/Phân quyền MỚI NHẤT trước mỗi lần tính lương.
+                # Điều này bảo đảm người vừa đổi từ nhanvien -> letan/quanly/locker/tapvu
+                # bị loại ngay khỏi bảng lương, không chờ cache load_credentials hết hạn.
+                try:
+                    load_credentials.clear()
+                except Exception:
+                    pass
+                credentials_live = load_credentials()
+                df_credentials = credentials_live
+                nhanvien_live_count = 0
+                if isinstance(credentials_live, pd.DataFrame) and not credentials_live.empty and 'Phân quyền' in credentials_live.columns:
+                    nhanvien_live_count = int(
+                        credentials_live['Phân quyền'].astype(str).str.strip().str.lower().eq('nhanvien').sum()
+                    )
+                status.write(f"✅ Hồ sơ mới nhất: {nhanvien_live_count} tài khoản vai trò nhanvien")
+
                 # Bảo đảm mọi nhân viên đủ điều kiện đều có một dòng trong TichLuy trước khi tính.
                 # Đồng bộ chỉ thêm người thiếu + đánh STT; không sửa D/E/F của người đã có.
-                tl_sync_ok, tl_sync_msg = sync_tichluy_roles_and_stt(df_credentials)
+                tl_sync_ok, tl_sync_msg = sync_tichluy_roles_and_stt(credentials_live)
                 if tl_sync_ok:
                     status.write(f"✅ {tl_sync_msg}")
                 else:
                     status.write(f"⚠️ {tl_sync_msg}")
                 # Tiền phạt chỉ dùng dữ liệu ở Google Sheet 1Kz0...; không lấy nguồn lịch nghỉ thứ hai.
                 payroll_df, unmatched_names = build_payroll_table(
-                    src_df, df_credentials, p_start, p_end,
+                    src_df, credentials_live, p_start, p_end,
                     leave_primary=leave_primary, leave_secondary=None,
                     default_living_expense=payroll_default_living,
                     default_locker_support=payroll_default_locker
@@ -6029,13 +6073,20 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 )
 
             with st.expander("📧 GỬI BẢNG LƯƠNG QUA EMAIL"):
-                emailable = final_df[final_df['Email'].astype(str).str.contains('@', na=False)].copy()
+                # V44: không gửi email cá nhân cho nhân viên có Thực nhận = 0.
+                _email_net = final_df['Số tiền thực nhận'].apply(_money_to_float) if 'Số tiền thực nhận' in final_df.columns else pd.Series(0, index=final_df.index)
+                emailable = final_df[
+                    final_df['Email'].astype(str).str.contains('@', na=False) & (_email_net > 0)
+                ].copy()
                 employees_email = emailable['Tên Hệ thống'].tolist()
                 selected_email_emps = st.multiselect(
                     "Chọn 1, nhiều hoặc tất cả nhân viên:", employees_email, default=employees_email,
                     filter_mode="contains", key="payroll_email_recipients"
                 )
-                st.caption(f"Có {len(employees_email)} nhân viên có email hợp lệ trong hồ sơ hệ thống.")
+                st.caption(
+                    f"Có {len(employees_email)} nhân viên có Email hợp lệ và Thực nhận > 0. "
+                    "Nhân viên có Thực nhận = 0 sẽ tự động không được gửi mail."
+                )
                 if st.button("🚀 Gửi bảng lương cho nhân viên đã chọn", use_container_width=True):
                     if not selected_email_emps:
                         st.warning("Vui lòng chọn ít nhất 1 nhân viên.")
@@ -6412,8 +6463,13 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                     )
                     hist_emailable = edited_saved_table.copy()
                     if 'Email' in hist_emailable.columns:
+                        _hist_email_net = (
+                            hist_emailable['Số tiền thực nhận'].apply(_money_to_float)
+                            if 'Số tiền thực nhận' in hist_emailable.columns
+                            else pd.Series(0, index=hist_emailable.index)
+                        )
                         hist_emailable = hist_emailable[
-                            hist_emailable['Email'].astype(str).str.contains('@', na=False)
+                            hist_emailable['Email'].astype(str).str.contains('@', na=False) & (_hist_email_net > 0)
                         ].copy()
                     else:
                         hist_emailable = pd.DataFrame()
@@ -6429,7 +6485,10 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                         filter_mode="contains",
                         key=f"payroll_history_email_recipients_{batch}"
                     )
-                    st.caption(f"Có {len(hist_employee_names)} nhân viên có Email hợp lệ trong bản lương này.")
+                    st.caption(
+                        f"Có {len(hist_employee_names)} nhân viên có Email hợp lệ và Thực nhận > 0 trong bản lương này. "
+                        "Nhân viên có Thực nhận = 0 sẽ không được gửi mail."
+                    )
 
                     if st.button(
                         "🚀 Gửi bảng lương cho nhân viên đã chọn",

@@ -6557,35 +6557,11 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             if unmatched:
                 st.warning("Có tên ở dữ liệu Tip nhưng không khớp tài khoản hệ thống: " + ", ".join(map(str, unmatched)))
 
-            # Bảng nhập điều chỉnh: chỉ có tài khoản role nhanvien; bỏ Học phí/Hỗ trợ dạy nghề.
-            # Chi phí sinh hoạt và Locker đã được đổ mặc định cho tất cả, ngoại lệ sửa trực tiếp tại đây.
-            editor_cols = [
-                "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
-                "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker"
-            ]
-            editor_df = current[editor_cols].copy()
-            editor_df, _ = apply_table_layout_df(editor_df, "payroll_current")
-            col_cfg = {
-                "TT": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["TT"], format="%d", disabled=True, width=layout_width("payroll_current", "TT", "small")),
-                "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS["Tên Hệ thống"], disabled=True, width=layout_width("payroll_current", "Tên Hệ thống", "small")),
-                "Tiền Lương": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền Lương"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền Lương", "small")),
-                "Tiền phạt trong tháng": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền phạt trong tháng"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền phạt trong tháng", "small")),
-                "Tích lũy": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tích lũy"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tích lũy", "small")),
-            }
-            for c in [x for x in PAYROLL_ADJUSTMENT_COLUMNS if x != "Tích lũy"]:
-                col_cfg[c] = st.column_config.NumberColumn(
-                    PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0, format="%,d", width=layout_width("payroll_current", c, "small")
-                )
-            edited = st.data_editor(
-                editor_df, key="payroll_adjustment_editor", width="stretch", height="content", hide_index=True,
-                row_height=layout_row_height("payroll_current"),
-                column_config=col_cfg, disabled=["TT", "Tên Hệ thống", "Tiền Lương", "Tích lũy", "Tiền phạt trong tháng"]
-            )
-            final_df = current.copy()
-            for c in editor_cols:
-                if c in edited.columns:
-                    final_df[c] = edited[c].values
-            final_df = recalculate_payroll_net(final_df)
+            # V49: bảng điều chỉnh được chuyển xuống CUỐI trang và luôn đóng mặc định.
+            # Ở phần nội dung phía trên, dùng dữ liệu bảng lương hiện có trong session.
+            # Khi Admin mở bảng điều chỉnh ở cuối trang và thay đổi số liệu, ứng dụng lưu lại
+            # vào session rồi rerun để toàn bộ thống kê/export/email phía trên cập nhật đồng bộ.
+            final_df = recalculate_payroll_net(current.copy())
             final_df = _filter_real_payroll_rows(final_df)
             st.session_state.payroll_current_df = final_df
 
@@ -6863,6 +6839,60 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                                     (st.success if ok else st.error)(msg)
                         else:
                             st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
+
+            # V49: BẢNG ĐIỀU CHỈNH BẢNG LƯƠNG LUÔN ẨN VÀ NẰM CUỐI CÙNG CỦA TRANG TÍNH LƯƠNG.
+            # Đây chính là bảng TT / Tên Hệ thống / Tiền Lương / Hỗ Trợ Hoàn Lại / Tích lũy / ...
+            # Người dùng chỉ mở khi thật sự cần điều chỉnh.
+            with st.expander("✏️ Mở bảng điều chỉnh bảng lương", expanded=False):
+                st.caption("Bảng này được ẩn mặc định. Chỉ mở khi cần chỉnh các khoản cho bảng lương hiện tại.")
+                editor_cols = [
+                    "TT", "Tên Hệ thống", "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại",
+                    "Tích lũy", "Chi Phí Sinh Hoạt", "Tiền phạt trong tháng", "Tiền ứng lương", "Tiền hỗ trợ Locker"
+                ]
+                editor_source = st.session_state.get('payroll_current_df')
+                if isinstance(editor_source, pd.DataFrame) and not editor_source.empty:
+                    editor_source = _filter_real_payroll_rows(editor_source.copy())
+                    editor_df = editor_source[editor_cols].copy()
+                    editor_df, _ = apply_table_layout_df(editor_df, "payroll_current")
+                    col_cfg = {
+                        "TT": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["TT"], format="%d", disabled=True, width=layout_width("payroll_current", "TT", "small")),
+                        "Tên Hệ thống": st.column_config.TextColumn(PAYROLL_DISPLAY_LABELS["Tên Hệ thống"], disabled=True, width=layout_width("payroll_current", "Tên Hệ thống", "small")),
+                        "Tiền Lương": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền Lương"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền Lương", "small")),
+                        "Tiền phạt trong tháng": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tiền phạt trong tháng"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tiền phạt trong tháng", "small")),
+                        "Tích lũy": st.column_config.NumberColumn(PAYROLL_DISPLAY_LABELS["Tích lũy"], format="%,d", disabled=True, width=layout_width("payroll_current", "Tích lũy", "small")),
+                    }
+                    for c in [x for x in PAYROLL_ADJUSTMENT_COLUMNS if x != "Tích lũy"]:
+                        col_cfg[c] = st.column_config.NumberColumn(
+                            PAYROLL_DISPLAY_LABELS.get(c, c), min_value=0.0, step=50000.0,
+                            format="%,d", width=layout_width("payroll_current", c, "small")
+                        )
+                    edited = st.data_editor(
+                        editor_df, key="payroll_adjustment_editor", width="stretch", height="content", hide_index=True,
+                        row_height=layout_row_height("payroll_current"),
+                        column_config=col_cfg,
+                        disabled=["TT", "Tên Hệ thống", "Tiền Lương", "Tích lũy", "Tiền phạt trong tháng"]
+                    )
+
+                    adjusted_df = editor_source.copy()
+                    for c in editor_cols:
+                        if c in edited.columns:
+                            adjusted_df[c] = edited[c].values
+                    adjusted_df = recalculate_payroll_net(adjusted_df)
+                    adjusted_df = _filter_real_payroll_rows(adjusted_df)
+
+                    compare_cols = [c for c in editor_cols + ["Số tiền thực nhận"] if c in adjusted_df.columns and c in editor_source.columns]
+                    _changed = False
+                    try:
+                        _left = adjusted_df[compare_cols].reset_index(drop=True).fillna(0)
+                        _right = editor_source[compare_cols].reset_index(drop=True).fillna(0)
+                        _changed = not _left.equals(_right)
+                    except Exception:
+                        _changed = True
+                    if _changed:
+                        st.session_state.payroll_current_df = adjusted_df
+                        st.rerun()
+                else:
+                    st.info("Chưa có dữ liệu bảng lương để điều chỉnh.")
 
     with tab_history:
         delete_flash = st.session_state.pop("payroll_history_delete_flash", None)

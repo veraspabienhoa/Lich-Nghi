@@ -139,3 +139,4 @@ Không đưa mật khẩu DB, Gmail app password hoặc service-account private 
 ## Fallback
 
 Nếu PostgreSQL chưa bật hoặc tạm lỗi, V75 vẫn quay về các loader Google Sheets cũ để hệ thống không bị ngừng hoàn toàn.
+Auto deploy test

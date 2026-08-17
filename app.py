@@ -742,6 +742,13 @@ BIRTHDAY_VIEWER_ROLES = {"admin", "quanly", "letan"}
 BIRTHDAY_EMPLOYEE_ROLES = {"nhanvien", "letan", "locker"}
 BIRTHDAY_NOTICE_DAYS = {1, 2, 3, 4, 5}
 BIRTHDAY_NOTICE_MAX_LOGINS_PER_DAY = 3
+# V51: Trạng thái làm việc của nhân viên được lưu riêng, không thay đổi cấu trúc Sheet1.
+EMPLOYMENT_STATUS_WORKSHEET = "TrangThaiNhanSu"
+EMPLOYMENT_STATUS_HEADERS = ["STT", "Tên nhân viên", "Trạng thái", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"]
+EMPLOYMENT_STATUS_ACTIVE = "Đang làm việc"
+EMPLOYMENT_STATUS_TEMP = "Nghỉ việc tạm thời"
+EMPLOYMENT_STATUS_LEFT = "Đã nghỉ việc hẳn"
+EMPLOYMENT_STATUS_OPTIONS = [EMPLOYMENT_STATUS_ACTIVE, EMPLOYMENT_STATUS_TEMP, EMPLOYMENT_STATUS_LEFT]
 DEFAULT_LEAVE_PAGE = "📅 Đăng ký & Thống kê nghỉ phép"
 DEFAULT_LEAVE_PAGE_SLUG = "dang-ky-thong-ke-nghi-phep"
 
@@ -915,6 +922,24 @@ def render_birthday_login_notice(credentials_df):
             else:
                 st.error(msg)
 
+def render_manual_birthday_check(credentials_df, key_prefix="birthday_manual"):
+    """Nút chủ động xem sinh nhật tháng hiện tại, dùng cho mọi vai trò."""
+    today = get_vn_today()
+    state_key = f"{key_prefix}_show_{today.year}_{today.month}"
+    if st.button("🎂 Kiểm tra sinh nhật tháng này", use_container_width=True, key=f"{key_prefix}_button_{today.year}_{today.month}"):
+        st.session_state[state_key] = not bool(st.session_state.get(state_key, False))
+    if not st.session_state.get(state_key, False):
+        return
+    birthdays = get_month_birthdays(credentials_df, today.month)
+    if not birthdays:
+        st.info(f"Tháng {today.month:02d} hiện chưa có sinh nhật của Nhân viên/Lễ tân/Locker trong hồ sơ.")
+        return
+    role_labels = {'nhanvien': 'Nhân viên', 'letan': 'Lễ tân', 'locker': 'Locker'}
+    st.markdown(f"#### 🎉 Sinh nhật tháng {today.month:02d}")
+    for b in birthdays:
+        st.markdown(f"- 🎂 **{b['Họ và tên']}** — {b['Ngày sinh']} — {role_labels.get(b['Vai trò'], b['Vai trò'])}")
+
+
 @st.cache_resource
 def get_gspread_client():
     try:
@@ -963,6 +988,80 @@ def _gs_call_with_backoff(func, *args, retries=5, **kwargs):
             time.sleep(min(2 ** (attempt + 1), 16))
     if last_exc is not None:
         raise last_exc
+
+
+def _get_employment_status_worksheet():
+    client = get_gspread_client()
+    if not client:
+        return None
+    ss = client.open_by_key(SHEET_MAT_KHAU_ID)
+    ws = _get_or_create_worksheet(ss, EMPLOYMENT_STATUS_WORKSHEET, rows=1000, cols=len(EMPLOYMENT_STATUS_HEADERS))
+    header = _gs_call_with_backoff(ws.row_values, 1)
+    if header[:len(EMPLOYMENT_STATUS_HEADERS)] != EMPLOYMENT_STATUS_HEADERS:
+        gspread_update_range(ws, "A1:F1", [EMPLOYMENT_STATUS_HEADERS])
+    return ws
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_employment_status_map():
+    result = {}
+    try:
+        ws = _get_employment_status_worksheet()
+        if ws is None:
+            return result
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        for row in vals[1:]:
+            if len(row) < 2:
+                continue
+            key = normalize_login_name(row[1])
+            if not key:
+                continue
+            status = str(row[2]).strip() if len(row) > 2 else EMPLOYMENT_STATUS_ACTIVE
+            if status not in EMPLOYMENT_STATUS_OPTIONS:
+                status = EMPLOYMENT_STATUS_ACTIVE
+            result[key] = status
+    except Exception:
+        pass
+    return result
+
+
+def set_employee_employment_status(employee_name, status, updated_by):
+    status = str(status or '').strip()
+    if status not in EMPLOYMENT_STATUS_OPTIONS:
+        return False, "Trạng thái không hợp lệ."
+    try:
+        creds = load_credentials()
+        target_key = normalize_login_name(employee_name)
+        role = ''
+        if isinstance(creds, pd.DataFrame) and not creds.empty:
+            hit = creds[creds['Tên nhân viên'].apply(normalize_login_name) == target_key]
+            if not hit.empty:
+                role = str(hit.iloc[0].get('Phân quyền', '')).strip().lower()
+        if role != 'nhanvien':
+            return False, "Chỉ có thể cập nhật trạng thái nghỉ việc cho tài khoản vai trò nhanvien."
+        ws = _get_employment_status_worksheet()
+        if ws is None:
+            return False, "Không kết nối được Google Sheets."
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        found_row = None
+        for r_idx, row in enumerate(vals[1:], start=2):
+            if len(row) > 1 and normalize_login_name(row[1]) == target_key:
+                found_row = r_idx
+                break
+        now = datetime.now(VN_TZ)
+        payload = [str(employee_name).strip(), status, now.strftime('%d/%m/%Y'), now.strftime('%H:%M:%S'), str(updated_by).strip()]
+        if found_row:
+            gspread_update_range(ws, f"B{found_row}:F{found_row}", [payload])
+        else:
+            stt = max(1, len(vals))
+            _gs_call_with_backoff(ws.append_row, [stt] + payload, value_input_option='USER_ENTERED')
+        try:
+            load_employment_status_map.clear()
+        except Exception:
+            pass
+        return True, f"Đã cập nhật {employee_name}: {status}."
+    except Exception as e:
+        return False, f"Lỗi cập nhật trạng thái nhân sự: {e}"
 
 
 def _clear_payroll_config_cache():
@@ -2711,7 +2810,7 @@ TABLE_LAYOUT_LABELS = {
 }
 TABLE_LAYOUT_STATIC_COLUMNS = {
     "staff_list": [
-        "Tên nhân viên", "Họ và tên đầy đủ", "Phân quyền", "Điện thoại", "Email",
+        "Tên nhân viên", "Họ và tên đầy đủ", "Phân quyền", "Trạng thái làm việc", "Điện thoại", "Email",
         "Địa chỉ", "Số tài khoản ngân hàng", "Tên ngân hàng", "Khóa đăng nhập"
     ],
     "payroll_current": [
@@ -4913,6 +5012,11 @@ def recalculate_payroll_net(df):
         if col not in d.columns:
             d[col] = 0
         d[col] = pd.to_numeric(d[col], errors='coerce').fillna(0)
+    # V51: Tiền Lương = 0 thì không ghi Phí Sinh Hoạt và Tiền hỗ trợ Locker.
+    # Đặt ở hàm tính thực nhận để áp dụng đồng nhất cho bảng mới, bảng lịch sử và bảng chỉnh sửa.
+    zero_salary_mask = d["Tiền Lương"].abs().le(1e-9)
+    d.loc[zero_salary_mask, "Chi Phí Sinh Hoạt"] = 0.0
+    d.loc[zero_salary_mask, "Tiền hỗ trợ Locker"] = 0.0
     net = (
         d["Tiền Lương"] + d["Tiền Hỗ Trợ Hoàn Lại"]
         - d["Tích lũy"] - d["Chi Phí Sinh Hoạt"]
@@ -5681,6 +5785,8 @@ if st.session_state.current_role == "tapvu":
             .custom-main-title { display: none !important; }
         </style>
     """, unsafe_allow_html=True)
+    st.markdown("### 🎂 Sinh nhật")
+    render_manual_birthday_check(df_credentials, key_prefix="tapvu_birthday_manual")
     _blank1, _blank2, _logout_col = st.columns([6, 2, 2])
     with _logout_col:
         if st.button("🚪 Đăng xuất", use_container_width=True, key="tapvu_logout"):
@@ -5825,6 +5931,12 @@ with col_logout:
 
 # V48: Thông báo sinh nhật đầu tháng cho Admin/Quản lý/Lễ tân.
 render_birthday_login_notice(df_credentials)
+# V51: nút xem sinh nhật chủ động áp dụng cho mọi tài khoản.
+with st.expander("🎂 Sinh nhật nhân sự trong tháng", expanded=False):
+    render_manual_birthday_check(
+        df_credentials,
+        key_prefix=f"birthday_manual_{normalize_login_name(st.session_state.current_user) or 'user'}"
+    )
 
 # Nhân viên: thanh nút điều hướng ngay trên nội dung, phù hợp điện thoại.
 if st.session_state.current_role in ["nhanvien", "locker"]:
@@ -5950,9 +6062,15 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and is_admin_letan:
 
 elif selected_page == "👥 Danh sách nhân sự" and is_admin_letan:
     st.subheader("👥 Danh sách nhân sự")
-    cols_staff = ['Tên nhân viên', 'Họ và tên đầy đủ', 'Phân quyền', 'Điện thoại', 'Email', 'Địa chỉ', 'Số tài khoản ngân hàng', 'Tên ngân hàng', 'Khóa đăng nhập']
-    cols_staff = [c for c in cols_staff if c in df_credentials.columns]
-    staff_df, staff_widths = apply_table_layout_df(df_credentials[cols_staff], "staff_list")
+    staff_source_df = df_credentials.copy()
+    employment_map = load_employment_status_map()
+    staff_source_df['Trạng thái làm việc'] = staff_source_df.apply(
+        lambda r: employment_map.get(normalize_login_name(r.get('Tên nhân viên', '')), EMPLOYMENT_STATUS_ACTIVE)
+        if str(r.get('Phân quyền', '')).strip().lower() == 'nhanvien' else '', axis=1
+    )
+    cols_staff = ['Tên nhân viên', 'Họ và tên đầy đủ', 'Phân quyền', 'Trạng thái làm việc', 'Điện thoại', 'Email', 'Địa chỉ', 'Số tài khoản ngân hàng', 'Tên ngân hàng', 'Khóa đăng nhập']
+    cols_staff = [c for c in cols_staff if c in staff_source_df.columns]
+    staff_df, staff_widths = apply_table_layout_df(staff_source_df[cols_staff], "staff_list")
     st.dataframe(
         apply_table_visual_styler(staff_df, "staff_list", list(staff_df.columns)),
         width='stretch', height='content', hide_index=True,
@@ -6174,6 +6292,43 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
 elif selected_page == "✏️ Sửa / Xóa nhân viên" and is_admin_letan:
     st.subheader("✏️ Sửa / Xóa nhân viên")
     st.write("Chọn nhân viên cần thao tác.")
+
+    st.markdown("#### 🏷️ Trạng thái làm việc của nhân viên")
+    if 'Phân quyền' in df_credentials.columns:
+        nhanvien_df_status = df_credentials[
+            df_credentials['Phân quyền'].astype(str).str.strip().str.lower().eq('nhanvien')
+        ].copy()
+    else:
+        nhanvien_df_status = pd.DataFrame(columns=df_credentials.columns)
+    status_emp_options = nhanvien_df_status['Tên nhân viên'].dropna().astype(str).tolist() if not nhanvien_df_status.empty else []
+    if not status_emp_options:
+        st.info("Hiện không có tài khoản vai trò nhanvien để cập nhật trạng thái.")
+    else:
+        c_status_emp, c_status_value, c_status_save = st.columns([2.2, 1.6, 1.2])
+        with c_status_emp:
+            status_emp = st.selectbox(
+                "Chọn nhân viên", options=status_emp_options, filter_mode="contains",
+                key="employment_status_employee"
+            )
+        current_status_map = load_employment_status_map()
+        current_status = current_status_map.get(normalize_login_name(status_emp), EMPLOYMENT_STATUS_ACTIVE)
+        with c_status_value:
+            status_value = st.selectbox(
+                "Trạng thái", options=EMPLOYMENT_STATUS_OPTIONS,
+                index=EMPLOYMENT_STATUS_OPTIONS.index(current_status) if current_status in EMPLOYMENT_STATUS_OPTIONS else 0,
+                key=f"employment_status_value_{normalize_login_name(status_emp)}"
+            )
+        with c_status_save:
+            st.write("")
+            st.write("")
+            if st.button("💾 Lưu trạng thái", use_container_width=True, key="save_employment_status"):
+                ok, msg = set_employee_employment_status(status_emp, status_value, st.session_state.current_user)
+                (st.success if ok else st.error)(msg)
+                if ok:
+                    st.rerun()
+    st.caption("Trạng thái nghỉ việc không xóa tài khoản hoặc dữ liệu lịch sử; có thể đổi lại 'Đang làm việc' bất cứ lúc nào.")
+    st.markdown("---")
+
     col_action1, col_action2 = st.columns(2)
     with col_action1:
         st.markdown("#### 🗑️ Xóa nhân viên")

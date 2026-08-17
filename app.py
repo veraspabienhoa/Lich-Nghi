@@ -4421,6 +4421,77 @@ def overwrite_payroll_snapshot(batch_id, payroll_df, start_date, end_date, sourc
         return False, f"Lỗi ghi đè bảng lương: {e}"
 
 
+
+def delete_payroll_snapshots(batch_ids):
+    """
+    Xóa một hoặc nhiều BẢN LƯƠNG khỏi vùng Lịch sử bảng lương đã lưu.
+    Chỉ xóa các dòng trong sheet lưu lịch sử bảng lương; không đụng tới TichLuy,
+    dữ liệu lịch nghỉ/vi phạm hay hồ sơ nhân viên.
+    """
+    try:
+        wanted = {
+            str(x).strip() for x in (batch_ids or [])
+            if str(x).strip()
+        }
+        if not wanted:
+            return False, "Chưa chọn bản lương cần xóa.", []
+
+        ws_pay, _, err = _ensure_payroll_storage()
+        if err or ws_pay is None:
+            return False, err or "Không mở được vùng lưu Bảng lương.", []
+
+        values = _gs_call_with_backoff(ws_pay.get_all_values)
+        if len(values) < 2:
+            return False, "Lịch sử bảng lương hiện đang trống.", []
+
+        matched_rows = []
+        found_batches = set()
+        # Dòng 1 là header; dữ liệu bắt đầu từ dòng 2.
+        for row_idx, row in enumerate(values[1:], start=2):
+            batch_id = str(row[0]).strip() if row else ""
+            if batch_id in wanted:
+                matched_rows.append(row_idx)
+                found_batches.add(batch_id)
+
+        if not matched_rows:
+            return False, "Không tìm thấy các bản lương đã chọn trong hệ thống.", []
+
+        # Gom các dòng liên tiếp thành block để giảm số request Google Sheets.
+        blocks = []
+        start = prev = matched_rows[0]
+        for row_idx in matched_rows[1:]:
+            if row_idx == prev + 1:
+                prev = row_idx
+            else:
+                blocks.append((start, prev))
+                start = prev = row_idx
+        blocks.append((start, prev))
+
+        # Xóa từ dưới lên để chỉ số dòng phía trên không bị thay đổi.
+        for start_row, end_row in reversed(blocks):
+            if start_row == end_row:
+                _gs_call_with_backoff(ws_pay.delete_rows, start_row)
+            else:
+                _gs_call_with_backoff(ws_pay.delete_rows, start_row, end_row)
+
+        try:
+            load_payroll_history.clear()
+        except Exception:
+            pass
+
+        deleted = [x for x in batch_ids if str(x).strip() in found_batches]
+        missing = sorted(wanted - found_batches)
+        msg = (
+            f"Đã xóa {len(found_batches)} bản lương khỏi Lịch sử bảng lương "
+            f"({len(matched_rows)} dòng dữ liệu)."
+        )
+        if missing:
+            msg += " Không tìm thấy: " + ", ".join(missing)
+        return True, msg, deleted
+    except Exception as e:
+        return False, f"Lỗi xóa lịch sử bảng lương: {e}", []
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_payroll_history():
     try:
@@ -6009,6 +6080,14 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                             st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
 
     with tab_history:
+        delete_flash = st.session_state.pop("payroll_history_delete_flash", None)
+        if delete_flash:
+            flash_type, flash_text = delete_flash
+            if flash_type == "success":
+                st.success(flash_text)
+            else:
+                st.warning(flash_text)
+
         history = load_payroll_history()
         if history.empty or 'Mã bản lưu' not in history.columns:
             st.info("Chưa có bảng lương nào được lưu trong hệ thống.")
@@ -6016,6 +6095,66 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
             batches = [x for x in history['Mã bản lưu'].dropna().astype(str).unique().tolist() if x.strip()]
             # Bản mới nhất nằm cuối Sheet nên đảo lên đầu.
             batches = list(reversed(batches))
+
+            # Admin có thể xóa bớt một hoặc nhiều bản lịch sử. Chức năng này chỉ xóa
+            # snapshot bảng lương, tuyệt đối không hoàn tác Tích lũy / Vi phạm / hồ sơ.
+            if st.session_state.current_role == "admin":
+                batch_labels = {}
+                for _batch_id in batches:
+                    _g = history[history['Mã bản lưu'].astype(str) == str(_batch_id)]
+                    if _g.empty:
+                        batch_labels[_batch_id] = str(_batch_id)
+                    else:
+                        _r = _g.iloc[0]
+                        _period = f"{_r.get('Từ ngày','')} → {_r.get('Đến ngày','')}"
+                        _saved_at = f"{_r.get('Ngày lưu','')} {_r.get('Giờ lưu','')}".strip()
+                        batch_labels[_batch_id] = f"{_batch_id} | {_period} | lưu {_saved_at}"
+
+                with st.expander("🗑 Xóa bớt lịch sử bảng lương (Admin)", expanded=False):
+                    st.caption(
+                        "Có thể chọn 1 hoặc nhiều bản lương để xóa. Việc này chỉ xóa Lịch sử bảng lương đã lưu; "
+                        "không thay đổi sheet TichLuy, dữ liệu vi phạm, lịch nghỉ hoặc hồ sơ nhân viên."
+                    )
+                    delete_batches = st.multiselect(
+                        "Chọn bản lương cần xóa:",
+                        options=batches,
+                        default=[],
+                        format_func=lambda x: batch_labels.get(x, str(x)),
+                        filter_mode="contains",
+                        key="payroll_history_delete_batches",
+                    )
+                    if delete_batches:
+                        st.warning(
+                            f"Bạn đang chọn xóa {len(delete_batches)} bản lương. Thao tác này không có nút hoàn tác trong ứng dụng."
+                        )
+                    confirm_delete_history = st.checkbox(
+                        "Tôi xác nhận xóa vĩnh viễn các bản lương đã chọn khỏi lịch sử",
+                        key="confirm_delete_payroll_history",
+                    )
+                    if st.button(
+                        "🗑 Xóa các bản lương đã chọn",
+                        use_container_width=True,
+                        type="primary",
+                        key="delete_selected_payroll_history",
+                        disabled=not (delete_batches and confirm_delete_history),
+                    ):
+                        ok_delete, msg_delete, deleted_batches = delete_payroll_snapshots(delete_batches)
+                        if ok_delete:
+                            # Dọn state liên quan đến các batch vừa xóa để lần rerun sau không giữ editor cũ.
+                            for _deleted_batch in deleted_batches:
+                                for _state_key in (
+                                    f"payroll_history_system_refresh_{_deleted_batch}",
+                                    f"payroll_history_editor_version_{_deleted_batch}",
+                                ):
+                                    st.session_state.pop(_state_key, None)
+                            st.session_state.pop("payroll_history_batch", None)
+                            st.session_state.pop("payroll_history_delete_batches", None)
+                            st.session_state.pop("confirm_delete_payroll_history", None)
+                            st.session_state["payroll_history_delete_flash"] = ("success", msg_delete)
+                            st.rerun()
+                        else:
+                            st.error(msg_delete)
+
             batch = st.selectbox("Chọn bản lương đã lưu:", batches, filter_mode="contains", key="payroll_history_batch")
             saved = history[history['Mã bản lưu'].astype(str) == str(batch)].copy()
             if not saved.empty:

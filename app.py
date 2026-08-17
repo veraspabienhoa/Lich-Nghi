@@ -421,7 +421,7 @@ def send_email_report(sender_email, sender_password, to_email, emp_name, df_emp,
         # Thêm style CSS cho bảng HTML
         html_table = df_display.to_html(index=False, justify='center')
         html_table = html_table.replace('<table border="1" class="dataframe">', '<table style="width:100%; border-collapse: collapse; border: 1px solid #ddd; font-family: Arial, sans-serif;">')
-        html_table = html_table.replace('<th>', '<th style="background-color: #f2f2f2; border: 1px solid #ddd; padding: 8px; text-align: center;">')
+        html_table = html_table.replace('<th>', '<th style="background-color: #f2f2f2; border: 1px solid #ddd; padding: 8px; text-align: center; white-space: normal; overflow-wrap: anywhere; word-break: break-word;">')
         html_table = html_table.replace('<td>', '<td style="border: 1px solid #ddd; padding: 8px; text-align: center;">')
         
         html_content = f"""
@@ -583,6 +583,31 @@ st.markdown("""
         input, textarea { font-size: 16px !important; }
         [data-testid="stDataFrame"], [data-testid="stDataEditor"] { width: 100% !important; }
 
+        /* --- WRAPTEXT TIÊU ĐỀ BẢNG ---
+           Khi Admin thu hẹp cột, tiêu đề được phép xuống dòng thay vì bị cắt chữ. */
+        table th,
+        [data-testid="stTable"] th,
+        [data-testid="stDataFrame"] [role="columnheader"],
+        [data-testid="stDataEditor"] [role="columnheader"],
+        [data-testid="stDataFrame"] [role="columnheader"] > div,
+        [data-testid="stDataEditor"] [role="columnheader"] > div {
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
+            text-overflow: clip !important;
+            line-height: 1.15 !important;
+            height: auto !important;
+            min-height: 38px !important;
+        }
+
+        /* Các nhãn header DOM của Glide/Streamlit ở những phiên bản có expose header. */
+        [data-testid="stDataFrame"] [class*="header"],
+        [data-testid="stDataEditor"] [class*="header"] {
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
+        }
+
         /* Hiệu ứng hover cho TOÀN BỘ dropdown/select/multiselect */
         div[data-baseweb="select"],
         [data-testid="stSelectbox"],
@@ -688,6 +713,7 @@ PAYROLL_STORAGE_WORKSHEET = "BangLuong"
 PAYROLL_CONFIG_WORKSHEET = "CauHinhLuong"
 UI_LAYOUT_WORKSHEET = "CauHinhCot"
 TICHLUY_WORKSHEET = "TichLuy"
+# V36: tiêu đề bảng tự wrap text khi chiều rộng cột nhỏ.
 TICHLUY_TARGET_DEFAULT = 5000000
 TICHLUY_PERIOD_DEFAULT = 500000
 TICHLUY_HEADERS = [
@@ -2308,7 +2334,10 @@ def style_bang_tour(df):
                 ("color", "#000000"),
                 ("font-weight", "700"),
                 ("text-align", "center"),
-                ("white-space", "nowrap"),
+                ("white-space", "normal"),
+                ("overflow-wrap", "anywhere"),
+                ("word-break", "break-word"),
+                ("line-height", "1.15"),
             ],
         },
         {"selector": "td", "props": [("white-space", "nowrap")]},
@@ -4125,7 +4154,7 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
             violation_html = f"""
             <p><b>Chi tiết vi phạm trong kỳ:</b></p>
             <table style='border-collapse:collapse;min-width:620px'>
-            <tr><th style='padding:6px;border:1px solid #ddd;background:#A1948C'>Ngày</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C'>Lý do</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C'>Chi tiết</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C'>Phạt</th></tr>
+            <tr><th style='padding:6px;border:1px solid #ddd;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Ngày</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Lý do</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Chi tiết</th><th style='padding:6px;border:1px solid #ddd;background:#A1948C;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Phạt</th></tr>
             {vp_rows}
             </table><p><b>Tổng vi phạm: {vp_total:,.0f} VNĐ</b></p>
             """
@@ -4136,7 +4165,7 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
         <p>Chào <b>{full or emp}</b>,</p>
         <p>VERA SPA gửi bảng lương kỳ từ <b>{start_date.strftime('%d/%m/%Y')}</b> đến <b>{end_date.strftime('%d/%m/%Y')}</b>.</p>
         <table style='border-collapse:collapse;min-width:520px'>
-        <tr><th style='padding:7px;border:1px solid #ddd;background:#A1948C;color:#000'>Khoản mục</th><th style='padding:7px;border:1px solid #ddd;background:#A1948C;color:#000'>Số tiền</th></tr>
+        <tr><th style='padding:7px;border:1px solid #ddd;background:#A1948C;color:#000;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Khoản mục</th><th style='padding:7px;border:1px solid #ddd;background:#A1948C;color:#000;white-space:normal;overflow-wrap:anywhere;word-break:break-word'>Số tiền</th></tr>
         {html_rows}
         </table>
         <p><b>Số tiền thực nhận: {_money_to_float(employee_row.get('Số tiền thực nhận',0)):,.0f} VNĐ</b></p>
@@ -5154,7 +5183,7 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
                 """<style>
                 .vera-payroll-wrap{width:100%;overflow:visible;}
                 table.vera-payroll-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:clamp(8px,.68vw,12px);}
-                table.vera-payroll-table th{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 3px;border:1px solid #c9c9c9;white-space:normal;word-break:break-word;}
+                table.vera-payroll-table th{background:#A1948C!important;color:#000!important;font-weight:700!important;padding:5px 3px;border:1px solid #c9c9c9;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;line-height:1.15!important;vertical-align:middle!important;}
                 table.vera-payroll-table td{padding:4px 3px;border:1px solid #dedede;white-space:normal;word-break:break-word;vertical-align:middle;}
                 table.vera-payroll-table tbody tr:nth-child(even){background:#fafafa;}
                 @media(max-width:800px){table.vera-payroll-table{font-size:7px;}table.vera-payroll-table th,table.vera-payroll-table td{padding:3px 1px;}}
@@ -5658,7 +5687,10 @@ elif selected_page == "🧭 Bảng Tour":
                         ("color", "#000000"),
                         ("font-weight", "700"),
                         ("text-align", "center"),
-                        ("white-space", "nowrap"),
+                        ("white-space", "normal"),
+                        ("overflow-wrap", "anywhere"),
+                        ("word-break", "break-word"),
+                        ("line-height", "1.15"),
                     ],
                 }
             ])

@@ -3504,7 +3504,8 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
         with c_source:
             source_mode = st.selectbox(
                 "Nguồn dữ liệu lương:",
-                ["Google Sheet mặc định", "Upload file Excel"],
+                ["Upload file Excel", "Google Sheet mặc định"],
+                index=0,
                 key="payroll_source_mode", filter_mode="contains"
             )
             payroll_upload = None

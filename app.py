@@ -713,7 +713,7 @@ PAYROLL_STORAGE_WORKSHEET = "BangLuong"
 PAYROLL_CONFIG_WORKSHEET = "CauHinhLuong"
 UI_LAYOUT_WORKSHEET = "CauHinhCot"
 TICHLUY_WORKSHEET = "TichLuy"
-# V40: fix TichLuy khi tính lương + chỉ tính role nhanvien + định dạng tiền có phân cách hàng nghìn
+# V41: kỳ lương cố định 01-15 / 16-cuối tháng + loại quanly khỏi TichLuy
 TICHLUY_TARGET_DEFAULT = 5000000
 TICHLUY_PERIOD_DEFAULT = 500000
 TICHLUY_HEADERS = [
@@ -723,7 +723,7 @@ TICHLUY_HEADERS = [
 
 # Các bộ phận không tham gia đăng ký lịch nghỉ / Tích lũy.
 LEAVE_EXCLUDED_ROLES = {"letan", "locker", "tapvu"}
-TICHLUY_EXCLUDED_ROLES = {"admin", "letan", "locker", "tapvu"}
+TICHLUY_EXCLUDED_ROLES = {"admin", "letan", "quanly", "locker", "tapvu"}
 FRONTDESK_ROLES = {"letan", "quanly"}
 
 @st.cache_resource
@@ -3333,7 +3333,7 @@ def load_tichluy_tracking():
         header = values[0]
         positions = _tichluy_header_positions(header)
         rows = []
-        # Dùng cache tài khoản hiện có để ẩn hoàn toàn letan/locker/tapvu/admin khỏi
+        # Dùng cache tài khoản hiện có để ẩn hoàn toàn quanly/letan/locker/tapvu/admin khỏi
         # nghiệp vụ TichLuy, kể cả khi sheet cũ vẫn còn dòng từ phiên bản trước.
         role_map = _credential_role_map(load_credentials())
         for sheet_row, row in enumerate(values[1:], start=2):
@@ -3424,11 +3424,10 @@ def _is_tichluy_completed(target_value, accumulated_value, remaining_value=''):
 
 
 def _first_pay_period_for_start(start_work_date):
-    """Kỳ 1 = 1-15, Kỳ 2 = 16-cuối tháng."""
-    if start_work_date.day <= 15:
-        return date(start_work_date.year, start_work_date.month, 1), date(start_work_date.year, start_work_date.month, 15)
-    last_day = calendar.monthrange(start_work_date.year, start_work_date.month)[1]
-    return date(start_work_date.year, start_work_date.month, 16), date(start_work_date.year, start_work_date.month, last_day)
+    """Kỳ đầu theo ngày vào làm, dùng đúng chuẩn 01-15 / 16-cuối tháng."""
+    return _official_payroll_period(
+        start_work_date.year, start_work_date.month, 1 if start_work_date.day <= 15 else 2
+    )
 
 
 def _parse_tichluy_period_text(value):
@@ -3529,14 +3528,25 @@ def get_tichluy_charge_map(start_date, end_date, employee_names=None, for_existi
             else:
                 remaining = max(0.0, target - accumulated)
         hist = _parse_tichluy_history(r.get('Chi tiết các kỳ',''))
-        existing_amount = float(hist.get(period_key, 0))
+        history_total, history_keys = _matching_tichluy_history(hist, start_date, end_date)
+        # Một kỳ chính thức chỉ thu tối đa mức kỳ. Nếu bản cũ từng tạo nhiều key 16→ngày hiện tại
+        # thì chỉ coi là đã đóng tối đa một kỳ, không thu thêm lần nữa.
+        existing_amount = min(float(TICHLUY_PERIOD_DEFAULT), max(0.0, history_total))
 
         # Tương thích dữ liệu TichLuy cũ: có thể chưa có JSON "Chi tiết các kỳ"
         # nhưng đã có "Kỳ gần nhất" + "Số tiền kỳ gần nhất".
         if existing_amount <= 0:
             last_start, last_end = _parse_tichluy_period_text(r.get('Kỳ gần nhất', ''))
-            if last_start == start_date and last_end == end_date:
-                existing_amount = max(0.0, float(_money_to_float(r.get('Số tiền kỳ gần nhất', 0))))
+            if last_start and last_end:
+                last_match = (last_start == start_date and last_end == end_date)
+                if not last_match and _is_official_payroll_period(start_date, end_date):
+                    cls, cle = _canonicalize_payroll_period(last_start, last_end)
+                    last_match = (cls == start_date and cle == end_date)
+                if last_match:
+                    existing_amount = min(
+                        float(TICHLUY_PERIOD_DEFAULT),
+                        max(0.0, float(_money_to_float(r.get('Số tiền kỳ gần nhất', 0))))
+                    )
 
         charge = 0.0
         reason = ''
@@ -3902,9 +3912,16 @@ def record_tichluy_contributions(payroll_df, start_date, end_date):
             if _is_tichluy_completed(g('Mục tiêu tích lũy'), g('Đã tích lũy'), g('Còn lại')):
                 continue
             hist = _parse_tichluy_history(g('Chi tiết các kỳ'))
-            old_amount = float(hist.get(period_key, 0))
-            amount_to_record = old_amount if old_amount > 0 and amount <= 0 else amount
-            new_total = max(0.0, min(target, current_total - old_amount + amount_to_record))
+            old_history_total, matched_history_keys = _matching_tichluy_history(hist, start_date, end_date)
+            old_display_amount = min(float(TICHLUY_PERIOD_DEFAULT), max(0.0, old_history_total))
+            amount_to_record = old_display_amount if old_display_amount > 0 and amount <= 0 else amount
+
+            # Nếu dữ liệu cũ đã ghi cùng kỳ dưới nhiều key rút gọn (vd. 16→17, 16→20),
+            # gom về một key chính thức và loại phần cộng trùng khỏi tổng tích lũy.
+            amount_to_subtract = old_history_total
+            new_total = max(0.0, min(target, current_total - amount_to_subtract + amount_to_record))
+            for legacy_key in matched_history_keys:
+                hist.pop(legacy_key, None)
             hist[period_key] = float(amount_to_record)
             remaining = max(0.0, target - new_total)
             values_to_set = {
@@ -4016,25 +4033,94 @@ def load_payroll_source_from_uploaded_excel(uploaded_file):
         return pd.DataFrame(), f"Không đọc được sheet '{PAYROLL_SOURCE_WORKSHEET}': {e}"
 
 
+def _official_payroll_period(year, month, period_no):
+    """
+    Trả về kỳ lương chính thức của VERA SPA.
+    Kỳ 1 luôn từ ngày 01 đến hết ngày 15.
+    Kỳ 2 luôn từ ngày 16 đến hết ngày cuối cùng của tháng.
+    Không phụ thuộc ngày hiện tại và không cắt kỳ tại ngày hôm nay.
+    """
+    year, month, period_no = int(year), int(month), int(period_no)
+    if period_no == 1:
+        return date(year, month, 1), date(year, month, 15)
+    if period_no == 2:
+        last_day = calendar.monthrange(year, month)[1]
+        return date(year, month, 16), date(year, month, last_day)
+    raise ValueError('period_no chỉ nhận 1 hoặc 2')
+
+
+def _canonicalize_payroll_period(start_date, end_date):
+    """
+    Chuẩn hóa một khoảng ngày thuộc cùng tháng về đúng kỳ lương chính thức.
+    Hàm này dùng cho nghiệp vụ Tích lũy/lưu kỳ để tránh trường hợp kỳ 2 bị ghi 16→ngày hiện tại.
+    Nếu khoảng ngày không cùng tháng hoặc cắt qua cả hai kỳ thì giữ nguyên để bảo toàn dữ liệu lịch sử cũ.
+    """
+    if not start_date or not end_date:
+        return start_date, end_date
+    if start_date.year != end_date.year or start_date.month != end_date.month:
+        return start_date, end_date
+    if end_date.day <= 15:
+        return _official_payroll_period(start_date.year, start_date.month, 1)
+    if start_date.day >= 16:
+        return _official_payroll_period(start_date.year, start_date.month, 2)
+    return start_date, end_date
+
+
+def _is_official_payroll_period(start_date, end_date):
+    if not start_date or not end_date:
+        return False
+    if start_date.year != end_date.year or start_date.month != end_date.month:
+        return False
+    period_no = 1 if start_date.day == 1 else (2 if start_date.day == 16 else 0)
+    if not period_no:
+        return False
+    return (start_date, end_date) == _official_payroll_period(start_date.year, start_date.month, period_no)
+
+
+def _matching_tichluy_history(hist, start_date, end_date):
+    """
+    Trả về (tổng tiền đã ghi, các key khớp) cho cùng một kỳ lương chính thức.
+    Hỗ trợ dữ liệu cũ từng ghi Kỳ 2 dạng 16→ngày hiện tại hoặc Kỳ 1 dạng 01→ngày hiện tại.
+    Chỉ gom legacy key khi khoảng đang tính là kỳ chính thức 01-15 / 16-cuối tháng.
+    """
+    if not isinstance(hist, dict):
+        return 0.0, []
+    exact_key = _tichluy_period_key(start_date, end_date)
+    if not _is_official_payroll_period(start_date, end_date):
+        amount = max(0.0, float(_money_to_float(hist.get(exact_key, 0))))
+        return amount, ([exact_key] if exact_key in hist else [])
+
+    matched = []
+    total = 0.0
+    for key, value in hist.items():
+        ks, ke = _parse_tichluy_period_text(key)
+        if not ks or not ke:
+            continue
+        cs, ce = _canonicalize_payroll_period(ks, ke)
+        if cs == start_date and ce == end_date:
+            matched.append(str(key))
+            total += max(0.0, float(_money_to_float(value)))
+    return total, matched
+
+
 def resolve_payroll_period(preset, today=None, custom_range=None):
+    """
+    Kỳ lương cố định toàn hệ thống:
+      • Kỳ 1: 01 → 15
+      • Kỳ 2: 16 → ngày cuối tháng
+    Không dùng ngày hiện tại làm ngày kết thúc kỳ.
+    """
     today = today or get_vn_today()
     first_this = date(today.year, today.month, 1)
     prev_last = first_this - timedelta(days=1)
-    prev_first = date(prev_last.year, prev_last.month, 1)
     if preset == "Kỳ 1 - Tháng này":
-        return first_this, min(today, date(today.year, today.month, 15)), ""
+        return *_official_payroll_period(today.year, today.month, 1), ""
     if preset == "Kỳ 2 - Tháng này":
-        if today.day < 16:
-            return None, None, "Tháng này chưa tới ngày 16 nên Kỳ 2 chưa bắt đầu."
-        return date(today.year, today.month, 16), today, ""
+        return *_official_payroll_period(today.year, today.month, 2), ""
     if preset == "Kỳ 1 - Tháng trước":
-        return prev_first, date(prev_last.year, prev_last.month, 15), ""
+        return *_official_payroll_period(prev_last.year, prev_last.month, 1), ""
     if preset == "Kỳ 2 - Tháng trước":
-        return date(prev_last.year, prev_last.month, 16), prev_last, ""
-    if preset == "Tùy chọn ngày":
-        if isinstance(custom_range, tuple) and len(custom_range) == 2:
-            return custom_range[0], custom_range[1], ""
-        return None, None, "Vui lòng chọn đủ Từ ngày và Đến ngày."
+        return *_official_payroll_period(prev_last.year, prev_last.month, 2), ""
     return None, None, "Không xác định được kỳ lương."
 
 
@@ -5315,7 +5401,7 @@ elif selected_page == "➕ Thêm nhân viên" and is_admin_letan:
                     _gs_call_with_backoff(sheet_mk.append_row, row_data, value_input_option='USER_ENTERED')
                     start_work_date = get_vn_today()
                     role_new = str(new_role).strip().lower()
-                    # Chỉ nhanvien/quanly tham gia TichLuy. Letan/locker/tapvu không xuất hiện ở TichLuy.
+                    # Chỉ vai trò nhanvien tham gia TichLuy. Quanly/letan/locker/tapvu/admin không xuất hiện ở TichLuy.
                     if role_new not in TICHLUY_EXCLUDED_ROLES:
                         tl_ok, tl_msg = ensure_employee_in_tichluy(new_usr, start_work_date)
                     else:
@@ -5596,13 +5682,10 @@ elif selected_page == "💰 Thống kê lương" and (st.session_state.current_r
         with c_period:
             preset = st.selectbox(
                 "Chọn kỳ tính lương:",
-                ["Kỳ 1 - Tháng này", "Kỳ 2 - Tháng này", "Kỳ 1 - Tháng trước", "Kỳ 2 - Tháng trước", "Tùy chọn ngày"],
+                ["Kỳ 1 - Tháng này", "Kỳ 2 - Tháng này", "Kỳ 1 - Tháng trước", "Kỳ 2 - Tháng trước"],
                 key="payroll_period_preset", filter_mode="contains"
             )
-            custom_dates = None
-            if preset == "Tùy chọn ngày":
-                custom_dates = st.date_input("Từ ngày - Đến ngày", value=(get_vn_today(), get_vn_today()), key="payroll_custom_dates")
-            p_start, p_end, period_err = resolve_payroll_period(preset, get_vn_today(), custom_dates)
+            p_start, p_end, period_err = resolve_payroll_period(preset, get_vn_today())
             if period_err:
                 st.error(period_err)
             elif p_start and p_end:

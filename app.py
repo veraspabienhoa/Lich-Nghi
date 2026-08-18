@@ -1930,8 +1930,8 @@ ATTENDANCE_AUTO_HOUR = 18
 # V84 - Vi phạm ra ngoài/Bảng tour. Tự động 20:10 cần Cloud Scheduler gọi Job riêng.
 BANG_TOUR_AUDIT_WORKSHEET = "DoiSoatRaNgoai"
 BANG_TOUR_BREAK_LIMIT_MINUTES = 90
-BANG_TOUR_VIOLATION_HOUR = 20
-BANG_TOUR_VIOLATION_MINUTE = 10
+BANG_TOUR_VIOLATION_HOUR = 21
+BANG_TOUR_VIOLATION_MINUTE = 0
 BANG_TOUR_SINGLE_SIDE_REASON = str(os.getenv("BANG_TOUR_SINGLE_SIDE_REASON", "Ra ngoài thiếu giờ ra/vào") or "Ra ngoài thiếu giờ ra/vào").strip()
 TIMESOFT_WORKTIME_CONF_PATH = "/ListMan/WorkTimeConf/Index"
 TICHLUY_WORKSHEET = "TichLuy"
@@ -2526,6 +2526,44 @@ def get_postgres_runtime_status():
         return False, f"PostgreSQL lỗi: {exc}"
 
 
+# --- NHẬN DIỆN ĐỊNH DẠNG EXCEL NGUỒN 3 ---
+def _detect_excel_engine_from_file(path):
+    """Nhận diện XLSX/XLSM/XLSB/XLS theo nội dung thật của file, không dựa vào đuôi file.
+
+    Lưu ý quan trọng:
+    - XLSX/XLSM và XLSB đều có thể là ZIP/OPC package.
+    - XLSX/XLSM có xl/workbook.xml -> openpyxl.
+    - XLSB có xl/workbook.bin -> pyxlsb.
+    - XLS đời cũ là OLE Compound File -> xlrd.
+    """
+    if not path or not os.path.exists(path) or os.path.getsize(path) <= 0:
+        return None
+
+    if zipfile.is_zipfile(path):
+        try:
+            with zipfile.ZipFile(path, 'r') as zf:
+                names = {str(name).replace('\\', '/').lower() for name in zf.namelist()}
+            if 'xl/workbook.xml' in names:
+                return 'openpyxl'
+            if 'xl/workbook.bin' in names:
+                return 'pyxlsb'
+            # Không có workbook part chuẩn: không giao nhầm cho openpyxl.
+            return None
+        except Exception:
+            return None
+
+    try:
+        with open(path, 'rb') as f:
+            magic = f.read(8)
+    except Exception:
+        magic = b''
+
+    if magic.startswith(b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1'):
+        return 'xlrd'
+
+    return None
+
+
 # --- ĐỒNG BỘ FILE NGUỒN 3 SANG GOOGLE SHEETS (CÓ CHẾ ĐỘ OVERWRITE) ---
 def admin_sync_excel_to_gsheet(overwrite=False):
     """Đồng bộ LichNghi từ Nguồn 3 sang SHEET_DU_PHONG_ID.
@@ -2541,14 +2579,12 @@ def admin_sync_excel_to_gsheet(overwrite=False):
             return False, "Chưa cấu hình quyền kết nối Google Sheets."
 
         download_file_from_google_drive(SHEET_CHINH_ID, temp_file)
-        if zipfile.is_zipfile(temp_file):
-            engine = 'openpyxl'
-        else:
-            with open(temp_file, 'rb') as f:
-                magic = f.read(8)
-            engine = 'pyxlsb' if magic.startswith(b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1') else None
+        engine = _detect_excel_engine_from_file(temp_file)
         if engine is None:
-            return False, "Nguồn 3 tải về không phải file Excel hợp lệ."
+            return False, (
+                "Nguồn 3 tải về không nhận diện được là XLS/XLSB/XLSX/XLSM hợp lệ "
+                "hoặc workbook part không đúng chuẩn."
+            )
 
         xls = pd.read_excel(temp_file, sheet_name='LichNghi', engine=engine)
         df_excel = xls.iloc[:, :10].copy()
@@ -5924,8 +5960,8 @@ def load_lich_nghi(url):
     """
     Tự tải Nguồn 3 từ Google Drive và tự nhận diện:
     - XLSX / XLSM  -> openpyxl
-    - XLSB         -> pyxlsb
-    - XLS cũ       -> xlrd
+    - XLSB         -> pyxlsb (nhận diện bằng xl/workbook.bin)
+    - XLS cũ       -> xlrd (OLE Compound File)
 
     Ưu tiên tải bằng Google Drive API có xác thực qua service account/runtime identity.
     Trả về:
@@ -5950,22 +5986,8 @@ def load_lich_nghi(url):
         # =====================================================
         # 2. NHẬN DIỆN ĐỊNH DẠNG EXCEL
         # =====================================================
-        engines_to_try = []
-
-        # XLSX/XLSM thực chất là ZIP package.
-        if zipfile.is_zipfile(temp_file):
-            engines_to_try = ["openpyxl"]
-        else:
-            try:
-                with open(temp_file, "rb") as f:
-                    magic = f.read(8)
-            except Exception:
-                magic = b""
-
-            # XLS / XLSB đều có thể dùng OLE Compound File signature.
-            if magic.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"):
-                # Thử XLSB trước, nếu không được thì thử XLS cũ.
-                engines_to_try = ["pyxlsb", "xlrd"]
+        detected_engine = _detect_excel_engine_from_file(temp_file)
+        engines_to_try = [detected_engine] if detected_engine else []
 
         # =====================================================
         # 3. NẾU KHÔNG NHẬN DIỆN ĐƯỢC
@@ -5992,7 +6014,7 @@ def load_lich_nghi(url):
                 )
 
             raise RuntimeError(
-                "Nguồn 3 tải về không phải file XLS/XLSB/XLSX/XLSM hợp lệ."
+                "Nguồn 3 tải về không nhận diện được workbook XLS/XLSB/XLSX/XLSM hợp lệ."
             )
 
         # =====================================================

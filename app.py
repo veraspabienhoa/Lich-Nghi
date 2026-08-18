@@ -1,3 +1,4 @@
+# V76 - UI/permissions/staff import-export update (2026-08-18)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -928,9 +929,20 @@ BIRTHDAY_NOTICE_MAX_LOGINS_PER_DAY = 3
 EMPLOYMENT_STATUS_WORKSHEET = "TrangThaiNhanSu"
 EMPLOYMENT_STATUS_HEADERS = ["STT", "Tên nhân viên", "Trạng thái", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"]
 EMPLOYMENT_STATUS_ACTIVE = "Đang làm việc"
-EMPLOYMENT_STATUS_TEMP = "Nghỉ việc tạm thời"
-EMPLOYMENT_STATUS_LEFT = "Đã nghỉ việc hẳn"
+EMPLOYMENT_STATUS_TEMP = "Tạm thời nghỉ việc"
+EMPLOYMENT_STATUS_LEFT = "Đã nghỉ việc"
 EMPLOYMENT_STATUS_OPTIONS = [EMPLOYMENT_STATUS_ACTIVE, EMPLOYMENT_STATUS_TEMP, EMPLOYMENT_STATUS_LEFT]
+# Giữ tương thích dữ liệu trạng thái đã lưu ở các bản cũ.
+EMPLOYMENT_STATUS_ALIASES = {
+    normalize_login_name("Đang làm việc"): EMPLOYMENT_STATUS_ACTIVE,
+    normalize_login_name("Nghỉ việc tạm thời"): EMPLOYMENT_STATUS_TEMP,
+    normalize_login_name("Tạm thời nghỉ việc"): EMPLOYMENT_STATUS_TEMP,
+    normalize_login_name("Đã nghỉ việc hẳn"): EMPLOYMENT_STATUS_LEFT,
+    normalize_login_name("Đã nghỉ việc"): EMPLOYMENT_STATUS_LEFT,
+}
+STAFF_ROLE_ORDER = ["leader", "nhanvien", "quanly", "letan", "locker", "tapvu", "admin"]
+EMPLOYMENT_STATUS_MANAGEABLE_ROLES = set(STAFF_ROLE_ORDER) - {"admin"}
+EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS = 7
 DEFAULT_LEAVE_PAGE = "📅 Đăng ký nghỉ phép"
 DEFAULT_LEAVE_PAGE_SLUG = "dang-ky-thong-ke-nghi-phep"
 
@@ -1232,8 +1244,7 @@ def load_employment_status_map():
             if not key:
                 continue
             status = str(row[2]).strip() if len(row) > 2 else EMPLOYMENT_STATUS_ACTIVE
-            if status not in EMPLOYMENT_STATUS_OPTIONS:
-                status = EMPLOYMENT_STATUS_ACTIVE
+            status = EMPLOYMENT_STATUS_ALIASES.get(normalize_login_name(status), EMPLOYMENT_STATUS_ACTIVE)
             result[key] = status
     except Exception:
         pass
@@ -1241,7 +1252,7 @@ def load_employment_status_map():
 
 
 def set_employee_employment_status(employee_name, status, updated_by):
-    status = str(status or '').strip()
+    status = EMPLOYMENT_STATUS_ALIASES.get(normalize_login_name(status), "")
     if status not in EMPLOYMENT_STATUS_OPTIONS:
         return False, "Trạng thái không hợp lệ."
     try:
@@ -1252,8 +1263,8 @@ def set_employee_employment_status(employee_name, status, updated_by):
             hit = creds[creds['Tên nhân viên'].apply(normalize_login_name) == target_key]
             if not hit.empty:
                 role = str(hit.iloc[0].get('Phân quyền', '')).strip().lower()
-        if role not in EMPLOYEE_LIKE_ROLES:
-            return False, "Chỉ có thể cập nhật trạng thái nghỉ việc cho tài khoản Nhân viên hoặc Leader."
+        if role not in EMPLOYMENT_STATUS_MANAGEABLE_ROLES:
+            return False, "Chỉ có thể cập nhật trạng thái làm việc cho tài khoản nhân sự."
         ws = _get_employment_status_worksheet()
         if ws is None:
             return False, "Không kết nối được Google Sheets."
@@ -1965,6 +1976,321 @@ def batch_update_shift_schedule(edited_df):
     except Exception as e:
         return False, f"Lỗi cập nhật: {e}"
 
+# --- DANH SÁCH NHÂN SỰ: SẮP XẾP / EXPORT / IMPORT ---
+STAFF_EXPORT_COLUMNS = [
+    'Tên nhân viên', 'Họ và tên đầy đủ', 'Phân quyền', 'Trạng thái làm việc',
+    'Điện thoại', 'Email', 'Địa chỉ', 'Số tài khoản ngân hàng',
+    'Tên ngân hàng', 'Khóa đăng nhập'
+]
+
+
+def normalize_employment_status_value(value, default=EMPLOYMENT_STATUS_ACTIVE):
+    key = normalize_login_name(value)
+    if not key:
+        return default
+    return EMPLOYMENT_STATUS_ALIASES.get(key, default)
+
+
+def build_staff_list_dataframe(credentials_df):
+    """Danh sách nhân sự chuẩn: tên A→Z, role chuẩn hóa, trạng thái theo 3 mức mới."""
+    if credentials_df is None or not isinstance(credentials_df, pd.DataFrame) or credentials_df.empty:
+        return pd.DataFrame(columns=STAFF_EXPORT_COLUMNS)
+    d = credentials_df.copy()
+    employment_map = load_employment_status_map()
+    if 'Tên nhân viên' not in d.columns:
+        d['Tên nhân viên'] = ''
+    if 'Phân quyền' not in d.columns:
+        d['Phân quyền'] = 'nhanvien'
+    d['Phân quyền'] = d['Phân quyền'].astype(str).str.strip().str.lower()
+    d['Trạng thái làm việc'] = d['Tên nhân viên'].astype(str).apply(
+        lambda name: employment_map.get(normalize_login_name(name), EMPLOYMENT_STATUS_ACTIVE)
+    )
+    for col in STAFF_EXPORT_COLUMNS:
+        if col not in d.columns:
+            d[col] = ''
+    # Thứ tự nhân sự: Phân quyền theo thứ tự chuẩn; trong từng nhóm role, Tên nhân viên A→Z.
+    # Các role còn lại (tapvu/admin) được đặt sau nhóm người dùng yêu cầu.
+    role_rank = {role: i for i, role in enumerate(STAFF_ROLE_ORDER)}
+    d['_staff_name_sort'] = d['Tên nhân viên'].astype(str).apply(normalize_login_name)
+    d['_staff_role_rank'] = d['Phân quyền'].map(role_rank).fillna(len(role_rank)).astype(int)
+    d = d.sort_values(['_staff_role_rank', '_staff_name_sort'], kind='stable')
+    return d[STAFF_EXPORT_COLUMNS].reset_index(drop=True)
+
+
+def staff_list_to_excel(df):
+    """Export Danh sách nhân sự với dropdown Phân quyền/Trạng thái để có thể sửa rồi import lại."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.utils import get_column_letter
+
+    d = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(columns=STAFF_EXPORT_COLUMNS)
+    for col in STAFF_EXPORT_COLUMNS:
+        if col not in d.columns:
+            d[col] = ''
+    d = d[STAFF_EXPORT_COLUMNS].copy()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'DanhSachNhanSu'
+    ws.append(list(d.columns))
+    for _, row in d.iterrows():
+        ws.append([str(row.get(c, '') if not pd.isna(row.get(c, '')) else '') for c in d.columns])
+
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    ws.freeze_panes = 'A2'
+    ws.auto_filter.ref = ws.dimensions
+
+    widths = {
+        'Tên nhân viên': 24, 'Họ và tên đầy đủ': 28, 'Phân quyền': 14,
+        'Trạng thái làm việc': 22, 'Điện thoại': 16, 'Email': 30, 'Địa chỉ': 42,
+        'Số tài khoản ngân hàng': 22, 'Tên ngân hàng': 24, 'Khóa đăng nhập': 18,
+    }
+    for idx, col in enumerate(d.columns, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = widths.get(col, 18)
+
+    max_row = max(2, ws.max_row)
+    if 'Phân quyền' in d.columns:
+        col_idx = d.columns.get_loc('Phân quyền') + 1
+        role_list = ','.join(STAFF_ROLE_ORDER)
+        dv_role = DataValidation(type='list', formula1=f'"{role_list}"', allow_blank=False)
+        ws.add_data_validation(dv_role)
+        dv_role.add(f'{get_column_letter(col_idx)}2:{get_column_letter(col_idx)}{max_row}')
+    if 'Trạng thái làm việc' in d.columns:
+        col_idx = d.columns.get_loc('Trạng thái làm việc') + 1
+        status_list = ','.join(EMPLOYMENT_STATUS_OPTIONS)
+        dv_status = DataValidation(type='list', formula1=f'"{status_list}"', allow_blank=False)
+        ws.add_data_validation(dv_status)
+        dv_status.add(f'{get_column_letter(col_idx)}2:{get_column_letter(col_idx)}{max_row}')
+
+    note = wb.create_sheet('HuongDan')
+    note['A1'] = 'HƯỚNG DẪN IMPORT DANH SÁCH NHÂN SỰ'
+    note['A1'].font = Font(bold=True)
+    note['A3'] = '1. Không đổi Tên nhân viên vì đây là khóa đối chiếu tài khoản.'
+    note['A4'] = '2. Có thể sửa các cột hồ sơ, Phân quyền, Trạng thái làm việc và Khóa đăng nhập.'
+    note['A5'] = '3. Import không ghi đè Mật khẩu, Ngày sinh, quỹ phép, ca làm việc hoặc Remember Token (trừ khi khóa đăng nhập).'
+    note.column_dimensions['A'].width = 110
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def read_staff_list_import(uploaded_file):
+    """Đọc file export Danh sách nhân sự; Tên nhân viên là khóa, không tạo/xóa tài khoản."""
+    try:
+        raw = pd.read_excel(uploaded_file, dtype=str, engine='openpyxl').fillna('')
+    except Exception as e:
+        return pd.DataFrame(), f"Không đọc được file Excel: {e}"
+    if 'Tên nhân viên' not in raw.columns:
+        return pd.DataFrame(), "File import phải có cột 'Tên nhân viên'."
+    raw = raw.copy()
+    raw['Tên nhân viên'] = raw['Tên nhân viên'].astype(str).str.strip()
+    raw = raw[raw['Tên nhân viên'] != ''].copy()
+    if raw.empty:
+        return pd.DataFrame(), "File import không có nhân viên."
+
+    keys = raw['Tên nhân viên'].apply(normalize_login_name)
+    duplicated = raw.loc[keys.duplicated(keep=False), 'Tên nhân viên'].astype(str).tolist()
+    if duplicated:
+        return pd.DataFrame(), "Tên nhân viên bị trùng trong file import: " + ", ".join(sort_employee_names(duplicated))
+
+    if 'Phân quyền' in raw.columns:
+        roles = raw['Phân quyền'].astype(str).str.strip().str.lower()
+        invalid_roles = sorted({x for x in roles if x and x not in ALL_ACCOUNT_ROLES})
+        if invalid_roles:
+            return pd.DataFrame(), "Phân quyền không hợp lệ: " + ", ".join(invalid_roles)
+        raw['Phân quyền'] = roles
+
+    if 'Trạng thái làm việc' in raw.columns:
+        invalid_statuses = []
+        normalized_statuses = []
+        for val in raw['Trạng thái làm việc'].astype(str).tolist():
+            if not str(val).strip():
+                normalized_statuses.append('')
+                continue
+            key = normalize_login_name(val)
+            if key not in EMPLOYMENT_STATUS_ALIASES:
+                invalid_statuses.append(str(val).strip())
+                normalized_statuses.append('')
+            else:
+                normalized_statuses.append(EMPLOYMENT_STATUS_ALIASES[key])
+        if invalid_statuses:
+            return pd.DataFrame(), "Trạng thái làm việc không hợp lệ: " + ", ".join(sorted(set(invalid_statuses)))
+        raw['Trạng thái làm việc'] = normalized_statuses
+
+    raw['_staff_import_key'] = raw['Tên nhân viên'].apply(normalize_login_name)
+    return raw, ''
+
+
+def batch_import_staff_list(import_df, updated_by, actor_role="admin"):
+    """Import lại danh sách nhân sự hiện có, giữ giới hạn phân quyền của Admin/Lễ tân/Quản lý."""
+    if import_df is None or not isinstance(import_df, pd.DataFrame) or import_df.empty:
+        return False, "Không có dữ liệu để import."
+    try:
+        client = get_gspread_client()
+        if not client:
+            return False, "Chưa cấu hình quyền kết nối Google Sheets."
+        sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
+        all_vals = _gs_call_with_backoff(sheet.get_all_values)
+        if not all_vals or len(all_vals) < 2:
+            return False, "Sheet1 chưa có dữ liệu nhân sự."
+
+        import_map = {
+            normalize_login_name(r.get('Tên nhân viên', '')): r
+            for _, r in import_df.iterrows()
+            if normalize_login_name(r.get('Tên nhân viên', ''))
+        }
+        existing_keys = {
+            normalize_login_name(row[1] if len(row) > 1 else '')
+            for row in all_vals[1:]
+            if normalize_login_name(row[1] if len(row) > 1 else '')
+        }
+        unknown = [str(r.get('Tên nhân viên', '')).strip() for _, r in import_df.iterrows()
+                   if normalize_login_name(r.get('Tên nhân viên', '')) not in existing_keys]
+        if unknown:
+            return False, "Không tìm thấy trong hệ thống: " + ", ".join(sort_employee_names(unknown))
+
+        actor_role = str(actor_role or '').strip().lower()
+        current_status_map = load_employment_status_map()
+        if actor_role != 'admin':
+            # Lễ tân/Quản lý có thể import file đầy đủ, nhưng chỉ được THAY ĐỔI
+            # các tài khoản thuộc nhanvien/locker/tapvu và không được nâng role.
+            for row in all_vals[1:]:
+                rr = list(row)
+                while len(rr) < 20:
+                    rr.append('')
+                key = normalize_login_name(rr[1])
+                item = import_map.get(key)
+                if item is None:
+                    continue
+                current_role = str(rr[3]).strip().lower() or 'nhanvien'
+                imported_role = str(item.get('Phân quyền', current_role)).strip().lower() if 'Phân quyền' in import_df.columns else current_role
+                if current_role in FRONTDESK_MANAGEABLE_ROLES:
+                    if imported_role and imported_role not in FRONTDESK_MANAGEABLE_ROLES:
+                        return False, f"Không được đổi {rr[1]} sang phân quyền '{imported_role}'."
+                    continue
+
+                def _same_text(col, current):
+                    return col not in import_df.columns or str(item.get(col, '')).replace("'", '').strip() == str(current).replace("'", '').strip()
+
+                changed = False
+                if 'Phân quyền' in import_df.columns and imported_role != current_role:
+                    changed = True
+                changed = changed or not _same_text('Họ và tên đầy đủ', rr[4])
+                changed = changed or not _same_text('Điện thoại', rr[6])
+                changed = changed or not _same_text('Email', rr[7])
+                changed = changed or not _same_text('Địa chỉ', rr[8])
+                changed = changed or not _same_text('Số tài khoản ngân hàng', rr[9])
+                changed = changed or not _same_text('Tên ngân hàng', rr[10])
+                if 'Khóa đăng nhập' in import_df.columns:
+                    changed = changed or (is_locked_value(item.get('Khóa đăng nhập', '')) != is_locked_value(rr[17]))
+                if 'Trạng thái làm việc' in import_df.columns:
+                    imported_status = normalize_employment_status_value(item.get('Trạng thái làm việc', ''))
+                    current_status = current_status_map.get(key, EMPLOYMENT_STATUS_ACTIVE)
+                    changed = changed or imported_status != current_status
+                if changed:
+                    return False, (
+                        f"Lễ tân/Quản lý không được thay đổi tài khoản {rr[1]} ({current_role}). "
+                        "Chỉ được import thay đổi cho nhanvien, locker hoặc tapvu."
+                    )
+
+        out_dk = []  # D:K = role, họ tên, ngày sinh(preserve), phone, email, address, bank acc, bank
+        out_rt = []  # R:T = khóa login + remember token hash/expiry (token chỉ xóa khi khóa)
+        updated_count = 0
+        imported_status_by_key = {}
+        imported_role_by_key = {}
+
+        for row in all_vals[1:]:
+            rr = list(row)
+            while len(rr) < 20:
+                rr.append('')
+            key = normalize_login_name(rr[1])
+            item = import_map.get(key)
+            role, fullname, dob, phone, email, address, bank_acc, bank_name = rr[3:11]
+            lock_val, token_hash, token_expiry = rr[17], rr[18], rr[19]
+            if item is not None:
+                updated_count += 1
+                if 'Phân quyền' in import_df.columns and str(item.get('Phân quyền', '')).strip():
+                    role = str(item.get('Phân quyền', '')).strip().lower()
+                imported_role_by_key[key] = role
+                if 'Họ và tên đầy đủ' in import_df.columns:
+                    fullname = str(item.get('Họ và tên đầy đủ', '')).strip()
+                if 'Điện thoại' in import_df.columns:
+                    phone = str(item.get('Điện thoại', '')).replace("'", '').strip()
+                if 'Email' in import_df.columns:
+                    email = str(item.get('Email', '')).strip()
+                if 'Địa chỉ' in import_df.columns:
+                    address = str(item.get('Địa chỉ', '')).strip()
+                if 'Số tài khoản ngân hàng' in import_df.columns:
+                    bank_acc = str(item.get('Số tài khoản ngân hàng', '')).replace("'", '').strip()
+                if 'Tên ngân hàng' in import_df.columns:
+                    bank_name = str(item.get('Tên ngân hàng', '')).strip()
+                if 'Khóa đăng nhập' in import_df.columns:
+                    lock_val = 'KHÓA' if is_locked_value(item.get('Khóa đăng nhập', '')) else ''
+                    if lock_val:
+                        token_hash = ''
+                        token_expiry = ''
+                if 'Trạng thái làm việc' in import_df.columns:
+                    raw_status = str(item.get('Trạng thái làm việc', '')).strip()
+                    if raw_status:
+                        imported_status_by_key[key] = normalize_employment_status_value(raw_status)
+
+            phone_write = f"'{phone}" if str(phone).strip() else ''
+            bank_write = f"'{bank_acc}" if str(bank_acc).strip() else ''
+            out_dk.append([role, fullname, dob, phone_write, email, address, bank_write, bank_name])
+            out_rt.append([lock_val, token_hash, token_expiry])
+
+        # Hai lần ghi range lớn thay cho hàng trăm update_cell -> giảm nguy cơ Sheets 429.
+        last_row = len(out_dk) + 1
+        if out_dk:
+            gspread_update_range(sheet, f'D2:K{last_row}', out_dk, value_input_option='USER_ENTERED')
+            gspread_update_range(sheet, f'R2:T{last_row}', out_rt, value_input_option='USER_ENTERED')
+
+        # Cập nhật bảng trạng thái làm việc theo cùng danh sách nhân sự.
+        if imported_status_by_key:
+            status_ws = _get_employment_status_worksheet()
+            existing_status = load_employment_status_map()
+            now = datetime.now(VN_TZ)
+            status_rows = []
+            stt = 0
+            for row in all_vals[1:]:
+                name = str(row[1]).strip() if len(row) > 1 else ''
+                key = normalize_login_name(name)
+                if not key:
+                    continue
+                role_now = imported_role_by_key.get(key, str(row[3]).strip().lower() if len(row) > 3 else 'nhanvien')
+                if role_now == 'admin':
+                    continue
+                stt += 1
+                status = imported_status_by_key.get(key, existing_status.get(key, EMPLOYMENT_STATUS_ACTIVE))
+                status_rows.append([
+                    stt, name, status, now.strftime('%d/%m/%Y'), now.strftime('%H:%M:%S'), str(updated_by).strip()
+                ])
+            if status_ws is not None:
+                try:
+                    _gs_call_with_backoff(status_ws.batch_clear, ['A2:F1000'])
+                except Exception:
+                    pass
+                if status_rows:
+                    gspread_update_range(status_ws, f'A2:F{len(status_rows)+1}', status_rows, value_input_option='USER_ENTERED')
+
+        _clear_dynamic_data_caches()
+        try:
+            load_employment_status_map.clear()
+        except Exception:
+            pass
+        try:
+            sync_tichluy_roles_and_stt(load_credentials_fresh())
+        except Exception:
+            pass
+        return True, f"Đã import và cập nhật {updated_count} nhân viên. Mật khẩu, ngày sinh, quỹ phép, ca làm việc và Remember Token không bị ghi đè."
+    except Exception as e:
+        return False, f"Lỗi import danh sách nhân sự: {e}"
+
+
 # --- TẢI DỮ LIỆU TỪ GOOGLE SHEET DỰ PHÒNG ---
 def _load_backup_sheet_data_from_sheets():
     """Đọc trực tiếp A:J của sheet lịch nghỉ chính, không phụ thuộc tên header và luôn giữ source row."""
@@ -2411,7 +2737,70 @@ def get_changed_schedule_positions(original_df, edited_df, editable_columns=None
     return changed
 
 
-def validate_schedule_edit_permission(original_row, edited_row, role, today=None):
+def is_employee_co_phep_leave_reason(value):
+    """Nhận diện nhóm Loại nghỉ CÓ phép theo cùng quy tắc đang dùng ở phần thống kê."""
+    key = normalize_login_name(clean_leave_reason_display(value))
+    if not key or "khong phep" in key or "nghi phat sinh" in key:
+        return False
+    excluded_keywords = [
+        "di tre", "khong don ve sinh", "loi vi pham", "qua tour", "xuong phong",
+        "ra som", "vao muon", "di tua", "ngung nhan", "ho tro ca"
+    ]
+    return not any(kw in key for kw in excluded_keywords)
+
+
+def validate_employee_leave_change_permission(original_row, edited_row=None, current_user=None, today=None, action="sửa"):
+    """Nhân viên/Leader chỉ được sửa hoặc hủy Loại nghỉ CÓ phép của chính mình trước ít nhất 7 ngày."""
+    today = today or get_vn_today()
+    actor = normalize_login_name(current_user or st.session_state.get("current_user", ""))
+    owner = normalize_login_name(original_row.get("Tên nhân viên", ""))
+    if not actor or owner != actor:
+        return False, "Nhân viên chỉ được thao tác lịch nghỉ của chính mình."
+
+    old_reason = original_row.get("Lý do nghỉ", original_row.get("Loại nghỉ", ""))
+    if not is_employee_co_phep_leave_reason(old_reason):
+        return False, f"Nhân viên chỉ được {action} những Loại nghỉ CÓ phép của mình."
+
+    old_dt = pd.to_datetime(original_row.get("Ngày"), errors="coerce", dayfirst=True)
+    min_date = today + timedelta(days=EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS)
+    if pd.isna(old_dt) or old_dt.date() < min_date:
+        return False, (
+            f"Nhân viên chỉ được {action} lịch nghỉ trước ít nhất {EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS} ngày "
+            f"(ngày nghỉ từ {min_date.strftime('%d/%m/%Y')} trở đi)."
+        )
+
+    if edited_row is not None:
+        new_owner = normalize_login_name(edited_row.get("Tên nhân viên", original_row.get("Tên nhân viên", "")))
+        if new_owner != actor:
+            return False, "Nhân viên không được đổi lịch sang tên người khác."
+        new_reason = edited_row.get("Lý do nghỉ", edited_row.get("Loại nghỉ", old_reason))
+        if not is_employee_co_phep_leave_reason(new_reason):
+            return False, "Nhân viên chỉ được thay đổi giữa các Loại nghỉ CÓ phép."
+        new_dt = pd.to_datetime(edited_row.get("Ngày"), errors="coerce", dayfirst=True)
+        if pd.isna(new_dt) or new_dt.date() < min_date:
+            return False, (
+                f"Ngày nghỉ sau khi sửa phải cách hiện tại ít nhất {EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS} ngày "
+                f"(từ {min_date.strftime('%d/%m/%Y')} trở đi)."
+            )
+    return True, ""
+
+
+def validate_schedule_delete_permission(original_row, role, current_user=None, today=None):
+    """Kiểm tra quyền hủy/xóa lịch theo vai trò."""
+    today = today or get_vn_today()
+    role = str(role or "").strip().lower()
+    if role in EMPLOYEE_LIKE_ROLES:
+        return validate_employee_leave_change_permission(
+            original_row, None, current_user=current_user, today=today, action="hủy"
+        )
+    if role in {"letan", "quanly"}:
+        dt = pd.to_datetime(original_row.get("Ngày"), errors="coerce", dayfirst=True)
+        if pd.notna(dt) and dt.date() < today:
+            return False, "Lễ tân/Quản lý không được xóa lịch trong quá khứ."
+    return True, ""
+
+
+def validate_schedule_edit_permission(original_row, edited_row, role, today=None, current_user=None):
     """Giữ đúng giới hạn sửa lịch của từng vai trò trước khi batch-save."""
     today = today or get_vn_today()
     old_dt = pd.to_datetime(original_row.get('Ngày'), errors='coerce', dayfirst=True)
@@ -2423,11 +2812,14 @@ def validate_schedule_edit_permission(original_row, edited_row, role, today=None
 
     role = str(role or '').strip().lower()
     if role in EMPLOYEE_LIKE_ROLES:
-        emp_min_date, emp_max_date = employee_registration_window(today)
-        if new_date < emp_min_date or new_date > emp_max_date:
-            return False, f"Nhân viên chỉ được sửa lịch từ hôm nay đến hết {emp_max_date.strftime('%d/%m/%Y')}."
-        if normalize_login_name(edited_row.get('Tên nhân viên', '')) != normalize_login_name(original_row.get('Tên nhân viên', '')):
-            return False, "Nhân viên không được đổi lịch sang tên người khác."
+        permitted, message = validate_employee_leave_change_permission(
+            original_row, edited_row, current_user=current_user, today=today, action="thay đổi"
+        )
+        if not permitted:
+            return False, message
+        _, emp_max_date = employee_registration_window(today)
+        if new_date > emp_max_date:
+            return False, f"Nhân viên chỉ được sửa lịch đến hết {emp_max_date.strftime('%d/%m/%Y')}."
     elif role in {'letan', 'quanly'}:
         if old_date < today or new_date < today:
             return False, "Lễ tân/Quản lý không được sửa lịch trong quá khứ."
@@ -4257,6 +4649,23 @@ def render_admin_quick_layout_default(table_key, columns, key_suffix=""):
         return
     safe_suffix = re.sub(r'[^a-zA-Z0-9_]+', '_', str(key_suffix or table_key))
     with st.expander("⭐ Lưu bố cục bảng này làm mặc định", expanded=False):
+        components.html(r"""
+        <script>
+        (function(){
+          try {
+            const doc = window.parent.document;
+            const wanted = '⭐ Lưu bố cục bảng này làm mặc định';
+            const nodes = doc.querySelectorAll('[data-testid="stExpander"] summary, details summary');
+            nodes.forEach((node) => {
+              if ((node.innerText || '').trim().includes(wanted)) {
+                node.style.fontSize = '13px';
+                node.querySelectorAll('p,span').forEach((x) => { x.style.fontSize = '13px'; });
+              }
+            });
+          } catch (e) {}
+        })();
+        </script>
+        """, height=0, width=0)
         st.caption("Chỉnh nhanh thứ tự/độ rộng rồi lưu. Font, căn lề, Wrap Text và độ cao dòng được giữ theo cấu hình hiện tại.")
         order, widths = get_table_layout(table_key, cols)
         quick_df = pd.DataFrame([
@@ -7684,7 +8093,41 @@ def open_app_page(page_name):
         return
     st.session_state.app_page = page_name
     st.query_params["page"] = PAGE_SLUGS[page_name]
+    if st.session_state.get("current_role") not in ["nhanvien", "leader", "locker"]:
+        st.session_state["_vera_collapse_sidebar_once"] = True
     st.rerun()
+
+
+def collapse_sidebar_after_navigation_once():
+    """Sau khi chọn xong một mục MENU CHỨC NĂNG, tự thu gọn sidebar một lần."""
+    if not st.session_state.pop("_vera_collapse_sidebar_once", False):
+        return
+    components.html(r"""
+    <script>
+    (function(){
+      try {
+        const doc = window.parent.document;
+        const clickCollapse = () => {
+          const collapsedControl = doc.querySelector('[data-testid="collapsedControl"]');
+          if (collapsedControl && collapsedControl.offsetParent !== null) return;
+          const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+          if (!sidebar) return;
+          const candidates = [
+            doc.querySelector('[data-testid="stSidebarCollapseButton"] button'),
+            doc.querySelector('[data-testid="stSidebarCollapseButton"]'),
+            sidebar.querySelector('button[aria-label="Close sidebar"]'),
+            sidebar.querySelector('button[aria-label*="sidebar" i]'),
+            sidebar.querySelector('button[kind="header"]')
+          ].filter(Boolean);
+          const btn = candidates.find(x => !x.disabled);
+          if (btn) btn.click();
+        };
+        setTimeout(clickCollapse, 80);
+        setTimeout(clickCollapse, 260);
+      } catch (e) {}
+    })();
+    </script>
+    """, height=0, width=0)
 
 # Nhân viên vẫn ẩn sidebar; Admin/Lễ tân/Quản lý dùng mỗi chức năng = một nút riêng.
 if st.session_state.current_role in ["nhanvien", "leader", "locker"]:
@@ -7695,7 +8138,10 @@ if st.session_state.current_role in ["nhanvien", "leader", "locker"]:
         </style>
     """, unsafe_allow_html=True)
 else:
-    st.sidebar.title("📌 MENU CHỨC NĂNG")
+    st.sidebar.markdown(
+        "<div style='font-size:18px;font-weight:800;line-height:1.15;margin:2px 0 10px 0;'>📌 MENU CHỨC NĂNG</div>",
+        unsafe_allow_html=True
+    )
     for page_name in allowed_pages:
         if st.sidebar.button(page_name, key=f"nav_{PAGE_SLUGS[page_name]}", use_container_width=True,
                              type="primary" if selected_page == page_name else "secondary"):
@@ -7703,6 +8149,7 @@ else:
     if st.session_state.current_role == "admin":
         st.sidebar.markdown("---")
         st.sidebar.caption("🔐 Quyền từng chức năng/từng vai trò/từng tài khoản được quản lý tại trang Phân quyền chức năng.")
+    collapse_sidebar_after_navigation_once()
 
 # --- GIAO DIỆN HEADER ---
 st.write("")
@@ -7942,14 +8389,45 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
 
 elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff_list"):
     st.subheader("👥 Danh sách nhân sự")
-    staff_source_df = df_credentials.copy()
-    employment_map = load_employment_status_map()
-    staff_source_df['Trạng thái làm việc'] = staff_source_df.apply(
-        lambda r: employment_map.get(normalize_login_name(r.get('Tên nhân viên', '')), EMPLOYMENT_STATUS_ACTIVE)
-        if str(r.get('Phân quyền', '')).strip().lower() in EMPLOYEE_LIKE_ROLES else '', axis=1
-    )
-    cols_staff = ['Tên nhân viên', 'Họ và tên đầy đủ', 'Phân quyền', 'Trạng thái làm việc', 'Điện thoại', 'Email', 'Địa chỉ', 'Số tài khoản ngân hàng', 'Tên ngân hàng', 'Khóa đăng nhập']
-    cols_staff = [c for c in cols_staff if c in staff_source_df.columns]
+    staff_source_df = build_staff_list_dataframe(df_credentials)
+
+    c_staff_export, c_staff_import = st.columns([1, 1])
+    with c_staff_export:
+        st.download_button(
+            "📥 Export danh sách nhân viên hiện tại",
+            data=staff_list_to_excel(staff_source_df),
+            file_name=f"VeraSpa_DanhSachNhanSu_{get_vn_today().strftime('%d%m%Y')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="export_current_staff_list"
+        )
+    with c_staff_import:
+        if st.session_state.current_role in {'admin', 'letan', 'quanly'}:
+            staff_import_file = st.file_uploader(
+                "Import lại hệ thống", type=['xlsx'], key="import_staff_list_file",
+                help="Dùng file đã Export. Tên nhân viên là khóa; import không tạo/xóa tài khoản và không ghi đè mật khẩu."
+            )
+        else:
+            staff_import_file = None
+            st.button("📤 Import lại hệ thống", disabled=True, use_container_width=True, key="staff_import_not_allowed")
+
+    if staff_import_file is not None and st.session_state.current_role in {'admin', 'letan', 'quanly'}:
+        imported_staff_df, import_staff_err = read_staff_list_import(staff_import_file)
+        if import_staff_err:
+            st.error(import_staff_err)
+        else:
+            preview_cols = [c for c in STAFF_EXPORT_COLUMNS if c in imported_staff_df.columns]
+            st.caption(f"Xem trước file import: {len(imported_staff_df)} nhân viên. Chỉ cập nhật các tài khoản đã tồn tại.")
+            st.dataframe(imported_staff_df[preview_cols], width='stretch', height=min(480, 70 + len(imported_staff_df) * 35), hide_index=True)
+            if st.button("⬆️ Xác nhận Import danh sách nhân sự", use_container_width=True, type="primary", key="confirm_import_staff_list"):
+                ok, msg = batch_import_staff_list(
+                    imported_staff_df, st.session_state.current_user, st.session_state.current_role
+                )
+                (st.success if ok else st.error)(msg)
+                if ok:
+                    st.rerun()
+
+    cols_staff = [c for c in STAFF_EXPORT_COLUMNS if c in staff_source_df.columns]
     staff_df, staff_widths = apply_table_layout_df(staff_source_df[cols_staff], "staff_list")
     st.dataframe(
         apply_table_visual_styler(staff_df, "staff_list", list(staff_df.columns)),
@@ -8272,7 +8750,6 @@ elif selected_page == "➕ Thêm nhân viên" and has_feature_access("employee_a
 
 elif selected_page == "✏️ Sửa / Xóa nhân viên" and has_page_access("✏️ Sửa / Xóa nhân viên"):
     st.subheader("✏️ Sửa / Xóa nhân viên")
-    st.caption("Thứ tự thao tác: Chỉnh sửa hồ sơ → Trạng thái làm việc → Xóa nhân viên.")
 
     _current_role = str(st.session_state.current_role).strip().lower()
     _all_staff = df_credentials.copy()
@@ -8283,7 +8760,10 @@ elif selected_page == "✏️ Sửa / Xóa nhân viên" and has_page_access("✏
     # 1) Chỉnh sửa hồ sơ
     if has_feature_access('employee_edit'):
         st.markdown("#### ✏️ Chỉnh sửa hồ sơ")
-        edit_usr = st.selectbox("Chọn nhân viên cần sửa:", [""] + _manageable_names, key='sb_edit_employee', filter_mode="contains")
+        edit_usr = st.selectbox(
+            "Chọn nhân viên cần sửa:", _manageable_names, index=None, placeholder="Chọn nhân viên",
+            key='sb_edit_employee', filter_mode="contains"
+        )
         if edit_usr:
             usr_data = df_credentials[df_credentials['Tên nhân viên'].apply(normalize_login_name) == normalize_login_name(edit_usr)].iloc[-1]
             edit_key = re.sub(r"[^a-zA-Z0-9_]+", "_", normalize_login_name(edit_usr)) or "employee"
@@ -8319,7 +8799,7 @@ elif selected_page == "✏️ Sửa / Xóa nhân viên" and has_page_access("✏
     if has_feature_access('employment_status'):
         st.markdown("#### 🏷️ Trạng thái làm việc của nhân viên")
         if 'Phân quyền' in df_credentials.columns:
-            _status_roles = EMPLOYEE_LIKE_ROLES if _current_role == 'admin' else {'nhanvien'}
+            _status_roles = EMPLOYMENT_STATUS_MANAGEABLE_ROLES if _current_role == 'admin' else FRONTDESK_MANAGEABLE_ROLES
             nhanvien_df_status = df_credentials[
                 df_credentials['Phân quyền'].astype(str).str.strip().str.lower().isin(_status_roles)
             ].copy()
@@ -8331,28 +8811,40 @@ elif selected_page == "✏️ Sửa / Xóa nhân viên" and has_page_access("✏
         else:
             c_status_emp, c_status_value, c_status_save = st.columns([2.2, 1.6, 1.2])
             with c_status_emp:
-                status_emp = st.selectbox("Chọn nhân viên", options=status_emp_options, filter_mode="contains", key="employment_status_employee")
-            current_status_map = load_employment_status_map()
-            current_status = current_status_map.get(normalize_login_name(status_emp), EMPLOYMENT_STATUS_ACTIVE)
-            with c_status_value:
-                status_value = st.selectbox(
-                    "Trạng thái", options=EMPLOYMENT_STATUS_OPTIONS,
-                    index=EMPLOYMENT_STATUS_OPTIONS.index(current_status) if current_status in EMPLOYMENT_STATUS_OPTIONS else 0,
-                    key=f"employment_status_value_{normalize_login_name(status_emp)}"
+                status_emp = st.selectbox(
+                    "Chọn nhân viên", options=status_emp_options, index=None, placeholder="Chọn nhân viên",
+                    filter_mode="contains", key="employment_status_employee"
                 )
-            with c_status_save:
-                st.write(""); st.write("")
-                if st.button("💾 Lưu trạng thái", use_container_width=True, key="save_employment_status"):
-                    ok, msg = set_employee_employment_status(status_emp, status_value, st.session_state.current_user)
-                    (st.success if ok else st.error)(msg)
-                    if ok: st.rerun()
-        st.caption("Trạng thái nghỉ việc không xóa tài khoản hoặc dữ liệu lịch sử; có thể đổi lại 'Đang làm việc' bất cứ lúc nào.")
+            current_status_map = load_employment_status_map()
+            if status_emp:
+                current_status = current_status_map.get(normalize_login_name(status_emp), EMPLOYMENT_STATUS_ACTIVE)
+                with c_status_value:
+                    status_value = st.selectbox(
+                        "Trạng thái", options=EMPLOYMENT_STATUS_OPTIONS,
+                        index=EMPLOYMENT_STATUS_OPTIONS.index(current_status) if current_status in EMPLOYMENT_STATUS_OPTIONS else 0,
+                        key=f"employment_status_value_{normalize_login_name(status_emp)}"
+                    )
+                with c_status_save:
+                    st.write(""); st.write("")
+                    if st.button("💾 Lưu trạng thái", use_container_width=True, key="save_employment_status"):
+                        ok, msg = set_employee_employment_status(status_emp, status_value, st.session_state.current_user)
+                        (st.success if ok else st.error)(msg)
+                        if ok: st.rerun()
+            else:
+                with c_status_value:
+                    st.selectbox("Trạng thái", options=EMPLOYMENT_STATUS_OPTIONS, index=None, placeholder="Chọn trạng thái", disabled=True, key="employment_status_value_empty")
+                with c_status_save:
+                    st.write(""); st.write("")
+                    st.button("💾 Lưu trạng thái", use_container_width=True, disabled=True, key="save_employment_status_empty")
         st.markdown("---")
 
     # 3) Xóa nhân viên
     if has_feature_access('employee_delete'):
         st.markdown("#### 🗑️ Xóa nhân viên")
-        del_usr = st.selectbox("Chọn nhân viên cần xóa:", [""] + _manageable_names, filter_mode="contains", key="delete_employee_select")
+        del_usr = st.selectbox(
+            "Chọn nhân viên cần xóa:", _manageable_names, index=None, placeholder="Chọn nhân viên",
+            filter_mode="contains", key="delete_employee_select"
+        )
         confirm_del = st.checkbox("Tôi xác nhận xóa tài khoản đã chọn", key="confirm_delete_employee")
         if st.button("Xác nhận xóa", use_container_width=True, disabled=not bool(del_usr and confirm_del)):
             if del_usr:
@@ -9916,39 +10408,41 @@ elif selected_page == "🧭 Bảng tour":
     elif df_tour.empty:
         st.info("Không có dữ liệu trong sheet Input.")
     else:
-        # Bảng thống kê dùng dữ liệu GỐC vừa đọc, trước khi làm trống thời gian <= -15.
-        tour_stats_df = calculate_bang_tour_stats(df_tour)
-        st.markdown("### 📊 Thống kê Bảng tour")
-        def style_tour_stats_row(row):
-            if str(row.get("Chỉ số", "")).strip() == "Có thể lên tour":
-                return ["background-color:#92D050;color:#000000;font-weight:700;"] * len(row)
-            return [""] * len(row)
+        # Chỉ Admin/Lễ tân/Quản lý được xem Thống kê Bảng tour.
+        if str(st.session_state.current_role).strip().lower() in {"admin", "letan", "quanly"}:
+            # Bảng thống kê dùng dữ liệu GỐC vừa đọc, trước khi làm trống thời gian <= -15.
+            tour_stats_df = calculate_bang_tour_stats(df_tour)
+            st.markdown("### 📊 Thống kê Bảng tour")
+            def style_tour_stats_row(row):
+                if str(row.get("Chỉ số", "")).strip() == "Có thể lên tour":
+                    return ["background-color:#92D050;color:#000000;font-weight:700;"] * len(row)
+                return [""] * len(row)
 
-        tour_stats_styled = (
-            tour_stats_df.style
-            .apply(style_tour_stats_row, axis=1)
-            .set_table_styles([
-                {
-                    "selector": "th",
-                    "props": [
-                        ("background-color", "#A1948C"),
-                        ("color", "#000000"),
-                        ("font-weight", "700"),
-                        ("text-align", "center"),
-                        ("white-space", "normal"),
-                        ("overflow-wrap", "anywhere"),
-                        ("word-break", "break-word"),
-                        ("line-height", "1.15"),
-                    ],
-                }
-            ])
-        )
-        st.dataframe(
-            tour_stats_styled,
-            use_container_width=True,
-            hide_index=True,
-            height="content"
-        )
+            tour_stats_styled = (
+                tour_stats_df.style
+                .apply(style_tour_stats_row, axis=1)
+                .set_table_styles([
+                    {
+                        "selector": "th",
+                        "props": [
+                            ("background-color", "#A1948C"),
+                            ("color", "#000000"),
+                            ("font-weight", "700"),
+                            ("text-align", "center"),
+                            ("white-space", "normal"),
+                            ("overflow-wrap", "anywhere"),
+                            ("word-break", "break-word"),
+                            ("line-height", "1.15"),
+                        ],
+                    }
+                ])
+            )
+            st.dataframe(
+                tour_stats_styled,
+                use_container_width=True,
+                hide_index=True,
+                height="content"
+            )
 
         # Sau khi lấy dữ liệu: sắp cột + định dạng Thời gian còn lại dạng số nguyên.
         # Giá trị <= -15 được làm trống trên bảng hiển thị.
@@ -10320,7 +10814,6 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
 
 
     st.markdown("---")
-    st.markdown("## 📊 Thống kê nghỉ phép")
 
     # Bộ lọc thời gian & nhân viên
     col_date, col_name, col_refresh = st.columns([5, 4, 2])
@@ -10450,7 +10943,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
         cols_to_hide = ['Phạt vi phạm']
 
     st.markdown("### 📅 Thống kê chi tiết theo từng ngày")
-    st.caption("Phần này hợp nhất dữ liệu từ 2 Google Sheet lịch nghỉ và loại trùng trước khi thống kê.")
+    st.caption("Nhân viên chỉ được hủy, thay đổi những Loại nghỉ CÓ phép của mình trước ít nhất 7 ngày.")
     if not daily_thuc_nghi.empty:
         daily_stats = []
         daily_limit_flags = []
@@ -10733,7 +11226,8 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                         original = raw_detail_full.iloc[pos].copy()
                         edited = detail_compare.iloc[pos].copy()
                         permitted, perm_msg = validate_schedule_edit_permission(
-                            original, edited, st.session_state.current_role, get_vn_today()
+                            original, edited, st.session_state.current_role, get_vn_today(),
+                            current_user=st.session_state.current_user
                         )
                         if not permitted:
                             st.error(f"❌ {original.get('Tên nhân viên','')}: {perm_msg}")
@@ -10759,21 +11253,15 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     originals = [raw_detail_full.iloc[pos].copy() for pos in selected_positions if pos < len(raw_detail_full)]
                     today_del = get_vn_today()
                     can_delete = True
-                    if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:
-                        emp_min_date, emp_max_date = employee_registration_window(today_del)
-                        for r in originals:
-                            dt = pd.to_datetime(r.get('Ngày'), errors='coerce', dayfirst=True)
-                            if pd.isna(dt) or dt.date() < emp_min_date or dt.date() > emp_max_date:
-                                st.error(f"❌ Nhân viên chỉ được xóa lịch từ hôm nay đến hết {emp_max_date.strftime('%d/%m/%Y')}.")
-                                can_delete = False
-                                break
-                    elif st.session_state.current_role in ['letan', 'quanly']:
-                        for r in originals:
-                            dt = pd.to_datetime(r.get('Ngày'), errors='coerce', dayfirst=True)
-                            if pd.notna(dt) and dt.date() < today_del:
-                                st.error("❌ Lễ tân/Quản lý không được xóa lịch trong quá khứ.")
-                                can_delete = False
-                                break
+                    for r in originals:
+                        permitted, perm_msg = validate_schedule_delete_permission(
+                            r, st.session_state.current_role,
+                            current_user=st.session_state.current_user, today=today_del
+                        )
+                        if not permitted:
+                            st.error(f"❌ {r.get('Tên nhân viên','')}: {perm_msg}")
+                            can_delete = False
+                            break
                     if can_delete:
                         ok, msg = delete_schedule_records(originals, st.session_state.current_user)
                         (st.success if ok else st.error)(msg)
@@ -10850,7 +11338,10 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
 elif selected_page == "✏️ Quản lý lịch nghỉ":
     st.subheader("✏️ Quản lý lịch nghỉ")
     st.markdown("### 🗑️ Xóa / Quản lý lịch nghỉ đã đăng ký")
-    st.caption("V70: sửa trực tiếp nhiều dòng trên bảng. Dữ liệu chỉ được ghi/reload sau khi bấm Lưu hoặc Xóa.")
+    if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:
+        st.caption("Nhân viên chỉ được hủy, thay đổi những Loại nghỉ CÓ phép của mình trước ít nhất 7 ngày.")
+    else:
+        st.caption("Sửa trực tiếp nhiều dòng trên bảng. Dữ liệu chỉ được ghi/reload sau khi bấm Lưu hoặc Xóa.")
 
     manage_today = get_vn_today()
     mf_date, mf_name, mf_refresh = st.columns([5, 4, 2])
@@ -11023,7 +11514,10 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
                         continue
                     original = manage_raw_full.iloc[pos].copy()
                     edited = manage_edit_only.iloc[pos].copy()
-                    permitted, perm_msg = validate_schedule_edit_permission(original, edited, st.session_state.current_role, manage_today)
+                    permitted, perm_msg = validate_schedule_edit_permission(
+                        original, edited, st.session_state.current_role, manage_today,
+                        current_user=st.session_state.current_user
+                    )
                     if not permitted:
                         st.error(f"❌ {original.get('Tên nhân viên','')}: {perm_msg}")
                         all_ok = False
@@ -11045,25 +11539,18 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             else:
                 originals = [manage_raw_full.iloc[pos].copy() for pos in manage_selected if pos < len(manage_raw_full)]
                 can_delete = True
-                if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:
-                    emp_min_date, emp_max_date = employee_registration_window(manage_today)
-                    for r in originals:
-                        dt = pd.to_datetime(r.get('Ngày'), errors='coerce', dayfirst=True)
-                        if pd.isna(dt) or dt.date() < emp_min_date or dt.date() > emp_max_date:
-                            st.error(f"❌ Nhân viên chỉ được xóa lịch từ hôm nay đến hết {emp_max_date.strftime('%d/%m/%Y')}.")
-                            can_delete = False
-                            break
-                elif st.session_state.current_role in ['letan','quanly']:
-                    for r in originals:
-                        dt = pd.to_datetime(r.get('Ngày'), errors='coerce', dayfirst=True)
-                        if pd.notna(dt) and dt.date() < manage_today:
-                            st.error('❌ Lễ tân/Quản lý không được xóa lịch trong quá khứ.')
-                            can_delete = False
-                            break
+                for r in originals:
+                    permitted, perm_msg = validate_schedule_delete_permission(
+                        r, st.session_state.current_role,
+                        current_user=st.session_state.current_user, today=manage_today
+                    )
+                    if not permitted:
+                        st.error(f"❌ {r.get('Tên nhân viên','')}: {perm_msg}")
+                        can_delete = False
+                        break
                 if can_delete:
                     ok, msg = delete_schedule_records(originals, st.session_state.current_user)
                     (st.success if ok else st.error)(msg)
                     if ok:
                         _clear_dynamic_data_caches()
                         st.rerun()
-

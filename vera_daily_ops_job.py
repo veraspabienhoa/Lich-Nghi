@@ -1,12 +1,8 @@
 """Vera Spa daily operations Cloud Run Job.
 
-Actions:
-  python vera_daily_ops_job.py cleanup
-      - At 08:00 ICT: clear previous-day Break/Giờ ra/Giờ vào in Input!R21:R100,
-        S21:S100, U21:U100 of the Bảng tour XLSM and upload the same file back to Drive.
-
+Action:
   python vera_daily_ops_job.py violations
-      - At 20:10 ICT: analyze Bảng tour break records for today.
+      - At 21:00 ICT: analyze Bảng tour break records for today.
       - >90 minutes outside => map penalty reason from LoaiNghi and append Auto update violation.
       - Only one of Giờ ra/Giờ vào => map configured/sheet reason and append Auto update violation.
       - Email employee and CC admin/letan/quanly + veraspabienhoa@gmail.com.
@@ -28,7 +24,6 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from pathlib import Path
 
 import gspread
 import pandas as pd
@@ -97,7 +92,7 @@ def gspread_client():
 
 
 def drive_session():
-    scopes = ["https://www.googleapis.com/auth/drive"]
+    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
     return AuthorizedSession(_credentials(scopes))
 
 
@@ -113,20 +108,6 @@ def download_drive_file(file_id: str, path: str):
                 f.write(chunk)
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         raise RuntimeError("Drive returned an empty file.")
-
-
-def upload_drive_file(file_id: str, path: str):
-    session = drive_session()
-    url = f"https://www.googleapis.com/upload/drive/v3/files/{file_id}?uploadType=media&supportsAllDrives=true"
-    with open(path, "rb") as f:
-        r = session.patch(
-            url,
-            data=f,
-            headers={"Content-Type": "application/vnd.ms-excel.sheet.macroEnabled.12"},
-            timeout=180,
-        )
-    if r.status_code not in {200, 201}:
-        raise RuntimeError(f"Drive upload HTTP {r.status_code}: {str(r.text)[:500]}")
 
 
 def parse_datetime(value, fallback_date: date | None = None) -> datetime | None:
@@ -163,36 +144,6 @@ def open_bang_tour(data_only=False):
             pass
         raise RuntimeError("Không tìm thấy sheet Input trong Bảng tour.")
     return wb, wb["Input"], path
-
-
-def cleanup_previous_day() -> str:
-    today = vn_now().date()
-    yesterday = today - timedelta(days=1)
-    wb, ws, source_path = open_bang_tour(data_only=False)
-    out_path = source_path + ".out.xlsm"
-    cleared = 0
-    try:
-        for row in range(21, 101):
-            out_dt = parse_datetime(ws[f"S{row}"].value)
-            in_dt = parse_datetime(ws[f"U{row}"].value)
-            out_date = out_dt.date() if out_dt else None
-            in_date = in_dt.date() if in_dt else None
-            if out_date == yesterday or in_date == yesterday:
-                ws[f"R{row}"] = None
-                ws[f"S{row}"] = None
-                ws[f"U{row}"] = None
-                cleared += 1
-        if cleared:
-            wb.save(out_path)
-            upload_drive_file(BANG_TOUR_FILE_ID, out_path)
-        return f"cleanup success: {cleared} row(s) cleared for {yesterday.strftime('%d/%m/%Y')}"
-    finally:
-        for fp in (source_path, out_path):
-            try:
-                if os.path.exists(fp):
-                    os.remove(fp)
-            except Exception:
-                pass
 
 
 def leave_catalog(client) -> dict:
@@ -517,17 +468,10 @@ def process_violations() -> str:
 
 def main():
     action = (sys.argv[1] if len(sys.argv) > 1 else os.getenv("DAILY_OPS_ACTION", "")).strip().lower()
-    if action in {"cleanup", "clean", "08:00", "0800"}:
-        print(cleanup_previous_day())
-        return
-    if action in {"violations", "violation", "20:10", "2010"}:
+    if action in {"violations", "violation", "21:00", "2100"}:
         print(process_violations())
         return
-    if action == "both":
-        print(cleanup_previous_day())
-        print(process_violations())
-        return
-    raise SystemExit("Usage: python vera_daily_ops_job.py cleanup|violations|both")
+    raise SystemExit("Usage: python vera_daily_ops_job.py violations")
 
 
 if __name__ == "__main__":

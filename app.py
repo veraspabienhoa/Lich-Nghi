@@ -19,7 +19,6 @@ import json
 import zipfile
 import re
 import numbers
-import math
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -876,209 +875,6 @@ def _timesoft_export_workbook(sync_result):
         )
     return output.getvalue()
 
-# ==========================================================
-# V83 - TIMESOFT WORKTIME CONFIG / CHECK-IN ONLY
-# ==========================================================
-def _timesoft_extract_largest_dict_list(obj):
-    # Tìm list[dict] lớn nhất trong JSON XHR/fetch để đọc grid cấu hình TimeSoft.
-    best = []
-    def walk(value):
-        nonlocal best
-        if isinstance(value, list):
-            if value and all(isinstance(x, dict) for x in value) and len(value) > len(best):
-                best = value
-            for item in value[:2000]:
-                walk(item)
-        elif isinstance(value, dict):
-            for v in value.values():
-                walk(v)
-    try:
-        walk(obj)
-    except Exception:
-        pass
-    return best
-
-
-def timesoft_fetch_checkin_only(start_date, end_date, force_login=False):
-    # Lấy riêng báo cáo check-in để các module ca/đối soát không phải tải doanh thu.
-    ok_session, session_msg, session = _timesoft_get_http_session(force_login=force_login)
-    if not ok_session or session is None:
-        return False, session_msg, pd.DataFrame(), {}
-    ok, msg, df, meta, auth_failed = _timesoft_fetch_employee_checkin(session, start_date, end_date)
-    if not ok and auth_failed and not force_login:
-        ok_session, session_msg, session = _timesoft_get_http_session(force_login=True)
-        if not ok_session or session is None:
-            return False, session_msg, pd.DataFrame(), {}
-        ok, msg, df, meta, _ = _timesoft_fetch_employee_checkin(session, start_date, end_date)
-    return ok, msg, df, meta
-
-
-def timesoft_fetch_worktime_config(force_login=False):
-    # Đọc cấu hình ca từ WorkTimeConf bằng session thật của TimeSoft; chỉ đọc, không đoán API ghi.
-    if not timesoft_is_configured():
-        return False, "Chưa cấu hình TimeSoft trong Secrets.", pd.DataFrame(), {}
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception:
-        return False, "Chưa cài Playwright/Chromium cho TimeSoft.", pd.DataFrame(), {}
-
-    captured_json = []
-    browser = None
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-            )
-            context = browser.new_context(
-                ignore_https_errors=False,
-                viewport={"width": 1440, "height": 1000},
-                locale="vi-VN",
-            )
-            page = context.new_page()
-
-            def on_response(response):
-                try:
-                    req = response.request
-                    if str(req.resource_type or '').lower() not in {'xhr', 'fetch'}:
-                        return
-                    ctype = str(response.headers.get('content-type', '') or '').lower()
-                    if 'json' not in ctype:
-                        return
-                    data = response.json()
-                    rows = _timesoft_extract_largest_dict_list(data)
-                    if rows:
-                        captured_json.append({'url': str(req.url or ''), 'rows': rows})
-                except Exception:
-                    pass
-
-            page.on('response', on_response)
-            target_url = urljoin(TIMESOFT_BASE_URL + '/', TIMESOFT_WORKTIME_CONF_PATH.lstrip('/'))
-            page.goto(target_url, wait_until='domcontentloaded', timeout=35_000)
-            page.wait_for_timeout(700)
-            ok_login, login_msg = _timesoft_login_with_playwright(page, verify_url=target_url)
-            if not ok_login:
-                context.close(); browser.close(); browser = None
-                return False, login_msg, pd.DataFrame(), {}
-
-            # Chỉ chọn XHR/fetch của chính trang cấu hình sau khi xác minh đăng nhập.
-            captured_json.clear()
-            page.goto(target_url, wait_until='domcontentloaded', timeout=35_000)
-            try:
-                page.wait_for_load_state('networkidle', timeout=10_000)
-            except Exception:
-                pass
-            page.wait_for_timeout(3_000)
-
-            best_df = pd.DataFrame()
-            source = ''
-            if captured_json:
-                captured_json.sort(key=lambda x: len(x.get('rows') or []), reverse=True)
-                rows = captured_json[0].get('rows') or []
-                if rows:
-                    best_df = pd.json_normalize(rows, sep='.')
-                    source = captured_json[0].get('url', '')
-
-            # Fallback: đọc table DOM nếu grid không dùng XHR JSON rõ ràng.
-            if best_df.empty:
-                js = """() => Array.from(document.querySelectorAll('table')).map((t, ti) => {
-                    const headers = Array.from(t.querySelectorAll('thead th')).map(x => (x.innerText || '').trim());
-                    const rows = Array.from(t.querySelectorAll('tbody tr')).map(tr => Array.from(tr.querySelectorAll('td')).map(td => (td.innerText || '').trim()));
-                    return {headers, rows, ti};
-                })"""
-                tables = page.evaluate(js)
-                candidates = []
-                for table in tables or []:
-                    headers = [str(x).strip() for x in (table.get('headers') or [])]
-                    rows = table.get('rows') or []
-                    if rows:
-                        width = max(len(headers), max((len(r) for r in rows), default=0))
-                        if not headers or len(headers) != width:
-                            headers = headers + [f'Cột {i+1}' for i in range(len(headers), width)]
-                        norm_rows = [list(r) + [''] * max(0, width-len(r)) for r in rows]
-                        candidates.append(pd.DataFrame(norm_rows, columns=headers[:width]))
-                if candidates:
-                    candidates.sort(key=lambda d: (len(d), len(d.columns)), reverse=True)
-                    best_df = candidates[0]
-                    source = target_url + '#table'
-
-            context.close(); browser.close(); browser = None
-            if best_df.empty:
-                return False, "Đã đăng nhập nhưng chưa đọc được bảng cấu hình ca TimeSoft.", pd.DataFrame(), {'url': target_url}
-            best_df = best_df.dropna(how='all').reset_index(drop=True)
-            return True, f"Đã đọc {len(best_df)} dòng cấu hình ca TimeSoft.", best_df, {'url': target_url, 'source': source}
-    except Exception as e:
-        try:
-            if browser is not None:
-                browser.close()
-        except Exception:
-            pass
-        return False, f"Không đọc được cấu hình ca TimeSoft: {type(e).__name__}: {e}", pd.DataFrame(), {}
-
-
-def _guess_dataframe_column(df, preferred=(), contains=()):
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return None
-    norm_map = {normalize_login_name(c).replace(' ', ''): c for c in df.columns}
-    for name in preferred:
-        key = normalize_login_name(name).replace(' ', '')
-        if key in norm_map:
-            return norm_map[key]
-    for c in df.columns:
-        key = normalize_login_name(c).replace(' ', '')
-        if any(normalize_login_name(token).replace(' ', '') in key for token in contains):
-            return c
-    return None
-
-
-def _normalize_hhmm(value):
-    text = str(value or '').strip()
-    if not text or text.lower() in {'nan', 'none', 'nat'}:
-        return ''
-    m = re.search(r'(?<!\d)(\d{1,2}):(\d{2})(?::\d{2})?', text)
-    if m:
-        hh, mm = int(m.group(1)), int(m.group(2))
-        if 0 <= hh <= 23 and 0 <= mm <= 59:
-            return f"{hh:02d}:{mm:02d}"
-    try:
-        parsed = pd.to_datetime(text, errors='coerce')
-        if pd.notna(parsed):
-            return parsed.strftime('%H:%M')
-    except Exception:
-        pass
-    return text[:8]
-
-
-def timesoft_worktime_to_vera_shift_definitions(ts_df):
-    # Heuristic mapping cột WorkTimeConf -> Tên ca/Giờ bắt đầu/Giờ kết thúc.
-    empty_cols = ['Tên ca', 'Giờ bắt đầu', 'Giờ kết thúc', 'Thứ tự']
-    if not isinstance(ts_df, pd.DataFrame) or ts_df.empty:
-        return pd.DataFrame(columns=empty_cols)
-    name_col = _guess_dataframe_column(
-        ts_df,
-        preferred=('WorkTimeName', 'Name', 'Tên ca', 'Tên'),
-        contains=('worktimename', 'shiftname', 'tenca', 'worktime')
-    )
-    start_col = _guess_dataframe_column(
-        ts_df,
-        preferred=('StartWorkTime', 'StartTime', 'Giờ bắt đầu'),
-        contains=('startworktime', 'starttime', 'giobatdau', 'timein')
-    )
-    end_col = _guess_dataframe_column(
-        ts_df,
-        preferred=('EndWorkTime', 'EndTime', 'Giờ kết thúc'),
-        contains=('endworktime', 'endtime', 'gioketthuc', 'timeout')
-    )
-    if name_col is None:
-        return pd.DataFrame(columns=empty_cols)
-    out = pd.DataFrame({'Tên ca': ts_df[name_col].astype(str).str.strip()})
-    out['Giờ bắt đầu'] = ts_df[start_col].apply(_normalize_hhmm).values if start_col else ''
-    out['Giờ kết thúc'] = ts_df[end_col].apply(_normalize_hhmm).values if end_col else ''
-    out = out[~out['Tên ca'].astype(str).str.lower().isin({'', 'nan', 'none'})].copy()
-    out = out.drop_duplicates(subset=['Tên ca'], keep='first').reset_index(drop=True)
-    out['Thứ tự'] = range(1, len(out)+1)
-    return out
-
 
 # --- CHUẨN HÓA TÊN / TÀI KHOẢN ---
 def normalize_name(name):
@@ -1766,27 +1562,6 @@ st.markdown("""
             border-color: #D9D9D9 !important;
         }
 
-        /* V84 - GIỮ DÒNG TIÊU ĐỀ KHI CUỘN: áp dụng cho mọi bảng HTML, DataFrame và DataEditor. */
-        table thead th {
-            position: sticky !important;
-            top: 0 !important;
-            z-index: 50 !important;
-            background-clip: padding-box !important;
-        }
-        [data-testid="stDataFrame"] [role="columnheader"],
-        [data-testid="stDataEditor"] [role="columnheader"] {
-            position: sticky !important;
-            top: 0 !important;
-            z-index: 50 !important;
-            background-clip: padding-box !important;
-        }
-        [data-testid="stDataFrame"] [role="rowgroup"]:first-child,
-        [data-testid="stDataEditor"] [role="rowgroup"]:first-child {
-            position: sticky !important;
-            top: 0 !important;
-            z-index: 49 !important;
-        }
-
         /* V62 - NỀN TIÊU ĐỀ/NHÃN TOÀN HỆ THỐNG: RGB(217,217,217) = #D9D9D9.
            Áp dụng cho heading và toàn bộ nhãn widget như "Chọn ngày nghỉ", "Chọn nhân viên", ... */
         /* V71 - BỘ CỠ CHỮ MẶC ĐỊNH TOÀN HỆ THỐNG.
@@ -1921,19 +1696,6 @@ PAYROLL_STORAGE_WORKSHEET = "BangLuong"
 PAYROLL_CONFIG_WORKSHEET = "CauHinhLuong"
 UI_LAYOUT_WORKSHEET = "CauHinhCot"
 UI_THEME_WORKSHEET = "CauHinhGiaoDien"
-UI_MENU_WORKSHEET = "CauHinhMenu"
-SHIFT_CONFIG_WORKSHEET = "CauHinhCa"
-TIMESOFT_EMPLOYEE_MAP_WORKSHEET = "TimesoftNhanSuMap"
-ATTENDANCE_AUDIT_WORKSHEET = "DoiSoatChamCong"
-ATTENDANCE_AUTO_CC_EMAIL = "veraspabienhoa@gmail.com"
-ATTENDANCE_AUTO_HOUR = 18
-# V84 - Vi phạm ra ngoài/Bảng tour. Tự động 20:10 cần Cloud Scheduler gọi Job riêng.
-BANG_TOUR_AUDIT_WORKSHEET = "DoiSoatRaNgoai"
-BANG_TOUR_BREAK_LIMIT_MINUTES = 90
-BANG_TOUR_VIOLATION_HOUR = 21
-BANG_TOUR_VIOLATION_MINUTE = 0
-BANG_TOUR_SINGLE_SIDE_REASON = str(os.getenv("BANG_TOUR_SINGLE_SIDE_REASON", "Ra ngoài thiếu giờ ra/vào") or "Ra ngoài thiếu giờ ra/vào").strip()
-TIMESOFT_WORKTIME_CONF_PATH = "/ListMan/WorkTimeConf/Index"
 TICHLUY_WORKSHEET = "TichLuy"
 VIOLATION_DEBT_WORKSHEET = "NoViPham"
 VIOLATION_DEBT_HEADERS = [
@@ -1980,7 +1742,7 @@ FEATURE_DEFINITIONS = {
     "employment_status": "🏷️ Trạng thái làm việc",
     "employee_delete": "🗑️ Xóa nhân viên",
     "account_lock": "🔒 Khóa đăng nhập",
-    "registration_lock": "⏸️ Tạm khóa đăng ký lịch nghỉ",
+    "registration_lock": "🔐 Khóa quyền đăng ký",
     "sync": "🔄 Đồng bộ dữ liệu",
     "column_config": "⚙️ Giao diện tùy chỉnh",
     "profile": "👤 Hồ sơ cá nhân",
@@ -2020,7 +1782,7 @@ EMPLOYMENT_STATUS_ALIASES = {
 }
 STAFF_ROLE_ORDER = ["leader", "nhanvien", "quanly", "letan", "locker", "tapvu", "admin"]
 EMPLOYMENT_STATUS_MANAGEABLE_ROLES = set(STAFF_ROLE_ORDER) - {"admin"}
-EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS = 3
+EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS = 7
 DEFAULT_LEAVE_PAGE = "📅 Đăng ký nghỉ phép"
 DEFAULT_LEAVE_PAGE_SLUG = "dang-ky-thong-ke-nghi-phep"
 
@@ -2526,152 +2288,66 @@ def get_postgres_runtime_status():
         return False, f"PostgreSQL lỗi: {exc}"
 
 
-# --- NHẬN DIỆN ĐỊNH DẠNG EXCEL NGUỒN 3 ---
-def _detect_excel_engine_from_file(path):
-    """Nhận diện XLSX/XLSM/XLSB/XLS theo nội dung thật của file, không dựa vào đuôi file.
-
-    Lưu ý quan trọng:
-    - XLSX/XLSM và XLSB đều có thể là ZIP/OPC package.
-    - XLSX/XLSM có xl/workbook.xml -> openpyxl.
-    - XLSB có xl/workbook.bin -> pyxlsb.
-    - XLS đời cũ là OLE Compound File -> xlrd.
-    """
-    if not path or not os.path.exists(path) or os.path.getsize(path) <= 0:
-        return None
-
-    if zipfile.is_zipfile(path):
-        try:
-            with zipfile.ZipFile(path, 'r') as zf:
-                names = {str(name).replace('\\', '/').lower() for name in zf.namelist()}
-            if 'xl/workbook.xml' in names:
-                return 'openpyxl'
-            if 'xl/workbook.bin' in names:
-                return 'pyxlsb'
-            # Không có workbook part chuẩn: không giao nhầm cho openpyxl.
-            return None
-        except Exception:
-            return None
-
-    try:
-        with open(path, 'rb') as f:
-            magic = f.read(8)
-    except Exception:
-        magic = b''
-
-    if magic.startswith(b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1'):
-        return 'xlrd'
-
-    return None
-
-
-# --- ĐỒNG BỘ FILE NGUỒN 3 SANG GOOGLE SHEETS (CÓ CHẾ ĐỘ OVERWRITE) ---
-def admin_sync_excel_to_gsheet(overwrite=False):
-    """Đồng bộ LichNghi từ Nguồn 3 sang SHEET_DU_PHONG_ID.
-
-    overwrite=False: chỉ thêm dòng mới theo Merge_Key như trước.
-    overwrite=True: ghi đè toàn bộ A:J của worksheet đích bằng dữ liệu Nguồn 3.
-    Chỉ clear giá trị A:J, không xóa worksheet/format/các sheet danh mục khác.
-    """
-    temp_file = f"temp_sync_{os.getpid()}_{time.time_ns()}"
+# --- ĐỒNG BỘ EXCEL SANG GOOGLE SHEETS (CHỈ THÊM MỚI) ---
+def admin_sync_excel_to_gsheet():
     try:
         client = get_gspread_client()
-        if not client:
-            return False, "Chưa cấu hình quyền kết nối Google Sheets."
-
-        download_file_from_google_drive(SHEET_CHINH_ID, temp_file)
-        engine = _detect_excel_engine_from_file(temp_file)
-        if engine is None:
-            return False, (
-                "Nguồn 3 tải về không nhận diện được là XLS/XLSB/XLSX/XLSM hợp lệ "
-                "hoặc workbook part không đúng chuẩn."
-            )
-
-        xls = pd.read_excel(temp_file, sheet_name='LichNghi', engine=engine)
+        if not client: return False, "Chưa cấu hình quyền kết nối Google Sheets."
+        
+        file_id = "1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT"
+        temp_file = "temp_sync.xlsb"
+        download_file_from_google_drive(file_id, temp_file)
+        
+        xls = pd.read_excel(temp_file, sheet_name='LichNghi', engine='pyxlsb')
+        if os.path.exists(temp_file): os.remove(temp_file)
+        
         df_excel = xls.iloc[:, :10].copy()
-        if df_excel.shape[1] < 10:
-            return False, "Sheet LichNghi của Nguồn 3 không đủ 10 cột A:J."
-
-        expected = [
-            "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-            "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
-            "Giờ cập nhật", "Người cập nhật"
-        ]
-        df_excel.columns = expected
-
+        
         def clean_val(val, is_date=False):
             try:
-                if pd.isna(val) or str(val).strip() in ["nan", "NaT", "None", ""]:
-                    return ""
+                if pd.isna(val) or str(val).strip() in ["nan", "NaT", "None", ""]: return ""
                 if is_date or hasattr(val, 'strftime'):
-                    if hasattr(val, 'strftime'):
-                        return val.strftime('%d/%m/%Y')
-                    if isinstance(val, (int, float)):
-                        return pd.to_datetime(val, unit='D', origin='1899-12-30').strftime('%d/%m/%Y')
-                    parsed = pd.to_datetime(str(val).strip().split(' ')[0], dayfirst=True, errors='coerce')
-                    return parsed.strftime('%d/%m/%Y') if pd.notna(parsed) else str(val).strip()
+                    if hasattr(val, 'strftime'): return val.strftime('%d/%m/%Y')
+                    if isinstance(val, (int, float)): return pd.to_datetime(val, unit='D', origin='1899-12-30').strftime('%d/%m/%Y')
+                    return pd.to_datetime(str(val).strip().split(' ')[0], dayfirst=True).strftime('%d/%m/%Y')
                 return str(val).strip()
-            except Exception:
-                return str(val).strip()
+            except: return str(val).strip()
 
-        df_excel['Ngày'] = df_excel['Ngày'].apply(lambda x: clean_val(x, is_date=True))
-        df_excel['Ngày cập nhật'] = df_excel['Ngày cập nhật'].apply(lambda x: clean_val(x, is_date=True))
-        for c in expected:
-            if c not in {'Ngày', 'Ngày cập nhật'}:
-                df_excel[c] = df_excel[c].apply(clean_val)
-        df_excel = df_excel.fillna('')
-        df_excel = df_excel[df_excel.apply(lambda r: any(str(v).strip() for v in r.tolist()), axis=1)].copy()
+        cols = df_excel.columns.tolist()
+        if len(cols) > 0: df_excel[cols[0]] = df_excel[cols[0]].apply(lambda x: clean_val(x, is_date=True))
+        if len(cols) > 7: df_excel[cols[7]] = df_excel[cols[7]].apply(lambda x: clean_val(x, is_date=True))
+        for c in cols:
+            if c not in [cols[0], cols[7]] if len(cols)>7 else [cols[0]]:
+                df_excel[c] = df_excel[c].apply(lambda x: clean_val(x))
 
+        df_excel = df_excel.fillna("")
+        df_excel.columns = ["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"]
+        
+        # Tải dữ liệu hiện tại trên GSheet
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        if overwrite:
-            try:
-                _gs_call_with_backoff(sheet_dp.batch_clear, ['A:J'])
-            except Exception:
-                _gs_call_with_backoff(sheet_dp.clear)
-            rows = [expected] + df_excel[expected].values.tolist()
-            if rows:
-                end_row = len(rows)
-                gspread_update_range(sheet_dp, f"A1:J{end_row}", rows, value_input_option='USER_ENTERED')
-            _clear_dynamic_data_caches()
-            return True, f"Đã GHI ĐÈ {len(df_excel)} dòng từ Nguồn 3 lên Google Sheets (A:J)."
-
         gsheet_data = _gs_call_with_backoff(sheet_dp.get_all_values)
+        
         if len(gsheet_data) > 1:
-            header = list(gsheet_data[0][:10]) + [''] * max(0, 10-len(gsheet_data[0]))
-            # Dùng header chuẩn nếu sheet đích cũ thiếu/sai header.
-            header = expected if not str(header[0]).strip() else header[:10]
-            df_gsheet = pd.DataFrame([list(r[:10]) + [''] * max(0,10-len(r)) for r in gsheet_data[1:]], columns=header)
-            if list(df_gsheet.columns) != expected:
-                df_gsheet = df_gsheet.iloc[:, :10]
-                df_gsheet.columns = expected
+            df_gsheet = pd.DataFrame(gsheet_data[1:], columns=gsheet_data[0])
         else:
-            df_gsheet = pd.DataFrame(columns=expected)
+            df_gsheet = pd.DataFrame(columns=df_excel.columns)
 
-        def merge_key(df):
-            if df.empty:
-                return pd.Series(dtype=str)
-            return (
-                df['Ngày'].astype(str).str.strip() + '_' +
-                df['Tên nhân viên'].astype(str).apply(normalize_name).str.casefold() + '_' +
-                df['Lý do nghỉ'].astype(str).apply(clean_leave_reason_display).str.casefold()
-            )
-
-        existing_keys = set(merge_key(df_gsheet).tolist())
-        excel_keys = merge_key(df_excel)
-        new_rows_df = df_excel.loc[~excel_keys.isin(existing_keys), expected].copy()
+        # Lọc ra những dòng chưa có trên GSheet
+        df_gsheet['Merge_Key'] = df_gsheet['Ngày'].astype(str) + "_" + df_gsheet['Tên nhân viên'].apply(normalize_name) + "_" + df_gsheet.get('Lý do nghỉ', df_gsheet.get('Loại nghỉ', '')).astype(str)
+        df_excel['Merge_Key'] = df_excel['Ngày'].astype(str) + "_" + df_excel['Tên nhân viên'].apply(normalize_name) + "_" + df_excel['Lý do nghỉ'].astype(str)
+        
+        new_rows_df = df_excel[~df_excel['Merge_Key'].isin(df_gsheet['Merge_Key'])].drop(columns=['Merge_Key'])
+        
         if new_rows_df.empty:
-            return True, "Không có dữ liệu mới nào từ Nguồn 3 để đồng bộ."
+            return True, "Không có dữ liệu mới nào từ Excel để đồng bộ."
 
-        _gs_call_with_backoff(sheet_dp.append_rows, new_rows_df.values.tolist(), value_input_option='USER_ENTERED')
+        values_to_append = new_rows_df.values.tolist()
+        sheet_dp.append_rows(values_to_append, value_input_option='USER_ENTERED')
+        
         _clear_dynamic_data_caches()
-        return True, f"Đã thêm mới {len(new_rows_df)} dòng từ Nguồn 3 lên Google Sheets."
+        return True, f"Đã thêm mới {len(values_to_append)} dòng dữ liệu từ Excel lên Sheet (không ghi đè)!"
     except Exception as e:
         return False, f"Lỗi đồng bộ: {e}"
-    finally:
-        try:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-        except Exception:
-            pass
 
 # --- ĐỒNG BỘ GOOGLE SHEETS SANG EXCEL (TẠO FILE DOWNLOAD CHỈ THÊM MỚI) ---
 def admin_sync_gsheet_to_excel(df_gsheet, df_excel_goc):
@@ -3006,464 +2682,6 @@ SHIFT_CYCLE_OPTIONS = [
     "Cố định (Không đổi)",
 ]
 
-SHIFT_CONFIG_HEADERS = [
-    "Loại cấu hình", "Tên", "Giờ bắt đầu", "Giờ kết thúc", "Số ngày",
-    "Chuỗi ca", "Thứ tự", "Ngày cập nhật", "Người cập nhật"
-]
-DEFAULT_SHIFT_DEFINITIONS = [
-    {"Tên ca": "Ca 1", "Giờ bắt đầu": "10:00", "Giờ kết thúc": "23:00", "Thứ tự": 1},
-    {"Tên ca": "Ca 2", "Giờ bắt đầu": "13:00", "Giờ kết thúc": "00:00", "Thứ tự": 2},
-]
-DEFAULT_SHIFT_CYCLES = [
-    {"Tên chu kỳ": "Luân phiên (14 ngày)", "Số ngày": 14, "Chuỗi ca": "Ca 1 | Ca 2", "Thứ tự": 1},
-    {"Tên chu kỳ": "Theo chu kỳ Tháng", "Số ngày": 30, "Chuỗi ca": "Ca 1 | Ca 2", "Thứ tự": 2},
-    {"Tên chu kỳ": "Cố định (Không đổi)", "Số ngày": 0, "Chuỗi ca": "", "Thứ tự": 3},
-]
-TIMESOFT_EMPLOYEE_MAP_HEADERS = [
-    "Tên nhân viên Vera", "Vai trò Vera", "TimeSoft ID", "TimeSoft mã NV",
-    "TimeSoft tài khoản", "TimeSoft tên", "TimeSoft role", "Role quy đổi Vera",
-    "Ngày cập nhật", "Người cập nhật"
-]
-
-
-def _ensure_shift_config_worksheet():
-    try:
-        client = get_gspread_client()
-        if not client:
-            return None, "Chưa cấu hình quyền Google Sheets."
-        ss = client.open_by_key(SHEET_MAT_KHAU_ID)
-        ws = _get_or_create_worksheet(ss, SHIFT_CONFIG_WORKSHEET, rows=300, cols=len(SHIFT_CONFIG_HEADERS)+2)
-        header = _gs_call_with_backoff(ws.row_values, 1)
-        if header[:len(SHIFT_CONFIG_HEADERS)] != SHIFT_CONFIG_HEADERS:
-            gspread_update_range(ws, f"A1:I1", [SHIFT_CONFIG_HEADERS])
-        return ws, ""
-    except Exception as e:
-        return None, f"Lỗi mở cấu hình ca: {e}"
-
-
-@st.cache_data(ttl=120, show_spinner=False)
-def load_shift_management_config():
-    shifts = pd.DataFrame(DEFAULT_SHIFT_DEFINITIONS)
-    cycles = pd.DataFrame(DEFAULT_SHIFT_CYCLES)
-    ws, err = _ensure_shift_config_worksheet()
-    if ws is None:
-        return shifts, cycles, err
-    try:
-        vals = _gs_call_with_backoff(ws.get_all_values)
-        if len(vals) <= 1:
-            return shifts, cycles, ""
-        shift_rows, cycle_rows = [], []
-        for row in vals[1:]:
-            rr = list(row) + [''] * max(0, len(SHIFT_CONFIG_HEADERS)-len(row))
-            kind = normalize_login_name(rr[0])
-            name = str(rr[1]).strip()
-            if not name:
-                continue
-            try:
-                order = int(float(rr[6] or 999))
-            except Exception:
-                order = 999
-            if kind in {'shift', 'ca'}:
-                shift_rows.append({
-                    'Tên ca': name,
-                    'Giờ bắt đầu': _normalize_hhmm(rr[2]),
-                    'Giờ kết thúc': _normalize_hhmm(rr[3]),
-                    'Thứ tự': order,
-                })
-            elif kind in {'cycle', 'chu ky', 'chuky'}:
-                try:
-                    days = int(float(rr[4] or 0))
-                except Exception:
-                    days = 0
-                cycle_rows.append({
-                    'Tên chu kỳ': name,
-                    'Số ngày': days,
-                    'Chuỗi ca': str(rr[5]).strip(),
-                    'Thứ tự': order,
-                })
-        if shift_rows:
-            shifts = pd.DataFrame(shift_rows).sort_values(['Thứ tự','Tên ca'], kind='stable').reset_index(drop=True)
-        if cycle_rows:
-            cycles = pd.DataFrame(cycle_rows).sort_values(['Thứ tự','Tên chu kỳ'], kind='stable').reset_index(drop=True)
-        return shifts, cycles, ""
-    except Exception as e:
-        return shifts, cycles, f"Lỗi đọc cấu hình ca: {e}"
-
-
-def _clear_shift_config_cache():
-    try:
-        load_shift_management_config.clear()
-    except Exception:
-        pass
-
-
-def save_shift_management_config(shift_df, cycle_df, username):
-    ws, err = _ensure_shift_config_worksheet()
-    if ws is None:
-        return False, err or "Không mở được sheet cấu hình ca."
-    try:
-        shift_df = shift_df.copy() if isinstance(shift_df, pd.DataFrame) else pd.DataFrame()
-        cycle_df = cycle_df.copy() if isinstance(cycle_df, pd.DataFrame) else pd.DataFrame()
-        now = datetime.now(VN_TZ).strftime('%d/%m/%Y %H:%M:%S')
-        rows = [SHIFT_CONFIG_HEADERS]
-
-        clean_shifts = []
-        seen = set()
-        for i, r in shift_df.iterrows():
-            name = str(r.get('Tên ca','')).strip()
-            if not name or normalize_login_name(name) in seen:
-                continue
-            seen.add(normalize_login_name(name))
-            start = _normalize_hhmm(r.get('Giờ bắt đầu',''))
-            end = _normalize_hhmm(r.get('Giờ kết thúc',''))
-            if not re.fullmatch(r'\d{2}:\d{2}', start or '') or not re.fullmatch(r'\d{2}:\d{2}', end or ''):
-                return False, f"Ca '{name}' có giờ không hợp lệ. Dùng định dạng HH:MM."
-            try: order = int(float(r.get('Thứ tự', i+1)))
-            except Exception: order = i+1
-            clean_shifts.append({'Tên ca':name,'Giờ bắt đầu':start,'Giờ kết thúc':end,'Thứ tự':order})
-        clean_shifts = sorted(clean_shifts, key=lambda x:(x['Thứ tự'], normalize_login_name(x['Tên ca'])))
-        for pos, r in enumerate(clean_shifts, start=1):
-            rows.append(['SHIFT', r['Tên ca'], r['Giờ bắt đầu'], r['Giờ kết thúc'], '', '', pos, now, str(username)])
-
-        clean_cycles = []
-        seen = set()
-        for i, r in cycle_df.iterrows():
-            name = str(r.get('Tên chu kỳ','')).strip()
-            if not name or normalize_login_name(name) in seen:
-                continue
-            seen.add(normalize_login_name(name))
-            try: days = max(0, int(float(r.get('Số ngày',0) or 0)))
-            except Exception: days = 0
-            sequence = str(r.get('Chuỗi ca','') or '').strip()
-            try: order = int(float(r.get('Thứ tự', i+1)))
-            except Exception: order = i+1
-            clean_cycles.append({'Tên chu kỳ':name,'Số ngày':days,'Chuỗi ca':sequence,'Thứ tự':order})
-        clean_cycles = sorted(clean_cycles, key=lambda x:(x['Thứ tự'], normalize_login_name(x['Tên chu kỳ'])))
-        for pos, r in enumerate(clean_cycles, start=1):
-            rows.append(['CYCLE', r['Tên chu kỳ'], '', '', r['Số ngày'], r['Chuỗi ca'], pos, now, str(username)])
-
-        _gs_call_with_backoff(ws.clear)
-        gspread_update_range(ws, f"A1:I{len(rows)}", rows, value_input_option='USER_ENTERED')
-        _clear_shift_config_cache()
-        return True, f"Đã lưu {len(clean_shifts)} ca và {len(clean_cycles)} chu kỳ luân phiên."
-    except Exception as e:
-        return False, f"Lỗi lưu cấu hình ca: {e}"
-
-
-def get_dynamic_shift_options():
-    shifts, _, _ = load_shift_management_config()
-    options = []
-    if isinstance(shifts, pd.DataFrame):
-        for _, r in shifts.iterrows():
-            name = str(r.get('Tên ca','')).strip()
-            start = _normalize_hhmm(r.get('Giờ bắt đầu',''))
-            end = _normalize_hhmm(r.get('Giờ kết thúc',''))
-            if name:
-                label = f"{name} ({start} - {end})" if start or end else name
-                if label not in options:
-                    options.append(label)
-    # Giữ tương thích toàn bộ giá trị cũ để thay khung giờ ca không làm mất lựa chọn đã lưu trước đây.
-    for old in SHIFT_OPTIONS:
-        if old not in options:
-            options.append(old)
-    return options or list(SHIFT_OPTIONS)
-
-
-def get_dynamic_shift_cycle_options():
-    _, cycles, _ = load_shift_management_config()
-    options = []
-    if isinstance(cycles, pd.DataFrame):
-        options = [str(x).strip() for x in cycles.get('Tên chu kỳ', pd.Series(dtype=str)).tolist() if str(x).strip()]
-    for old in SHIFT_CYCLE_OPTIONS:
-        if old not in options:
-            options.append(old)
-    return options or list(SHIFT_CYCLE_OPTIONS)
-
-
-def build_shift_config_excel_bytes(shift_df=None, cycle_df=None):
-    if shift_df is None or cycle_df is None:
-        shift_df, cycle_df, _ = load_shift_management_config()
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine='openpyxl') as writer:
-        shift_df.to_excel(writer, index=False, sheet_name='CaLamViec')
-        cycle_df.to_excel(writer, index=False, sheet_name='ChuKy')
-    return out.getvalue()
-
-
-def _ensure_timesoft_employee_map_worksheet():
-    try:
-        client = get_gspread_client()
-        if not client:
-            return None, "Chưa cấu hình quyền Google Sheets."
-        ss = client.open_by_key(SHEET_MAT_KHAU_ID)
-        ws = _get_or_create_worksheet(ss, TIMESOFT_EMPLOYEE_MAP_WORKSHEET, rows=1000, cols=len(TIMESOFT_EMPLOYEE_MAP_HEADERS)+2)
-        header = _gs_call_with_backoff(ws.row_values, 1)
-        if header[:len(TIMESOFT_EMPLOYEE_MAP_HEADERS)] != TIMESOFT_EMPLOYEE_MAP_HEADERS:
-            gspread_update_range(ws, f"A1:J1", [TIMESOFT_EMPLOYEE_MAP_HEADERS])
-        return ws, ""
-    except Exception as e:
-        return None, f"Lỗi mở bảng map TimeSoft: {e}"
-
-
-@st.cache_data(ttl=120, show_spinner=False)
-def load_timesoft_employee_mapping():
-    ws, err = _ensure_timesoft_employee_map_worksheet()
-    if ws is None:
-        return pd.DataFrame(columns=TIMESOFT_EMPLOYEE_MAP_HEADERS), err
-    try:
-        vals = _gs_call_with_backoff(ws.get_all_values)
-        if len(vals) <= 1:
-            return pd.DataFrame(columns=TIMESOFT_EMPLOYEE_MAP_HEADERS), ""
-        rows = []
-        for row in vals[1:]:
-            rr = list(row[:len(TIMESOFT_EMPLOYEE_MAP_HEADERS)]) + [''] * max(0, len(TIMESOFT_EMPLOYEE_MAP_HEADERS)-len(row))
-            if any(str(x).strip() for x in rr):
-                rows.append(rr[:len(TIMESOFT_EMPLOYEE_MAP_HEADERS)])
-        return pd.DataFrame(rows, columns=TIMESOFT_EMPLOYEE_MAP_HEADERS), ""
-    except Exception as e:
-        return pd.DataFrame(columns=TIMESOFT_EMPLOYEE_MAP_HEADERS), f"Lỗi đọc map TimeSoft: {e}"
-
-
-def _clear_timesoft_map_cache():
-    try:
-        load_timesoft_employee_mapping.clear()
-    except Exception:
-        pass
-
-
-def map_timesoft_role_to_vera(role):
-    key = normalize_login_name(role)
-    if key in {'ktv', 'ky thuat vien', 'kỹ thuật viên'} or 'ktv' in key:
-        return 'nhanvien'
-    return str(role or '').strip().lower()
-
-
-def build_timesoft_employee_mapping_candidates(checkin_df, credentials_df):
-    saved, _ = load_timesoft_employee_mapping()
-    saved_by_vera = {
-        normalize_login_name(r.get('Tên nhân viên Vera','')): r
-        for _, r in saved.iterrows() if str(r.get('Tên nhân viên Vera','')).strip()
-    }
-    creds = credentials_df.copy() if isinstance(credentials_df, pd.DataFrame) else pd.DataFrame()
-    ts = checkin_df.copy() if isinstance(checkin_df, pd.DataFrame) else pd.DataFrame()
-    name_col = _guess_dataframe_column(ts, preferred=('employeeInfo.Name','EmployeeName','Name'), contains=('employeeinfoname','employeename'))
-    code_col = _guess_dataframe_column(ts, preferred=('employeeInfo.EmployeeCode','EmployeeCode'), contains=('employeecode',))
-    id_col = _guess_dataframe_column(ts, preferred=('employeeInfo.Id','employeeInfo.EmployeeId','EmployeeId','Id'), contains=('employeeid','employeeinfoid'))
-    account_col = _guess_dataframe_column(ts, preferred=('employeeInfo.UserName','UserName','Account'), contains=('username','account'))
-    role_col = _guess_dataframe_column(ts, preferred=('employeeInfo.RoleName','RoleName','PositionName'), contains=('rolename','positionname','role'))
-
-    ts_unique = pd.DataFrame()
-    if not ts.empty and name_col:
-        cols = [c for c in [name_col, code_col, id_col, account_col, role_col] if c]
-        ts_unique = ts[cols].copy().drop_duplicates()
-    ts_by_name = {}
-    for _, r in ts_unique.iterrows():
-        nm = str(r.get(name_col,'')).strip() if name_col else ''
-        if nm:
-            ts_by_name.setdefault(normalize_login_name(nm), r)
-
-    rows = []
-    for _, c in creds.iterrows():
-        vera_name = str(c.get('Tên nhân viên','')).strip()
-        if not vera_name:
-            continue
-        vera_role = str(c.get('Phân quyền','')).strip().lower()
-        skey = normalize_login_name(vera_name)
-        saved_row = saved_by_vera.get(skey)
-        auto = ts_by_name.get(skey)
-        def pick(field, col):
-            if saved_row is not None and str(saved_row.get(field,'')).strip():
-                return str(saved_row.get(field,'')).strip()
-            if auto is not None and col:
-                return str(auto.get(col,'')).strip()
-            return ''
-        ts_role = pick('TimeSoft role', role_col)
-        rows.append({
-            'Tên nhân viên Vera': vera_name,
-            'Vai trò Vera': vera_role,
-            'TimeSoft ID': pick('TimeSoft ID', id_col),
-            'TimeSoft mã NV': pick('TimeSoft mã NV', code_col),
-            'TimeSoft tài khoản': pick('TimeSoft tài khoản', account_col),
-            'TimeSoft tên': pick('TimeSoft tên', name_col) or vera_name,
-            'TimeSoft role': ts_role or ('KTV' if vera_role == 'nhanvien' else ''),
-            'Role quy đổi Vera': map_timesoft_role_to_vera(ts_role or ('KTV' if vera_role == 'nhanvien' else vera_role)),
-        })
-    return pd.DataFrame(rows)
-
-
-def save_timesoft_employee_mapping(mapping_df, username):
-    ws, err = _ensure_timesoft_employee_map_worksheet()
-    if ws is None:
-        return False, err or "Không mở được bảng map TimeSoft."
-    try:
-        now = datetime.now(VN_TZ).strftime('%d/%m/%Y %H:%M:%S')
-        rows = [TIMESOFT_EMPLOYEE_MAP_HEADERS]
-        for _, r in mapping_df.iterrows():
-            name = str(r.get('Tên nhân viên Vera','')).strip()
-            if not name:
-                continue
-            ts_role = str(r.get('TimeSoft role','')).strip()
-            rows.append([
-                name, str(r.get('Vai trò Vera','')).strip().lower(), str(r.get('TimeSoft ID','')).strip(),
-                str(r.get('TimeSoft mã NV','')).strip(), str(r.get('TimeSoft tài khoản','')).strip(),
-                str(r.get('TimeSoft tên','')).strip(), ts_role, map_timesoft_role_to_vera(ts_role),
-                now, str(username)
-            ])
-        _gs_call_with_backoff(ws.clear)
-        gspread_update_range(ws, f"A1:J{len(rows)}", rows, value_input_option='USER_ENTERED')
-        _clear_timesoft_map_cache()
-        return True, f"Đã lưu map TimeSoft cho {len(rows)-1} nhân sự."
-    except Exception as e:
-        return False, f"Lỗi lưu map TimeSoft: {e}"
-
-
-def render_shift_management_tools(credentials_df):
-    # Công cụ nâng cao dành cho người quản lý; không làm thay đổi bảng phân ca chính bên dưới.
-    if st.session_state.get('current_role') not in {'admin','quanly','letan'}:
-        return
-
-    with st.expander("⚙️ Cấu hình khung giờ ca & chu kỳ luân phiên", expanded=False):
-        shifts, cycles, cfg_err = load_shift_management_config()
-        if cfg_err:
-            st.warning(cfg_err)
-        st.caption("Người quản lý có thể thêm/sửa khung giờ từng ca và tạo chu kỳ luân phiên. Dữ liệu lưu dùng chung toàn hệ thống.")
-        edited_shifts = st.data_editor(
-            shifts, num_rows='dynamic', hide_index=True, width='stretch', key='shift_definition_editor_v83',
-            column_config={
-                'Tên ca': st.column_config.TextColumn('Tên ca', required=True),
-                'Giờ bắt đầu': st.column_config.TextColumn('Giờ bắt đầu (HH:MM)', required=True),
-                'Giờ kết thúc': st.column_config.TextColumn('Giờ kết thúc (HH:MM)', required=True),
-                'Thứ tự': st.column_config.NumberColumn('Thứ tự', min_value=1, step=1, format='%d'),
-            }
-        )
-        edited_cycles = st.data_editor(
-            cycles, num_rows='dynamic', hide_index=True, width='stretch', key='shift_cycle_editor_v83',
-            column_config={
-                'Tên chu kỳ': st.column_config.TextColumn('Tên chu kỳ', required=True),
-                'Số ngày': st.column_config.NumberColumn('Số ngày', min_value=0, step=1, format='%d'),
-                'Chuỗi ca': st.column_config.TextColumn('Chuỗi ca', help='Ví dụ: Ca 1 | Ca 2 | Ca 1'),
-                'Thứ tự': st.column_config.NumberColumn('Thứ tự', min_value=1, step=1, format='%d'),
-            }
-        )
-        c_save, c_export = st.columns(2)
-        with c_save:
-            if st.button('💾 Lưu cấu hình ca & chu kỳ', use_container_width=True, key='save_shift_definitions_v83'):
-                ok, msg = save_shift_management_config(edited_shifts, edited_cycles, st.session_state.current_user)
-                (st.success if ok else st.error)(msg)
-                if ok:
-                    st.rerun()
-        with c_export:
-            st.download_button(
-                '📥 Export cấu hình ca Vera-Spa', data=build_shift_config_excel_bytes(edited_shifts, edited_cycles),
-                file_name=f"Vera_CauHinhCa_{get_vn_today().strftime('%Y%m%d')}.xlsx",
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True,
-                key='export_shift_definitions_v83'
-            )
-
-    with st.expander("🌐 TimeSoft · WorkTimeConf / Check-in / Map nhân sự", expanded=False):
-        st.caption("KTV trên TimeSoft được quy đổi thành role `nhanvien` trên Vera-Spa. Công cụ đọc dữ liệu TimeSoft và map ID/tài khoản; không đoán API ghi trực tiếp vào TimeSoft.")
-        t1, t2 = st.columns(2)
-        with t1:
-            ts_from = st.date_input('Từ ngày check-in', get_vn_today(), key='shift_ts_checkin_from_v83', format='DD/MM/YYYY')
-        with t2:
-            ts_to = st.date_input('Đến ngày check-in', get_vn_today(), key='shift_ts_checkin_to_v83', format='DD/MM/YYYY')
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button('📥 Lấy / Export check-in TimeSoft', use_container_width=True, key='shift_fetch_checkin_v83'):
-                with st.spinner('Đang lấy check-in TimeSoft...'):
-                    ok, msg, chk, meta = timesoft_fetch_checkin_only(ts_from, ts_to)
-                st.session_state['shift_timesoft_checkin_v83'] = chk
-                (st.success if ok else st.error)(msg)
-        with c2:
-            if st.button('🔄 Đọc WorkTimeConf TimeSoft', use_container_width=True, key='shift_fetch_worktime_v83'):
-                with st.spinner('Đang đọc cấu hình ca TimeSoft...'):
-                    ok, msg, wt, meta = timesoft_fetch_worktime_config()
-                st.session_state['shift_timesoft_worktime_v83'] = wt
-                (st.success if ok else st.error)(msg)
-
-        chk = st.session_state.get('shift_timesoft_checkin_v83')
-        if isinstance(chk, pd.DataFrame) and not chk.empty:
-            chk_view = _timesoft_checkin_display_df(chk)
-            st.dataframe(chk_view, width='stretch', hide_index=True, height=320)
-            out = io.BytesIO()
-            with pd.ExcelWriter(out, engine='openpyxl') as writer:
-                chk.to_excel(writer, index=False, sheet_name='Checkin')
-            st.download_button('📥 Tải Excel check-in', out.getvalue(), file_name=f"Timesoft_Checkin_{ts_from.strftime('%Y%m%d')}_{ts_to.strftime('%Y%m%d')}.xlsx", mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True, key='shift_download_checkin_v83')
-
-        uploaded_checkin = st.file_uploader(
-            '📤 Import file check-in TimeSoft (Excel/CSV)', type=['xlsx','xlsm','csv'], key='upload_timesoft_checkin_v83',
-            help='Dữ liệu import được lọc theo Từ ngày/Đến ngày nếu nhận diện được cột ngày.'
-        )
-        if uploaded_checkin is not None:
-            try:
-                if str(uploaded_checkin.name).lower().endswith('.csv'):
-                    imported_chk = pd.read_csv(uploaded_checkin)
-                else:
-                    imported_chk = pd.read_excel(uploaded_checkin, engine='openpyxl')
-                _date_col = _guess_dataframe_column(
-                    imported_chk, preferred=('WorkDateStr','WorkDate','CreateDate'), contains=('workdate','createdate','date')
-                )
-                if _date_col and not imported_chk.empty:
-                    _parsed = pd.to_datetime(imported_chk[_date_col], dayfirst=True, errors='coerce').dt.date
-                    imported_chk = imported_chk[(_parsed >= ts_from) & (_parsed <= ts_to)].copy()
-                st.caption(f'Preview file check-in import: {len(imported_chk)} dòng trong khoảng đã chọn.')
-                st.dataframe(_timesoft_checkin_display_df(imported_chk), width='stretch', hide_index=True, height=260)
-                if st.button('✅ Nạp file check-in vào phiên làm việc', use_container_width=True, key='apply_imported_checkin_v83'):
-                    st.session_state['shift_timesoft_checkin_v83'] = imported_chk
-                    st.success(f'Đã nạp {len(imported_chk)} dòng check-in để dùng cho map/đối soát thủ công.')
-                    st.rerun()
-            except Exception as e:
-                st.error(f'Không đọc được file check-in: {e}')
-
-        wt = st.session_state.get('shift_timesoft_worktime_v83')
-        if isinstance(wt, pd.DataFrame) and not wt.empty:
-            st.markdown('##### Cấu hình ca đọc từ TimeSoft')
-            st.dataframe(wt, width='stretch', hide_index=True, height=300)
-            mapped_shift = timesoft_worktime_to_vera_shift_definitions(wt)
-            if not mapped_shift.empty:
-                st.caption('Preview mapping WorkTimeConf → cấu hình ca Vera-Spa')
-                st.dataframe(mapped_shift, width='stretch', hide_index=True, height='content')
-                if st.button('✅ Nạp cấu hình ca TimeSoft vào Vera-Spa', use_container_width=True, key='apply_timesoft_worktime_v83'):
-                    _, cycles, _ = load_shift_management_config()
-                    ok, msg = save_shift_management_config(mapped_shift, cycles, st.session_state.current_user)
-                    (st.success if ok else st.error)(msg)
-                    if ok:
-                        st.rerun()
-            out = io.BytesIO()
-            with pd.ExcelWriter(out, engine='openpyxl') as writer:
-                wt.to_excel(writer, index=False, sheet_name='WorkTimeConf')
-            st.download_button('📥 Export WorkTimeConf TimeSoft', out.getvalue(), file_name=f"Timesoft_WorkTimeConf_{get_vn_today().strftime('%Y%m%d')}.xlsx", mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True, key='download_worktime_v83')
-
-        uploaded_wt = st.file_uploader('📤 Import file WorkTimeConf để map sang Vera-Spa', type=['xlsx','xlsm','csv'], key='upload_worktime_v83')
-        if uploaded_wt is not None:
-            try:
-                if str(uploaded_wt.name).lower().endswith('.csv'):
-                    raw_wt = pd.read_csv(uploaded_wt)
-                else:
-                    raw_wt = pd.read_excel(uploaded_wt, engine='openpyxl')
-                mapped_upload = timesoft_worktime_to_vera_shift_definitions(raw_wt)
-                st.dataframe(mapped_upload, width='stretch', hide_index=True, height='content')
-                if not mapped_upload.empty and st.button('✅ Import cấu hình ca file này vào Vera-Spa', use_container_width=True, key='import_worktime_file_v83'):
-                    _, cycles, _ = load_shift_management_config()
-                    ok, msg = save_shift_management_config(mapped_upload, cycles, st.session_state.current_user)
-                    (st.success if ok else st.error)(msg)
-            except Exception as e:
-                st.error(f'Không đọc được file WorkTimeConf: {e}')
-
-        map_source = chk if isinstance(chk, pd.DataFrame) and not chk.empty else _timesoft_read_background_snapshot(get_vn_today()).get('employee_checkin', pd.DataFrame())
-        map_df = build_timesoft_employee_mapping_candidates(map_source, credentials_df)
-        st.markdown('##### 🔗 Map ID / tài khoản nhân sự TimeSoft ↔ Vera-Spa')
-        st.caption('Có thể sửa các cột TimeSoft ID, mã NV, tài khoản, tên, role. Cột Role quy đổi tự áp dụng KTV → nhanvien khi lưu.')
-        map_edit = st.data_editor(
-            map_df, width='stretch', hide_index=True, num_rows='fixed', key='timesoft_employee_map_editor_v83',
-            disabled=['Tên nhân viên Vera','Vai trò Vera','Role quy đổi Vera']
-        )
-        if st.button('💾 Lưu mapping nhân sự TimeSoft', use_container_width=True, key='save_timesoft_employee_map_v83'):
-            ok, msg = save_timesoft_employee_mapping(map_edit, st.session_state.current_user)
-            (st.success if ok else st.error)(msg)
-            if ok:
-                st.rerun()
-
 def get_nhanvien_shift_dataframe(credentials_df):
     """Trang Thiết lập ca chỉ hiển thị đúng role `nhanvien`, sắp xếp A→Z."""
     cols = ['Tên nhân viên', 'Ca làm việc', 'Ngày bắt đầu ca', 'Chu kỳ']
@@ -3489,8 +2707,6 @@ def build_shift_template_excel_bytes(credentials_df):
     from openpyxl.utils import get_column_letter
 
     d = get_nhanvien_shift_dataframe(credentials_df)
-    shift_options = get_dynamic_shift_options()
-    cycle_options = get_dynamic_shift_cycle_options()
     wb = Workbook()
     ws = wb.active
     ws.title = 'ThietLapCa'
@@ -3522,13 +2738,13 @@ def build_shift_template_excel_bytes(credentials_df):
 
     dm = wb.create_sheet('DanhMuc')
     dm['A1'] = 'Ca làm việc'; dm['B1'] = 'Chu kỳ luân phiên'
-    for i, v in enumerate(shift_options, start=2): dm.cell(i, 1, v)
-    for i, v in enumerate(cycle_options, start=2): dm.cell(i, 2, v)
+    for i, v in enumerate(SHIFT_OPTIONS, start=2): dm.cell(i, 1, v)
+    for i, v in enumerate(SHIFT_CYCLE_OPTIONS, start=2): dm.cell(i, 2, v)
     dm.sheet_state = 'hidden'
 
     max_target_row = max(300, ws.max_row + 100)
-    dv_shift = DataValidation(type='list', formula1=f"=DanhMuc!$A$2:$A${len(shift_options)+1}", allow_blank=True)
-    dv_cycle = DataValidation(type='list', formula1=f"=DanhMuc!$B$2:$B${len(cycle_options)+1}", allow_blank=True)
+    dv_shift = DataValidation(type='list', formula1=f"=DanhMuc!$A$2:$A${len(SHIFT_OPTIONS)+1}", allow_blank=True)
+    dv_cycle = DataValidation(type='list', formula1=f"=DanhMuc!$B$2:$B${len(SHIFT_CYCLE_OPTIONS)+1}", allow_blank=True)
     ws.add_data_validation(dv_shift); ws.add_data_validation(dv_cycle)
     dv_shift.add(f'B2:B{max_target_row}')
     dv_cycle.add(f'D2:D{max_target_row}')
@@ -3552,10 +2768,8 @@ def read_shift_template_excel(uploaded_file, credentials_df):
     allowed_keys = {normalize_login_name(x) for x in allowed['Tên nhân viên'].astype(str).tolist()}
     raw = raw[required].copy()
     raw = raw[raw['Tên nhân viên'].astype(str).apply(normalize_login_name).isin(allowed_keys)].copy()
-    shift_options = get_dynamic_shift_options()
-    cycle_options = get_dynamic_shift_cycle_options()
-    raw['Ca làm việc'] = raw['Ca làm việc'].astype(str).where(raw['Ca làm việc'].astype(str).isin(shift_options), '')
-    raw['Chu kỳ'] = raw['Chu kỳ'].astype(str).where(raw['Chu kỳ'].astype(str).isin(cycle_options), '')
+    raw['Ca làm việc'] = raw['Ca làm việc'].astype(str).where(raw['Ca làm việc'].astype(str).isin(SHIFT_OPTIONS), '')
+    raw['Chu kỳ'] = raw['Chu kỳ'].astype(str).where(raw['Chu kỳ'].astype(str).isin(SHIFT_CYCLE_OPTIONS), '')
     raw['_sort'] = raw['Tên nhân viên'].astype(str).apply(normalize_login_name)
     raw = raw.sort_values('_sort', kind='stable').drop(columns=['_sort']).reset_index(drop=True)
     return raw, ''
@@ -4375,147 +3589,80 @@ def is_employee_co_phep_leave_reason(value):
     return not any(kw in key for kw in excluded_keywords)
 
 
-def is_employee_khong_phep_leave_reason(value):
-    """Nhận diện Nghỉ KHÔNG phép/biến thể cuối tuần; dùng cho quyền tự hủy của nhân viên."""
-    key = normalize_login_name(clean_leave_reason_display(value))
-    return bool(key and 'khong phep' in key and ('nghi' in key or 'cuoi tuan' in key))
-
-
-def validate_employee_leave_change_permission(original_row, edited_row=None, current_user=None, today=None, action="sửa", role=None):
-    """Quyền tự sửa/hủy lịch của nhanvien/leader theo V83.
-
-    - nhanvien: CÓ phép chỉ sửa/hủy trước >=3 ngày; KHÔNG phép chỉ tự hủy ngày tương lai.
-      Ngày hiện tại phải báo Group chat để Lễ tân hủy giúp; quá khứ chỉ Admin.
-    - leader: tự sửa/hủy lịch của mình ở ngày tương lai; ngày hiện tại báo Group chat cho Lễ tân;
-      quá khứ chỉ Admin.
-    """
+def validate_employee_leave_change_permission(original_row, edited_row=None, current_user=None, today=None, action="sửa"):
+    """Nhân viên/Leader chỉ được sửa hoặc hủy Loại nghỉ CÓ phép của chính mình trước ít nhất 7 ngày."""
     today = today or get_vn_today()
-    role = str(role or st.session_state.get('current_role', '')).strip().lower()
     actor = normalize_login_name(current_user or st.session_state.get("current_user", ""))
     owner = normalize_login_name(original_row.get("Tên nhân viên", ""))
     if not actor or owner != actor:
-        return False, "Chỉ được tự thao tác lịch nghỉ của chính mình."
+        return False, "Nhân viên chỉ được thao tác lịch nghỉ của chính mình."
+
+    old_reason = original_row.get("Lý do nghỉ", original_row.get("Loại nghỉ", ""))
+    if not is_employee_co_phep_leave_reason(old_reason):
+        return False, f"Nhân viên chỉ được {action} những Loại nghỉ CÓ phép của mình."
 
     old_dt = pd.to_datetime(original_row.get("Ngày"), errors="coerce", dayfirst=True)
-    if pd.isna(old_dt):
-        return False, "Ngày nghỉ không hợp lệ."
-    old_date = old_dt.date()
-    old_reason = original_row.get("Lý do nghỉ", original_row.get("Loại nghỉ", ""))
+    min_date = today + timedelta(days=EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS)
+    if pd.isna(old_dt) or old_dt.date() < min_date:
+        return False, (
+            f"Nhân viên chỉ được {action} lịch nghỉ trước ít nhất {EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS} ngày "
+            f"(ngày nghỉ từ {min_date.strftime('%d/%m/%Y')} trở đi)."
+        )
 
-    # Admin là vai trò duy nhất được thao tác lịch quá khứ; nhanvien/leader đều bị chặn ở đây.
-    if old_date < today:
-        return False, "Chỉ Admin được Xóa/Thay đổi/Cập nhật lịch nghỉ của ngày trong quá khứ."
-
-    if role == 'leader':
-        if old_date == today:
+    if edited_row is not None:
+        new_owner = normalize_login_name(edited_row.get("Tên nhân viên", original_row.get("Tên nhân viên", "")))
+        if new_owner != actor:
+            return False, "Nhân viên không được đổi lịch sang tên người khác."
+        new_reason = edited_row.get("Lý do nghỉ", edited_row.get("Loại nghỉ", old_reason))
+        if not is_employee_co_phep_leave_reason(new_reason):
+            return False, "Nhân viên chỉ được thay đổi giữa các Loại nghỉ CÓ phép."
+        new_dt = pd.to_datetime(edited_row.get("Ngày"), errors="coerce", dayfirst=True)
+        if pd.isna(new_dt) or new_dt.date() < min_date:
             return False, (
-                "Leader không tự hủy/thay đổi lịch nghỉ của ngày hiện tại. "
-                "Hãy báo Group chat để Lễ tân cập nhật giúp."
+                f"Ngày nghỉ sau khi sửa phải cách hiện tại ít nhất {EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS} ngày "
+                f"(từ {min_date.strftime('%d/%m/%Y')} trở đi)."
             )
-        if edited_row is not None:
-            new_owner = normalize_login_name(edited_row.get("Tên nhân viên", original_row.get("Tên nhân viên", "")))
-            if new_owner != actor:
-                return False, "Leader không được đổi lịch sang tên người khác."
-            new_dt = pd.to_datetime(edited_row.get("Ngày"), errors="coerce", dayfirst=True)
-            if pd.isna(new_dt):
-                return False, "Ngày nghỉ sau khi sửa không hợp lệ."
-            new_date = new_dt.date()
-            if new_date < today:
-                return False, "Chỉ Admin được cập nhật lịch nghỉ sang ngày trong quá khứ."
-            if new_date == today:
-                return False, "Leader muốn đổi lịch sang ngày hiện tại phải báo Group chat để Lễ tân cập nhật."
-        return True, ""
-
-    # nhanvien
-    if is_employee_co_phep_leave_reason(old_reason):
-        min_date = today + timedelta(days=EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS)
-        if old_date < min_date:
-            return False, (
-                f"Nhân viên chỉ được {action} Nghỉ CÓ phép trước ít nhất "
-                f"{EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS:02d} ngày "
-                f"(ngày nghỉ từ {min_date.strftime('%d/%m/%Y')} trở đi)."
-            )
-        if edited_row is not None:
-            new_owner = normalize_login_name(edited_row.get("Tên nhân viên", original_row.get("Tên nhân viên", "")))
-            if new_owner != actor:
-                return False, "Nhân viên không được đổi lịch sang tên người khác."
-            new_reason = edited_row.get("Lý do nghỉ", edited_row.get("Loại nghỉ", old_reason))
-            if not is_employee_co_phep_leave_reason(new_reason):
-                return False, "Nhân viên chỉ được thay đổi giữa các Loại nghỉ CÓ phép."
-            new_dt = pd.to_datetime(edited_row.get("Ngày"), errors="coerce", dayfirst=True)
-            if pd.isna(new_dt) or new_dt.date() < min_date:
-                return False, (
-                    f"Ngày nghỉ sau khi sửa phải cách hiện tại ít nhất "
-                    f"{EMPLOYEE_LEAVE_CHANGE_NOTICE_DAYS:02d} ngày "
-                    f"(từ {min_date.strftime('%d/%m/%Y')} trở đi)."
-                )
-        return True, ""
-
-    if is_employee_khong_phep_leave_reason(old_reason):
-        # Quy định chỉ cho phép NHÂN VIÊN tự HỦY Nghỉ không phép; không tự sửa loại/ngày.
-        if edited_row is not None:
-            return False, (
-                "Nhân viên không tự thay đổi lịch Nghỉ KHÔNG phép; có thể tự hủy ngày tương lai "
-                "và đăng ký lại nếu cần."
-            )
-        if old_date == today:
-            return False, (
-                "Nhân viên không được tự hủy Nghỉ KHÔNG phép trong ngày hiện tại. "
-                "Hãy nhắn Group chat để Lễ tân hủy giúp."
-            )
-        # old_date > today vì quá khứ đã chặn bên trên.
-        return True, ""
-
-    return False, f"Nhân viên không được tự {action} loại lịch này."
+    return True, ""
 
 
 def validate_schedule_delete_permission(original_row, role, current_user=None, today=None):
-    """Kiểm tra quyền hủy/xóa lịch theo vai trò; chỉ Admin được xóa quá khứ."""
+    """Kiểm tra quyền hủy/xóa lịch theo vai trò."""
     today = today or get_vn_today()
     role = str(role or "").strip().lower()
-    dt = pd.to_datetime(original_row.get("Ngày"), errors="coerce", dayfirst=True)
-    row_date = dt.date() if pd.notna(dt) else None
-
-    if role in {'nhanvien', 'leader'}:
+    if role in EMPLOYEE_LIKE_ROLES:
         return validate_employee_leave_change_permission(
-            original_row, None, current_user=current_user, today=today, action="hủy", role=role
+            original_row, None, current_user=current_user, today=today, action="hủy"
         )
-    if role == 'admin':
-        return True, ""
-    if row_date is not None and row_date < today:
-        return False, "Chỉ Admin được Xóa/Thay đổi/Cập nhật lịch nghỉ của ngày trong quá khứ."
-    # Lễ tân được phép hủy thay nhanvien/leader trong ngày hiện tại và các ngày tương lai.
-    if role in {'letan', 'quanly'}:
-        return True, ""
+    if role in {"letan", "quanly"}:
+        dt = pd.to_datetime(original_row.get("Ngày"), errors="coerce", dayfirst=True)
+        if pd.notna(dt) and dt.date() < today:
+            return False, "Lễ tân/Quản lý không được xóa lịch trong quá khứ."
     return True, ""
 
 
 def validate_schedule_edit_permission(original_row, edited_row, role, today=None, current_user=None):
-    """Giới hạn sửa lịch theo nhanvien/leader/letan/admin V83."""
+    """Giữ đúng giới hạn sửa lịch của từng vai trò trước khi batch-save."""
     today = today or get_vn_today()
     old_dt = pd.to_datetime(original_row.get('Ngày'), errors='coerce', dayfirst=True)
     new_dt = pd.to_datetime(edited_row.get('Ngày'), errors='coerce', dayfirst=True)
-    old_date = old_dt.date() if pd.notna(old_dt) else None
+    old_date = old_dt.date() if pd.notna(old_dt) else today
     new_date = new_dt.date() if pd.notna(new_dt) else None
-    if old_date is None or new_date is None:
+    if new_date is None:
         return False, "Ngày nghỉ không hợp lệ."
 
     role = str(role or '').strip().lower()
-    if role in {'nhanvien', 'leader'}:
+    if role in EMPLOYEE_LIKE_ROLES:
         permitted, message = validate_employee_leave_change_permission(
-            original_row, edited_row, current_user=current_user, today=today,
-            action="thay đổi", role=role
+            original_row, edited_row, current_user=current_user, today=today, action="thay đổi"
         )
         if not permitted:
             return False, message
-    elif role == 'admin':
-        pass
+        _, emp_max_date = employee_registration_window(today)
+        if new_date > emp_max_date:
+            return False, f"Nhân viên chỉ được sửa lịch đến hết {emp_max_date.strftime('%d/%m/%Y')}."
     elif role in {'letan', 'quanly'}:
         if old_date < today or new_date < today:
-            return False, "Chỉ Admin được Xóa/Thay đổi/Cập nhật lịch nghỉ của ngày trong quá khứ."
-        # Lễ tân/Quản lý được sửa ngày hiện tại và tương lai.
-    elif old_date < today or new_date < today:
-        return False, "Chỉ Admin được cập nhật lịch nghỉ của ngày trong quá khứ."
+            return False, "Lễ tân/Quản lý không được sửa lịch trong quá khứ."
 
     if not str(edited_row.get('Tên nhân viên', '')).strip():
         return False, "Tên nhân viên không được để trống."
@@ -5018,79 +4165,23 @@ def delete_schedule_records(original_rows, updated_by=None):
 
 
 # --- HÀM TẢI FILE TỪ DRIVE ---
-def _google_drive_authorized_session():
-    """Tạo AuthorizedSession chỉ-đọc cho Google Drive."""
-    try:
-        scope = [
-            "https://www.googleapis.com/auth/drive.readonly",
-            "https://www.googleapis.com/auth/spreadsheets",
-        ]
-        env_json = str(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "") or "").strip()
-        if env_json:
-            creds = Credentials.from_service_account_info(json.loads(env_json), scopes=scope)
-        else:
-            try:
-                secret_info = dict(st.secrets["gcp_service_account"])
-            except Exception:
-                secret_info = {}
-            if secret_info:
-                creds = Credentials.from_service_account_info(secret_info, scopes=scope)
-            else:
-                import google.auth
-                creds, _ = google.auth.default(scopes=scope)
-        from google.auth.transport.requests import AuthorizedSession
-        return AuthorizedSession(creds)
-    except Exception:
-        return None
-
-
-def _write_stream_response_to_file(response, destination):
-    with open(destination, "wb") as f:
-        for chunk in response.iter_content(1024 * 1024):
-            if chunk:
-                f.write(chunk)
-    return os.path.exists(destination) and os.path.getsize(destination) > 0
-
-
 def download_file_from_google_drive(id, destination):
-    """Tải file Drive bền vững: ưu tiên Drive API có xác thực, sau đó mới fallback link public.
-
-    Cách này sửa lỗi Nguồn 3 khi file không còn public nhưng đã share cho service account
-    của Vera-Spa/Cloud Run. Không ghi credential ra log/UI.
-    """
+    """Tải file nhị phân từ Google Drive, hỗ trợ trang confirm của file lớn."""
+    session = requests.Session()
     errors = []
 
-    # 1) Ưu tiên Google Drive API với service account/runtime identity.
-    auth_session = _google_drive_authorized_session()
-    if auth_session is not None:
-        try:
-            api_url = f"https://www.googleapis.com/drive/v3/files/{id}?alt=media&supportsAllDrives=true"
-            response = auth_session.get(api_url, stream=True, timeout=90, allow_redirects=True)
-            if response.status_code == 200:
-                ctype = str(response.headers.get("Content-Type", "") or "").lower()
-                # Drive API lỗi thường trả JSON; không lưu JSON lỗi thành file Excel.
-                if "application/json" not in ctype and _write_stream_response_to_file(response, destination):
-                    return destination
-            else:
-                errors.append(f"Drive API HTTP {response.status_code}")
-        except Exception as e:
-            errors.append(f"Drive API: {e}")
-            try:
-                if os.path.exists(destination):
-                    os.remove(destination)
-            except Exception:
-                pass
-
-    # 2) Fallback link public/confirm cho file chia sẻ công khai.
-    session = requests.Session()
+    # Endpoint usercontent thường ổn định hơn với file Excel nhị phân công khai.
     urls = [
         f"https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t",
         f"https://drive.google.com/uc?export=download&id={id}&confirm=t",
     ]
+
     for url in urls:
         try:
-            response = session.get(url, stream=True, timeout=90, allow_redirects=True)
+            response = session.get(url, stream=True, timeout=60, allow_redirects=True)
             response.raise_for_status()
+
+            # Một số file lớn vẫn trả trang confirm; thử lấy token từ HTML/cookie.
             ctype = str(response.headers.get('Content-Type', '')).lower()
             if 'text/html' in ctype:
                 html = response.text
@@ -5102,15 +4193,16 @@ def download_file_from_google_drive(id, destination):
                     response = session.get(
                         "https://drive.google.com/uc",
                         params={'export': 'download', 'id': id, 'confirm': token},
-                        stream=True, timeout=90, allow_redirects=True
+                        stream=True, timeout=60, allow_redirects=True
                     )
                     response.raise_for_status()
-                    ctype = str(response.headers.get('Content-Type', '')).lower()
 
-            if 'text/html' in ctype:
-                errors.append("Google Drive trả HTML thay vì file nhị phân")
-                continue
-            if _write_stream_response_to_file(response, destination):
+            with open(destination, "wb") as f:
+                for chunk in response.iter_content(1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+            if os.path.exists(destination) and os.path.getsize(destination) > 0:
                 return destination
         except Exception as e:
             errors.append(str(e))
@@ -5120,8 +4212,7 @@ def download_file_from_google_drive(id, destination):
             except Exception:
                 pass
 
-    raise RuntimeError("Không tải được file Google Drive: " + " | ".join(errors[-4:]))
-
+    raise RuntimeError("Không tải được file Google Drive: " + " | ".join(errors[-2:]))
 
 
 def _excel_col_letter(idx):
@@ -5264,75 +4355,6 @@ def _tour_norm_token(v):
     return " ".join(txt.split())
 
 
-def _tour_parse_datetime(value, fallback_date=None):
-    """Chuẩn hóa ngày giờ Bảng tour từ Excel/string về datetime naive theo giờ VN."""
-    if value is None or value == "":
-        return None
-    if isinstance(value, pd.Timestamp):
-        dt = value.to_pydatetime()
-    elif isinstance(value, datetime):
-        dt = value
-    elif isinstance(value, date):
-        dt = datetime.combine(value, datetime.min.time())
-    else:
-        text = str(value).strip()
-        if not text or text.casefold() in {"nan", "nat", "none", "<na>", "-", "--"}:
-            return None
-        parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
-        if pd.isna(parsed):
-            return None
-        dt = parsed.to_pydatetime() if isinstance(parsed, pd.Timestamp) else parsed
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(VN_TZ).replace(tzinfo=None)
-    # Một số workbook có thể chỉ lưu time; ghép ngày được truyền vào nếu có.
-    if dt.year in {1899, 1900, 1970} and isinstance(fallback_date, date):
-        dt = datetime.combine(fallback_date, dt.time())
-    return dt
-
-
-def _tour_break_timing(out_value, in_value=None, now=None):
-    """Tính trạng thái nghỉ ra ngoài theo giới hạn 90 phút.
-
-    Trả (remaining_minutes, late_minutes, out_dt, in_dt).
-    remaining > 0: còn thời gian; remaining < 0: đã quá giờ.
-    Nếu đã có Giờ vào thì kết quả được chốt tại Giờ vào; nếu chưa có thì tiếp tục đếm theo hiện tại.
-    """
-    now_vn = now or datetime.now(VN_TZ).replace(tzinfo=None)
-    out_dt = _tour_parse_datetime(out_value, fallback_date=now_vn.date())
-    in_dt = _tour_parse_datetime(in_value, fallback_date=(out_dt.date() if out_dt else now_vn.date()))
-    if out_dt is None:
-        return None, None, None, in_dt
-    end_dt = in_dt or now_vn
-    if end_dt < out_dt and in_dt is not None:
-        # Trường hợp chỉ lưu time qua 00:00.
-        end_dt = end_dt + timedelta(days=1)
-    elapsed = max(0.0, (end_dt - out_dt).total_seconds() / 60.0)
-    remaining = float(BANG_TOUR_BREAK_LIMIT_MINUTES) - elapsed
-    late = max(0.0, -remaining)
-    return remaining, late, out_dt, in_dt
-
-
-def _tour_round_minutes(value):
-    if value is None:
-        return ""
-    try:
-        value = float(value)
-        # Với số âm, làm tròn độ trễ ra xa 0 để 17.1 phút hiển thị -18.
-        if value < 0:
-            return str(-int(math.ceil(abs(value))))
-        return str(int(math.ceil(value)))
-    except Exception:
-        return ""
-
-
-def _tour_late_note(late_minutes):
-    try:
-        late = int(math.ceil(float(late_minutes or 0)))
-    except Exception:
-        late = 0
-    return f"vao tre {late} phut" if late > 0 else ""
-
-
 def prepare_bang_tour_display(df):
     """
     Chuẩn bị dữ liệu HIỂN THỊ cho Bảng tour sau khi đọc từ file:
@@ -5343,32 +4365,6 @@ def prepare_bang_tour_display(df):
     - Thời gian còn lại <= -15 được làm trống trên giao diện (không ghi ngược file nguồn).
     """
     out = reorder_bang_tour_columns(df).copy()
-
-    # V84 - Cột Break/Giờ ra/Thời gian/Giờ vào/Ghi chú.
-    # Khi Giờ ra có dữ liệu, Thời gian tự đếm ngược 90 phút. Nếu đã có Giờ vào,
-    # hệ thống chốt số phút còn lại tại thời điểm quay lại. Quá giờ tạo ghi chú "vao tre X phut".
-    break_col_v84 = _find_tour_col(out, "Break") or _find_tour_col(out, "Breaktime")
-    out_col_v84 = _find_tour_col(out, "Giờ ra")
-    time_col_v84 = _find_tour_col(out, "Thời gian")
-    in_col_v84 = _find_tour_col(out, "Giờ vào")
-    note_col_v84 = _find_tour_col(out, "Ghi chú")
-    now_v84 = datetime.now(VN_TZ).replace(tzinfo=None)
-    if out_col_v84 is not None:
-        for _idx in out.index:
-            _out_raw = out.at[_idx, out_col_v84]
-            _in_raw = out.at[_idx, in_col_v84] if in_col_v84 is not None else None
-            _remaining, _late, _out_dt, _in_dt = _tour_break_timing(_out_raw, _in_raw, now=now_v84)
-            if time_col_v84 is not None and _out_dt is not None:
-                out.at[_idx, time_col_v84] = _tour_round_minutes(_remaining)
-            if note_col_v84 is not None and _late and _late > 0 and _in_dt is not None:
-                _existing_note = _tour_text(out.at[_idx, note_col_v84]).strip()
-                if not _existing_note or normalize_login_name(_existing_note).isdigit():
-                    out.at[_idx, note_col_v84] = _tour_late_note(_late)
-            # Nếu cột Break trống nhưng đang có Giờ ra chưa có Giờ vào, coi là đang ra ngoài để hiển thị.
-            if break_col_v84 is not None and _out_dt is not None and _in_dt is None:
-                _break_text = _tour_text(out.at[_idx, break_col_v84]).strip()
-                if not _break_text:
-                    out.at[_idx, break_col_v84] = "Break"
 
     # Ghi nhớ các dòng có thời gian <= -15 trước khi làm trống để không nhầm thành "Đang rảnh".
     expired_indices = set()
@@ -5600,313 +4596,6 @@ def style_bang_tour(df):
         )
     return styler
 
-# ==========================================================
-# V84 - ĐỐI SOÁT RA NGOÀI / BẢNG TOUR
-# ==========================================================
-def _bang_tour_catalog():
-    try:
-        return build_leave_reason_catalog(globals().get('df_loai_nghi', pd.DataFrame()))
-    except Exception:
-        return {}
-
-
-def _bang_tour_pick_late_reason(late_minutes):
-    """Chọn đúng loại phạt 'Ra ngoài vào muộn dưới N phút' từ LoaiNghi.
-
-    Ưu tiên danh mục thật trên Google Sheet; fallback tên chuẩn 30/60/120 để tương thích
-    hệ thống hiện tại. Không tự bịa mức tiền: tiền luôn tra từ LoaiNghi.
-    """
-    try:
-        late = max(0, int(math.ceil(float(late_minutes or 0))))
-    except Exception:
-        late = 0
-    catalog = _bang_tour_catalog()
-    candidates = []
-    for item in catalog.values():
-        name = str(item.get('name', '')).strip()
-        key = normalize_login_name(name)
-        if 'ra ngoai' not in key or not any(t in key for t in ['vao muon', 'vao tre', 'tre']):
-            continue
-        nums = [int(x) for x in re.findall(r'\d+', key)]
-        threshold = max(nums) if nums else None
-        candidates.append((threshold, name))
-    with_threshold = sorted([x for x in candidates if x[0] is not None], key=lambda x: x[0])
-    for threshold, name in with_threshold:
-        if late < threshold:
-            return name
-    no_threshold = [name for threshold, name in candidates if threshold is None]
-    if no_threshold:
-        return no_threshold[0]
-    if late < 30:
-        return 'Ra ngoài vào muộn dưới 30 phút'
-    if late < 60:
-        return 'Ra ngoài vào muộn dưới 60 phút'
-    return 'Ra ngoài vào muộn dưới 120 phút'
-
-
-def _bang_tour_pick_single_side_reason():
-    """Tìm loại phạt khi chỉ có Giờ ra hoặc chỉ có Giờ vào từ danh mục LoaiNghi."""
-    catalog = _bang_tour_catalog()
-    preferred_tokens = [
-        ('ra ngoai', 'thieu'),
-        ('ra ngoai', 'mot lan'),
-        ('ra ngoai', '1 lan'),
-        ('ra ngoai', 'khong du'),
-        ('ra ngoai', 'khong co gio'),
-    ]
-    for item in catalog.values():
-        name = str(item.get('name', '')).strip()
-        key = normalize_login_name(name)
-        if any(all(token in key for token in pair) for pair in preferred_tokens):
-            return name
-    # Cho phép cấu hình chính xác bằng biến môi trường/Secret Manager nếu tên trên LoaiNghi khác.
-    return BANG_TOUR_SINGLE_SIDE_REASON
-
-
-def _bang_tour_penalty(reason):
-    catalog = _bang_tour_catalog()
-    item = catalog.get(normalize_leave_reason(reason)) or {}
-    try:
-        return float(item.get('penalty', 0) or 0)
-    except Exception:
-        return 0.0
-
-
-def analyze_bang_tour_break_violations(df_tour, target_date=None):
-    """Phân tích Giờ ra/Giờ vào của Bảng tour cho một ngày.
-
-    Quy tắc:
-    - Được ra ngoài tối đa 90 phút.
-    - Có đủ Giờ ra + Giờ vào và quay lại quá 90 phút -> phạt theo nhóm Ra ngoài vào muộn.
-    - Chỉ có một trong hai mốc Giờ ra/Giờ vào -> vi phạm dữ liệu một lần.
-    - Chỉ phân tích những mốc có ngày đúng target_date, tránh kéo dữ liệu ngày cũ vào hôm nay.
-    """
-    target_date = target_date if isinstance(target_date, date) else get_vn_today()
-    columns = ['Ngày', 'Tên nhân viên', 'Loại vi phạm', 'Số phút', 'Mức phạt', 'Giờ ra', 'Giờ vào', 'Ghi chú', 'Chi tiết']
-    if not isinstance(df_tour, pd.DataFrame) or df_tour.empty:
-        return pd.DataFrame(columns=columns)
-
-    name_col = _find_tour_col(df_tour, 'Tên nhân viên') or _find_tour_col(df_tour, 'Nhân viên')
-    out_col = _find_tour_col(df_tour, 'Giờ ra')
-    in_col = _find_tour_col(df_tour, 'Giờ vào')
-    note_col = _find_tour_col(df_tour, 'Ghi chú')
-    if name_col is None or (out_col is None and in_col is None):
-        return pd.DataFrame(columns=columns)
-
-    rows = []
-    for _, r in df_tour.iterrows():
-        emp = _tour_text(r.get(name_col, '')).strip()
-        if not emp or normalize_login_name(emp) in {'nan', 'none'}:
-            continue
-        out_dt = _tour_parse_datetime(r.get(out_col, '') if out_col else None, fallback_date=target_date)
-        in_dt = _tour_parse_datetime(r.get(in_col, '') if in_col else None, fallback_date=(out_dt.date() if out_dt else target_date))
-        out_matches = out_dt is not None and out_dt.date() == target_date
-        in_matches = in_dt is not None and in_dt.date() == target_date
-        if not out_matches and not in_matches:
-            continue
-
-        raw_note = _tour_text(r.get(note_col, '')).strip() if note_col else ''
-        # Đủ hai mốc: tính thời lượng thật, không phụ thuộc text Ghi chú.
-        if out_dt is not None and in_dt is not None:
-            end_dt = in_dt
-            if end_dt < out_dt:
-                end_dt = end_dt + timedelta(days=1)
-            elapsed = max(0.0, (end_dt - out_dt).total_seconds() / 60.0)
-            late = max(0.0, elapsed - BANG_TOUR_BREAK_LIMIT_MINUTES)
-            if late <= 0:
-                continue
-            late_int = int(math.ceil(late))
-            reason = _bang_tour_pick_late_reason(late_int)
-            penalty = _bang_tour_penalty(reason)
-            rows.append({
-                'Ngày': target_date,
-                'Tên nhân viên': emp,
-                'Loại vi phạm': reason,
-                'Số phút': late_int,
-                'Mức phạt': penalty,
-                'Giờ ra': out_dt.strftime('%d/%m/%Y %H:%M:%S'),
-                'Giờ vào': in_dt.strftime('%d/%m/%Y %H:%M:%S'),
-                'Ghi chú': raw_note or _tour_late_note(late_int),
-                'Chi tiết': f'Auto update · Bảng tour: ra ngoài {elapsed:.0f} phút, vượt quy định {late_int} phút.'
-            })
-            continue
-
-        # Chỉ có một mốc trong ngày: vi phạm dữ liệu một lần.
-        reason = _bang_tour_pick_single_side_reason()
-        penalty = _bang_tour_penalty(reason)
-        missing = 'Giờ vào' if out_dt is not None else 'Giờ ra'
-        rows.append({
-            'Ngày': target_date,
-            'Tên nhân viên': emp,
-            'Loại vi phạm': reason,
-            'Số phút': 0,
-            'Mức phạt': penalty,
-            'Giờ ra': out_dt.strftime('%d/%m/%Y %H:%M:%S') if out_dt else '',
-            'Giờ vào': in_dt.strftime('%d/%m/%Y %H:%M:%S') if in_dt else '',
-            'Ghi chú': raw_note or f'Thiếu {missing}',
-            'Chi tiết': f'Auto update · Bảng tour chỉ có một mốc thời gian, thiếu {missing}.'
-        })
-
-    return pd.DataFrame(rows, columns=columns)
-
-
-def _get_bang_tour_audit_worksheet():
-    headers = [
-        'Ngày', 'Tên nhân viên', 'Loại vi phạm', 'Số phút', 'Mức phạt',
-        'Ghi phiếu phạt', 'Email', 'Chi tiết', 'Cập nhật lúc', 'Người cập nhật'
-    ]
-    try:
-        client = get_gspread_client()
-        if not client:
-            return None, headers
-        ss = client.open_by_key(SHEET_MAT_KHAU_ID)
-        ws = _get_or_create_worksheet(ss, BANG_TOUR_AUDIT_WORKSHEET, rows=3000, cols=len(headers) + 2)
-        current = _gs_call_with_backoff(ws.row_values, 1)
-        if current[:len(headers)] != headers:
-            gspread_update_range(ws, 'A1:J1', [headers])
-        return ws, headers
-    except Exception:
-        return None, headers
-
-
-def _bang_tour_email_sent_keys():
-    ws, headers = _get_bang_tour_audit_worksheet()
-    if ws is None:
-        return set()
-    try:
-        vals = _gs_call_with_backoff(ws.get_all_values)
-        if len(vals) <= 1:
-            return set()
-        idx = {str(h): i for i, h in enumerate(vals[0])}
-        out = set()
-        for row in vals[1:]:
-            def cell(name):
-                i = idx.get(name, -1)
-                return row[i] if i >= 0 and i < len(row) else ''
-            if str(cell('Email')).strip().lower() not in {'1', 'true', 'yes', 'đã gửi', 'da gui'}:
-                continue
-            out.add((
-                normalize_schedule_date(cell('Ngày')),
-                normalize_login_name(cell('Tên nhân viên')),
-                normalize_leave_reason(cell('Loại vi phạm')),
-            ))
-        return out
-    except Exception:
-        return set()
-
-
-def _bang_tour_append_audit_rows(rows):
-    if not rows:
-        return
-    ws, headers = _get_bang_tour_audit_worksheet()
-    if ws is None:
-        return
-    values = [[r.get(h, '') for h in headers] for r in rows]
-    try:
-        _gs_call_with_backoff(ws.append_rows, values, value_input_option='USER_ENTERED')
-    except Exception:
-        pass
-
-
-def run_bang_tour_break_reconciliation(target_date=None, df_tour=None, credentials_df=None, commit=False, send_email=False):
-    """Đối soát Bảng tour và tùy chọn Auto update + gửi email.
-
-    Dùng cùng nguồn phạt LoaiNghi của SHEET_DU_PHONG_ID. Khi chạy 20:10 bằng Cloud Job,
-    gọi commit=True, send_email=True. Chống ghi trùng nhờ save_lich_nghi_to_backup_sheet
-    và chống gửi mail trùng bằng worksheet DoiSoatRaNgoai.
-    """
-    target_date = target_date if isinstance(target_date, date) else get_vn_today()
-    credentials_df = credentials_df if isinstance(credentials_df, pd.DataFrame) else globals().get('df_credentials', pd.DataFrame())
-    if not isinstance(df_tour, pd.DataFrame) or df_tour.empty:
-        try:
-            load_bang_tour_input.clear()
-        except Exception:
-            pass
-        df_tour, err = load_bang_tour_input()
-        if err:
-            return False, err, pd.DataFrame()
-
-    result_df = analyze_bang_tour_break_violations(df_tour, target_date)
-    if result_df.empty or not commit:
-        return True, f'Đối soát Bảng tour xong: phát hiện {len(result_df)} vi phạm.', result_df
-
-    leave_all = combine_leave_sources_for_daily_stats(
-        globals().get('df_lich', pd.DataFrame()),
-        globals().get('df_leave_secondary', pd.DataFrame()),
-        globals().get('df_backup', pd.DataFrame()),
-    )
-    already_emailed = _bang_tour_email_sent_keys() if send_email else set()
-    email_candidates = []
-    audit_rows = []
-    saved_count = 0
-    for _, r in result_df.iterrows():
-        reason = str(r.get('Loại vi phạm', '')).strip()
-        penalty = float(r.get('Mức phạt', 0) or 0)
-        ok, msg = save_lich_nghi_to_backup_sheet(
-            target_date.strftime('%d/%m/%Y'), str(r.get('Tên nhân viên', '')), reason,
-            str(r.get('Chi tiết', '')), 0.0, 0.0, penalty, 'Auto update',
-            df_main_source=leave_all,
-        )
-        if ok:
-            saved_count += 1
-        duplicate_existing = ('đã có loại nghỉ' in str(msg).casefold()) or ('không được đăng ký trùng' in str(msg).casefold())
-        mail_key = (
-            target_date.strftime('%d/%m/%Y'),
-            normalize_login_name(r.get('Tên nhân viên', '')),
-            normalize_leave_reason(reason),
-        )
-        item = r.to_dict(); item['save_message'] = msg
-        if send_email and (ok or duplicate_existing) and mail_key not in already_emailed:
-            email_candidates.append(item)
-        audit_rows.append({
-            'Ngày': target_date.strftime('%d/%m/%Y'),
-            'Tên nhân viên': str(r.get('Tên nhân viên', '')),
-            'Loại vi phạm': reason,
-            'Số phút': float(r.get('Số phút', 0) or 0),
-            'Mức phạt': penalty,
-            'Ghi phiếu phạt': '1' if ok else ('Đã tồn tại' if duplicate_existing else '0'),
-            'Email': '',
-            'Chi tiết': str(msg),
-            'Cập nhật lúc': datetime.now(VN_TZ).strftime('%d/%m/%Y %H:%M:%S'),
-            'Người cập nhật': 'Auto update',
-        })
-
-    email_results = {}
-    if send_email and email_candidates:
-        sender_email, sender_pass = get_smtp_sender_credentials()
-        cc = _attendance_role_cc_emails(credentials_df)
-        grouped = {}
-        for item in email_candidates:
-            grouped.setdefault(str(item.get('Tên nhân viên', '')), []).append(item)
-        for emp, rows in grouped.items():
-            hit = credentials_df[
-                credentials_df['Tên nhân viên'].astype(str).apply(normalize_login_name) == normalize_login_name(emp)
-            ] if isinstance(credentials_df, pd.DataFrame) and 'Tên nhân viên' in credentials_df.columns else pd.DataFrame()
-            to_email = str(hit.iloc[0].get('Email', '')).strip() if not hit.empty else ''
-            if not sender_email or not sender_pass:
-                email_results[emp] = (False, 'Chưa cấu hình SMTP_APP_PASSWORD.')
-            else:
-                email_results[emp] = send_violation_notice_email(
-                    sender_email, sender_pass, to_email, cc, emp, target_date, rows
-                )
-        for row in audit_rows:
-            emp = row['Tên nhân viên']
-            if emp in email_results:
-                row['Email'] = '1' if email_results[emp][0] else '0'
-                if not email_results[emp][0]:
-                    row['Chi tiết'] = str(row['Chi tiết']) + ' | Email: ' + str(email_results[emp][1])
-
-    _bang_tour_append_audit_rows(audit_rows)
-    _clear_dynamic_data_caches()
-    sent_count = sum(1 for ok_mail, _ in email_results.values() if ok_mail)
-    zero_penalty = int((pd.to_numeric(result_df['Mức phạt'], errors='coerce').fillna(0) <= 0).sum()) if 'Mức phạt' in result_df.columns else 0
-    suffix = f'; {zero_penalty} dòng chưa có mức phạt trong LoaiNghi' if zero_penalty else ''
-    return True, (
-        f'Đối soát Bảng tour: {len(result_df)} vi phạm; đã ghi mới {saved_count} phiếu; '
-        f'đã gửi {sent_count} email{suffix}.'
-    ), result_df
-
-
 def combine_leave_sources_for_daily_stats(*sources):
     """
     Hợp nhất một hoặc nhiều nguồn lịch nghỉ. Loại trùng theo:
@@ -5955,713 +4644,62 @@ def combine_leave_sources_for_daily_stats(*sources):
     return combined.reset_index(drop=True)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=60)
 def load_lich_nghi(url):
-    """
-    Tự tải Nguồn 3 từ Google Drive và tự nhận diện:
-    - XLSX / XLSM  -> openpyxl
-    - XLSB         -> pyxlsb (nhận diện bằng xl/workbook.bin)
-    - XLS cũ       -> xlrd (OLE Compound File)
-
-    Ưu tiên tải bằng Google Drive API có xác thực qua service account/runtime identity.
-    Trả về:
-        df_lich
-        df_nv_excel
-        df_loai_nghi
-    """
-    temp_file = f"temp_lichnghi_{os.getpid()}_{time.time_ns()}"
-
     try:
-        # =====================================================
-        # 1. LẤY FILE ID NGUỒN 3
-        # =====================================================
-        match = re.search(r'/d/([^/]+)', str(url or ''))
-        file_id = match.group(1) if match else str(SHEET_CHINH_ID)
-
+        file_id = url.split('/d/')[1].split('/')[0]
+        temp_file = "temp_lichnghi.xlsb"
         download_file_from_google_drive(file_id, temp_file)
-
-        if not os.path.exists(temp_file) or os.path.getsize(temp_file) <= 0:
-            raise RuntimeError("Nguồn 3 tải về bị rỗng hoặc không tồn tại.")
-
-        # =====================================================
-        # 2. NHẬN DIỆN ĐỊNH DẠNG EXCEL
-        # =====================================================
-        detected_engine = _detect_excel_engine_from_file(temp_file)
-        engines_to_try = [detected_engine] if detected_engine else []
-
-        # =====================================================
-        # 3. NẾU KHÔNG NHẬN DIỆN ĐƯỢC
-        # =====================================================
-        if not engines_to_try:
-            preview = ""
-            try:
-                with open(temp_file, "r", encoding="utf-8", errors="ignore") as f:
-                    preview = f.read(500)
-            except Exception:
-                pass
-
-            if "<html" in preview.lower():
-                raise RuntimeError(
-                    "Google Drive trả trang HTML thay vì file Excel. "
-                    "Hãy chia sẻ file Nguồn 3 cho service account đang chạy Vera-Spa "
-                    "hoặc bật quyền truy cập phù hợp."
-                )
-
-            if "accounts.google" in preview.lower():
-                raise RuntimeError(
-                    "Google Drive yêu cầu đăng nhập để tải Nguồn 3. "
-                    "Hãy cấp quyền Viewer cho service account Vera-Spa."
-                )
-
-            raise RuntimeError(
-                "Nguồn 3 tải về không nhận diện được workbook XLS/XLSB/XLSX/XLSM hợp lệ."
-            )
-
-        # =====================================================
-        # 4. THỬ ĐỌC WORKBOOK BẰNG CÁC ENGINE PHÙ HỢP
-        # =====================================================
-        xls = None
-        read_errors = []
-
-        required_sheets = ["LichNghi", "DanhSachNV", "LoaiNghi"]
-
-        for engine in engines_to_try:
-            try:
-                xls = pd.read_excel(
-                    temp_file,
-                    sheet_name=required_sheets,
-                    engine=engine,
-                )
-
-                if not isinstance(xls, dict):
-                    raise RuntimeError("Không đọc được danh sách sheet từ Nguồn 3.")
-
-                missing_sheets = [s for s in required_sheets if s not in xls]
-                if missing_sheets:
-                    raise RuntimeError("Thiếu sheet: " + ", ".join(missing_sheets))
-
-                break
-
-            except Exception as e:
-                read_errors.append(f"{engine}: {type(e).__name__}: {e}")
-                xls = None
-
-        if xls is None:
-            raise RuntimeError(
-                "Không đọc được Nguồn 3 bằng các định dạng Excel hỗ trợ. "
-                + " | ".join(read_errors)
-            )
-
-        # =====================================================
-        # 5. ĐỌC SHEET LỊCH NGHỈ
-        # =====================================================
-        df_lich = xls["LichNghi"].iloc[:, :10].copy()
-
-        df_lich.columns = [
-            "Ngày",
-            "Tên nhân viên",
-            "Lý do nghỉ",
-            "Chi tiết",
-            "Số ngày tính",
-            "Số ngày phép cộng dồn",
-            "Phạt vi phạm",
-            "Ngày cập nhật",
-            "Giờ cập nhật",
-            "Người cập nhật",
-        ]
-
-        # =====================================================
-        # 6. CHUẨN HÓA NGÀY
-        # =====================================================
+        
+        xls = pd.read_excel(temp_file, sheet_name=['LichNghi', 'DanhSachNV', 'LoaiNghi'], engine='pyxlsb')
+        df_lich = xls['LichNghi'].iloc[:, :10]
+        df_lich.columns = ['Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 'Số ngày tính', 'Số ngày phép cộng dồn', 'Phạt vi phạm', 'Ngày cập nhật', 'Giờ cập nhật', 'Người cập nhật']
+        
+        if os.path.exists(temp_file): os.remove(temp_file)
+            
         def safe_date_parse(val):
             try:
-                if val is None:
-                    return pd.NaT
-
-                if isinstance(val, float) and pd.isna(val):
-                    return pd.NaT
-
-                if isinstance(val, datetime):
-                    return val.date()
-
-                if isinstance(val, date):
-                    return val
-
-                if isinstance(val, numbers.Number):
-                    return pd.to_datetime(
-                        float(val),
-                        unit="D",
-                        origin="1899-12-30",
-                    ).date()
-
-                text = str(val).strip()
-                if not text or text.casefold() in {"nan", "none", "nat"}:
-                    return pd.NaT
-
-                parsed = pd.to_datetime(
-                    text,
-                    dayfirst=True,
-                    errors="coerce",
-                )
-
-                if pd.isna(parsed):
-                    return pd.NaT
-
-                return parsed.date()
-
-            except Exception:
-                return pd.NaT
-
-        df_lich["Ngày"] = df_lich["Ngày"].apply(safe_date_parse)
-        df_lich = df_lich.dropna(subset=["Ngày"]).copy()
-
-        # =====================================================
-        # 7. CHUẨN HÓA SỐ
-        # =====================================================
-        df_lich["Số ngày tính"] = df_lich["Số ngày tính"].apply(
-            lambda v: _parse_leave_number(v, 0.0, money=False)
-        )
-
-        df_lich["Số ngày phép cộng dồn"] = df_lich[
-            "Số ngày phép cộng dồn"
-        ].apply(
-            lambda v: _parse_leave_number(v, 0.0, money=False)
-        )
-
-        df_lich["Phạt vi phạm"] = df_lich["Phạt vi phạm"].apply(
-            lambda v: _parse_leave_number(v, 0.0, money=True)
-        )
-
-        # =====================================================
-        # 8. FORMAT NGÀY CẬP NHẬT
-        # =====================================================
+                if pd.isna(val): return pd.NaT
+                if hasattr(val, 'date'): return val.date() 
+                if isinstance(val, (int, float)): return pd.to_datetime(val, unit='D', origin='1899-12-30').date()
+                s = str(val).strip().split(' ')[0]
+                return pd.to_datetime(s, dayfirst=True).date()
+            except: return pd.NaT
+                
+        df_lich['Ngày'] = df_lich['Ngày'].apply(safe_date_parse)
+        df_lich = df_lich.dropna(subset=['Ngày'])
+        df_lich['Số ngày tính'] = pd.to_numeric(df_lich['Số ngày tính'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
+        df_lich['Phạt vi phạm'] = pd.to_numeric(df_lich['Phạt vi phạm'].astype(str).str.replace(',', '').str.replace('-', '').str.strip(), errors='coerce').fillna(0)
+        
+        # FIX FORMAT NGÀY GIỜ CẬP NHẬT TỪ EXCEL SERIAL
         def format_excel_date(val):
-            if val is None:
-                return ""
-
-            if isinstance(val, float) and pd.isna(val):
-                return ""
-
+            if pd.isna(val) or str(val).strip() == "": return ""
             try:
-                if isinstance(val, numbers.Number):
-                    parsed = pd.to_datetime(
-                        float(val),
-                        unit="D",
-                        origin="1899-12-30",
-                    )
-                    return parsed.strftime("%d/%m/%Y")
+                if isinstance(val, (int, float)):
+                    return pd.to_datetime(val, unit='D', origin='1899-12-30').strftime('%d/%m/%Y')
+                if hasattr(val, 'strftime'): return val.strftime('%d/%m/%Y')
+                return str(val).split(' ')[0]
+            except: return str(val)
 
-                if isinstance(val, datetime):
-                    return val.strftime("%d/%m/%Y")
-
-                if isinstance(val, date):
-                    return val.strftime("%d/%m/%Y")
-
-                text = str(val).strip()
-                if not text:
-                    return ""
-
-                parsed = pd.to_datetime(
-                    text,
-                    dayfirst=True,
-                    errors="coerce",
-                )
-
-                if pd.notna(parsed):
-                    return parsed.strftime("%d/%m/%Y")
-
-                return text.split(" ")[0]
-
-            except Exception:
-                return str(val)
-
-        # =====================================================
-        # 9. FORMAT GIỜ CẬP NHẬT
-        # =====================================================
         def format_excel_time(val):
-            if val is None:
-                return ""
-
-            if isinstance(val, float) and pd.isna(val):
-                return ""
-
+            if pd.isna(val) or str(val).strip() == "": return ""
             try:
-                if isinstance(val, numbers.Number):
-                    number = float(val)
-                    fraction = number % 1
-                    seconds = int(round(fraction * 86400)) % 86400
-
-                    hh = seconds // 3600
-                    mm = (seconds % 3600) // 60
-                    ss = seconds % 60
-
-                    return f"{hh:02d}:{mm:02d}:{ss:02d}"
-
-                if isinstance(val, datetime):
-                    return val.strftime("%H:%M:%S")
-
-                if hasattr(val, "strftime"):
-                    return val.strftime("%H:%M:%S")
-
-                text = str(val).strip()
-                return text if text else ""
-
-            except Exception:
+                if isinstance(val, (int, float)):
+                    s = int(round(val * 86400))
+                    return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+                if hasattr(val, 'strftime'): return val.strftime('%H:%M:%S')
                 return str(val)
+            except: return str(val)
 
-        df_lich["Ngày cập nhật"] = df_lich["Ngày cập nhật"].apply(
-            format_excel_date
-        )
-        df_lich["Giờ cập nhật"] = df_lich["Giờ cập nhật"].apply(
-            format_excel_time
-        )
-
-        # =====================================================
-        # 10. DANH SÁCH NHÂN VIÊN
-        # =====================================================
-        df_nv_excel = xls["DanhSachNV"].copy()
-
-        if "Tên nhân viên" in df_nv_excel.columns:
-            df_nv_excel = df_nv_excel.dropna(
-                subset=["Tên nhân viên"]
-            ).copy()
-
-            df_nv_excel["Tên nhân viên"] = (
-                df_nv_excel["Tên nhân viên"].astype(str).str.strip()
-            )
-
-            df_nv_excel = df_nv_excel[
-                df_nv_excel["Tên nhân viên"] != ""
-            ].copy()
-
-        # =====================================================
-        # 11. DANH MỤC LOẠI NGHỈ
-        # =====================================================
-        df_loai_nghi = xls["LoaiNghi"].copy()
-
-        # =====================================================
-        # 12. XÓA LỖI CŨ TRONG SESSION
-        # =====================================================
-        try:
-            st.session_state.pop("source3_last_error", None)
-        except Exception:
-            pass
-
-        return df_lich, df_nv_excel, df_loai_nghi
-
+        if 'Ngày cập nhật' in df_lich.columns:
+            df_lich['Ngày cập nhật'] = df_lich['Ngày cập nhật'].apply(format_excel_date)
+        if 'Giờ cập nhật' in df_lich.columns:
+            df_lich['Giờ cập nhật'] = df_lich['Giờ cập nhật'].apply(format_excel_time)
+            
+        df_nv_excel = xls['DanhSachNV'].dropna(subset=['Tên nhân viên'])
+        return df_lich, df_nv_excel, xls['LoaiNghi']
     except Exception as e:
-        # Không làm crash toàn app. Lưu lỗi để giao diện hiển thị cho Admin.
-        try:
-            st.session_state["source3_last_error"] = str(e)
-        except Exception:
-            pass
-
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    finally:
-        try:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-        except Exception:
-            pass
-
-# ==========================================================
-# V83 - ĐỐI SOÁT 3 NGUỒN / AUTO UPDATE VI PHẠM
-# ==========================================================
-ATTENDANCE_EXEMPT_LEAVE_NAMES = {
-    normalize_login_name('Nghỉ CÓ phép'),
-    normalize_login_name('Nghỉ KHÔNG phép'),
-    normalize_login_name('Nghỉ CUỐI TUẦN CÓ phép'),
-    normalize_login_name('Nghỉ CUỐI TUẦN KHÔNG phép'),
-    normalize_login_name('Nghỉ phát sinh'),
-    normalize_login_name('Nghỉ bệnh có giấy khám hoặc được quản lý duyệt'),
-    normalize_login_name('Nghỉ đám hiếu'),
-    normalize_login_name('Leader nghỉ phép theo chính sách'),
-    normalize_login_name('Nghỉ Phép năm'),
-}
-
-
-def is_attendance_exempt_leave_reason(value):
-    key = normalize_login_name(clean_leave_reason_display(value))
-    if not key:
-        return False
-    if key in ATTENDANCE_EXEMPT_LEAVE_NAMES:
-        return True
-    # Chấp nhận biến thể viết hoa/thêm mô tả nhưng chỉ với nhóm NGHỈ, tránh coi
-    # "Đi trễ không phép" là lý do miễn lỗi không check mặt.
-    if key.startswith('nghi '):
-        tokens = ['co phep', 'khong phep', 'cuoi tuan', 'phat sinh', 'benh', 'dam hieu', 'phep nam']
-        if any(t in key for t in tokens):
-            return True
-    if key.startswith('leader nghi phep'):
-        return True
-    return False
-
-
-def _attendance_permission_reason_exists(reasons, kind):
-    keys = [normalize_login_name(x) for x in reasons]
-    if kind == 'late':
-        return any(('di tre' in k or 'vao muon' in k) and 'co phep' in k and 'khong phep' not in k for k in keys)
-    if kind == 'early':
-        return any(('ve som' in k or 'ra som' in k) and 'co phep' in k and 'khong phep' not in k for k in keys)
-    return False
-
-
-def _attendance_penalty_for_reason(reason, default=0.0):
-    try:
-        catalog = build_leave_reason_catalog(globals().get('df_loai_nghi', pd.DataFrame()))
-        item = catalog.get(normalize_leave_reason(reason)) or {}
-        value = float(item.get('penalty', default) or default)
-        return value
-    except Exception:
-        return float(default)
-
-
-def _attendance_active_employees(credentials_df):
-    if not isinstance(credentials_df, pd.DataFrame) or credentials_df.empty:
-        return []
-    status_map = load_employment_status_map()
-    out = []
-    for _, r in credentials_df.iterrows():
-        role = str(r.get('Phân quyền','')).strip().lower()
-        if role not in {'nhanvien','leader'}:
-            continue
-        name = str(r.get('Tên nhân viên','')).strip()
-        if not name:
-            continue
-        status = status_map.get(normalize_login_name(name), EMPLOYMENT_STATUS_ACTIVE)
-        if normalize_employment_status_value(status) != EMPLOYMENT_STATUS_ACTIVE:
-            continue
-        out.append(name)
-    return sort_employee_names(out)
-
-
-def _attendance_timesoft_alias_maps():
-    mapping, _ = load_timesoft_employee_mapping()
-    by_name, by_code, by_account = {}, {}, {}
-    if isinstance(mapping, pd.DataFrame):
-        for _, r in mapping.iterrows():
-            vera = str(r.get('Tên nhân viên Vera','')).strip()
-            if not vera:
-                continue
-            ts_name = normalize_login_name(r.get('TimeSoft tên',''))
-            ts_code = normalize_login_name(r.get('TimeSoft mã NV',''))
-            ts_account = normalize_login_name(r.get('TimeSoft tài khoản',''))
-            if ts_name: by_name[ts_name] = vera
-            if ts_code: by_code[ts_code] = vera
-            if ts_account: by_account[ts_account] = vera
-    return by_name, by_code, by_account
-
-
-def prepare_timesoft_checkin_for_reconciliation(checkin_df, target_date):
-    """Chuẩn hóa check-in và phân biệt *có dòng report* với *thực sự có check-in mặt*."""
-    if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
-        return pd.DataFrame(columns=['VeraName','LateMinutes','EarlyMinutes','HasCheckin'])
-    d = checkin_df.copy()
-    date_col = _guess_dataframe_column(d, preferred=('WorkDateStr','WorkDate','CreateDate'), contains=('workdate','createdate'))
-    name_col = _guess_dataframe_column(d, preferred=('employeeInfo.Name','EmployeeName','Name'), contains=('employeeinfoname','employeename'))
-    code_col = _guess_dataframe_column(d, preferred=('employeeInfo.EmployeeCode','EmployeeCode'), contains=('employeecode',))
-    account_col = _guess_dataframe_column(d, preferred=('employeeInfo.UserName','UserName','Account'), contains=('username','account'))
-    late_col = _guess_dataframe_column(d, preferred=('TotalMinuteInGoLate',), contains=('totalminuteingolate','golate','lateminute'))
-    early_col = _guess_dataframe_column(d, preferred=('TotalMinuteBackHomeEarly',), contains=('totalminutebackhomeearly','homeearly','earlyminute'))
-    checkin_col = _guess_dataframe_column(
-        d, preferred=('MachineTimeCheckInStr','MachineTimeCheckIn','TimeCheckInStr','CheckIn'),
-        contains=('machinetimecheckin','timecheckin','checkin')
-    )
-    checkin_count_col = _guess_dataframe_column(
-        d, preferred=('TotalCheckInOneDay','TotalCheckIn'), contains=('totalcheckinoneday','totalcheckin')
-    )
-
-    if date_col:
-        d['__date'] = d[date_col].apply(_parse_vn_date)
-        d = d[d['__date'] == target_date].copy()
-    by_name, by_code, by_account = _attendance_timesoft_alias_maps()
-
-    def resolve(row):
-        nm_raw = str(row.get(name_col,'')).strip() if name_col else ''
-        code_raw = str(row.get(code_col,'')).strip() if code_col else ''
-        acc_raw = str(row.get(account_col,'')).strip() if account_col else ''
-        for key, mp in [
-            (normalize_login_name(nm_raw), by_name),
-            (normalize_login_name(code_raw), by_code),
-            (normalize_login_name(acc_raw), by_account),
-        ]:
-            if key and key in mp:
-                return mp[key]
-        return nm_raw
-
-    if d.empty:
-        return pd.DataFrame(columns=['VeraName','LateMinutes','EarlyMinutes','HasCheckin'])
-    d['VeraName'] = d.apply(resolve, axis=1)
-    d['LateMinutes'] = pd.to_numeric(d[late_col], errors='coerce').fillna(0) if late_col else 0
-    d['EarlyMinutes'] = pd.to_numeric(d[early_col], errors='coerce').fillna(0) if early_col else 0
-
-    def _has_checkin(row):
-        detected_indicator = False
-        if checkin_count_col:
-            detected_indicator = True
-            try:
-                if float(pd.to_numeric(row.get(checkin_count_col, 0), errors='coerce') or 0) > 0:
-                    return True
-            except Exception:
-                pass
-        if checkin_col:
-            detected_indicator = True
-            raw = str(row.get(checkin_col, '') or '').strip()
-            key = normalize_login_name(raw)
-            if key not in {'', 'nan', 'none', 'nat', '0', '-', '--'}:
-                return True
-        # Nếu schema TimeSoft đổi và không còn cột nhận diện, ưu tiên tránh phạt oan.
-        return True if not detected_indicator else False
-
-    d['HasCheckin'] = d.apply(_has_checkin, axis=1)
-    return d
-
-
-def _get_attendance_audit_worksheet():
-    headers = [
-        'Ngày', 'Tên nhân viên', 'Loại vi phạm', 'Số phút', 'Mức phạt',
-        'Ghi phiếu phạt', 'Email', 'Chi tiết', 'Cập nhật lúc', 'Người cập nhật'
-    ]
-    try:
-        client = get_gspread_client()
-        if not client:
-            return None, headers
-        ss = client.open_by_key(SHEET_MAT_KHAU_ID)
-        ws = _get_or_create_worksheet(ss, ATTENDANCE_AUDIT_WORKSHEET, rows=3000, cols=len(headers)+2)
-        current = _gs_call_with_backoff(ws.row_values, 1)
-        if current[:len(headers)] != headers:
-            gspread_update_range(ws, f"A1:J1", [headers])
-        return ws, headers
-    except Exception:
-        return None, headers
-
-
-def _attendance_append_audit_rows(rows):
-    if not rows:
-        return
-    ws, headers = _get_attendance_audit_worksheet()
-    if ws is None:
-        return
-    values = [[r.get(h,'') for h in headers] for r in rows]
-    try:
-        _gs_call_with_backoff(ws.append_rows, values, value_input_option='USER_ENTERED')
-    except Exception:
-        pass
-
-
-def _attendance_email_sent_keys():
-    """Các vi phạm đã gửi mail thành công; dùng để chạy lại 18:00 mà không spam."""
-    ws, headers = _get_attendance_audit_worksheet()
-    if ws is None:
-        return set()
-    try:
-        vals = _gs_call_with_backoff(ws.get_all_values)
-        if len(vals) <= 1:
-            return set()
-        idx = {str(h): i for i, h in enumerate(vals[0])}
-        out = set()
-        for row in vals[1:]:
-            def cell(name):
-                i = idx.get(name, -1)
-                return row[i] if i >= 0 and i < len(row) else ''
-            if str(cell('Email')).strip().lower() not in {'1','true','yes','đã gửi','da gui'}:
-                continue
-            out.add((
-                normalize_schedule_date(cell('Ngày')),
-                normalize_login_name(cell('Tên nhân viên')),
-                normalize_leave_reason(cell('Loại vi phạm')),
-            ))
-        return out
-    except Exception:
-        return set()
-
-
-def _attendance_role_cc_emails(credentials_df):
-    emails = [ATTENDANCE_AUTO_CC_EMAIL]
-    if isinstance(credentials_df, pd.DataFrame) and not credentials_df.empty:
-        for _, r in credentials_df.iterrows():
-            role = str(r.get('Phân quyền','')).strip().lower()
-            email = str(r.get('Email','')).strip()
-            if role in {'admin','quanly','letan'} and '@' in email:
-                emails.append(email)
-    out, seen = [], set()
-    for e in emails:
-        key = e.casefold()
-        if e and key not in seen:
-            out.append(e); seen.add(key)
-    return out
-
-
-def send_violation_notice_email(sender_email, sender_password, to_email, cc_emails, employee_name, target_date, violation_rows):
-    try:
-        if not to_email or '@' not in str(to_email):
-            return False, 'Nhân viên chưa có email hợp lệ.'
-        cc_emails = [x for x in (cc_emails or []) if x and '@' in str(x) and str(x).casefold() != str(to_email).casefold()]
-        detail_rows = ''.join(
-            f"<tr><td style='padding:6px;border:1px solid #D9D9D9'>{str(r.get('Loại vi phạm',''))}</td>"
-            f"<td style='padding:6px;border:1px solid #D9D9D9;text-align:right'>{float(r.get('Số phút',0) or 0):.0f}</td>"
-            f"<td style='padding:6px;border:1px solid #D9D9D9;text-align:right'>{float(r.get('Mức phạt',0) or 0):,.0f} VNĐ</td>"
-            f"<td style='padding:6px;border:1px solid #D9D9D9'>{str(r.get('Chi tiết',''))}</td></tr>"
-            for r in violation_rows
-        )
-        html = f"""
-        <html><body style='font-family:Arial,sans-serif'>
-        <p>Chào <b>{employee_name}</b>,</p>
-        <p>Hệ thống Vera-Spa đã đối soát điểm danh ngày <b>{target_date.strftime('%d/%m/%Y')}</b> và ghi nhận:</p>
-        <table style='border-collapse:collapse;min-width:700px'>
-        <tr><th style='padding:6px;border:1px solid #D9D9D9;background:#DCE6F1'>Vi phạm</th>
-        <th style='padding:6px;border:1px solid #D9D9D9;background:#DCE6F1'>Số phút</th>
-        <th style='padding:6px;border:1px solid #D9D9D9;background:#DCE6F1'>Mức phạt</th>
-        <th style='padding:6px;border:1px solid #D9D9D9;background:#DCE6F1'>Chi tiết</th></tr>
-        {detail_rows}
-        </table>
-        <p>Nếu dữ liệu chưa chính xác, vui lòng phản hồi với Lễ tân/Quản lý để kiểm tra lại nguồn TimeSoft và lịch nghỉ.</p>
-        <p>Trân trọng,<br><b>VERA SPA</b><br>
-        <b>Địa chỉ:</b> 193 Trương Định, Tam Hiệp, Đồng Nai<br>
-        <b>Điện Thoại:</b> 0833229939</p>
-        </body></html>
-        """
-        msg = MIMEMultipart()
-        msg['From'] = f"Vera Spa <{sender_email}>"
-        msg['To'] = str(to_email)
-        if cc_emails:
-            msg['Cc'] = ', '.join(cc_emails)
-        msg['Subject'] = f"Thông báo vi phạm điểm danh {target_date.strftime('%d/%m/%Y')} - {employee_name}"
-        msg.attach(MIMEText(html, 'html'))
-        server = smtplib.SMTP('smtp.gmail.com', 587, timeout=30)
-        server.starttls(); server.login(sender_email, sender_password); server.send_message(msg); server.quit()
-        return True, 'Đã gửi email.'
-    except Exception as e:
-        return False, str(e)
-
-
-def run_attendance_reconciliation(target_date, credentials_df=None, checkin_df=None, commit=False, send_email=False):
-    """Đối soát TimeSoft + Nguồn 2 + Nguồn 3 và tùy chọn Auto update phiếu phạt/email.
-
-    Idempotent ở lớp ghi lịch: save_lich_nghi_to_backup_sheet chặn trùng nhân viên+ngày+loại.
-    """
-    if isinstance(target_date, datetime):
-        target_date = target_date.date()
-    if not isinstance(target_date, date):
-        return False, 'Ngày đối soát không hợp lệ.', pd.DataFrame()
-    credentials_df = credentials_df if isinstance(credentials_df, pd.DataFrame) else globals().get('df_credentials', pd.DataFrame())
-
-    # Nguồn 1: ưu tiên snapshot nền, thiếu thì gọi riêng API check-in.
-    if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
-        snap = _timesoft_read_background_snapshot(target_date)
-        checkin_df = snap.get('employee_checkin') if isinstance(snap, dict) else pd.DataFrame()
-    if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
-        ok, msg, checkin_df, _ = timesoft_fetch_checkin_only(target_date, target_date)
-        if not ok:
-            return False, f'Không lấy được Nguồn 1 TimeSoft: {msg}', pd.DataFrame()
-
-    prepared_checkin = prepare_timesoft_checkin_for_reconciliation(checkin_df, target_date)
-
-    # Nguồn 2 + Nguồn 3 + sheet phụ: hợp nhất rồi loại trùng.
-    leave_all = combine_leave_sources_for_daily_stats(
-        globals().get('df_lich', pd.DataFrame()),
-        globals().get('df_leave_secondary', pd.DataFrame()),
-        globals().get('df_backup', pd.DataFrame()),
-    )
-    leave_day = leave_all[leave_all['Ngày'] == target_date].copy() if not leave_all.empty else pd.DataFrame(columns=leave_all.columns)
-
-    violations = []
-    active_employees = _attendance_active_employees(credentials_df)
-    for emp in active_employees:
-        emp_key = normalize_login_name(emp)
-        emp_chk = prepared_checkin[prepared_checkin['VeraName'].astype(str).apply(normalize_login_name) == emp_key].copy() if not prepared_checkin.empty else pd.DataFrame()
-        emp_leave = leave_day[leave_day['Tên nhân viên'].astype(str).apply(normalize_login_name) == emp_key].copy() if not leave_day.empty else pd.DataFrame()
-        reasons = emp_leave['Lý do nghỉ'].astype(str).tolist() if not emp_leave.empty else []
-
-        emp_valid_chk = emp_chk[emp_chk.get('HasCheckin', pd.Series(False, index=emp_chk.index)).fillna(False).astype(bool)].copy() if not emp_chk.empty else pd.DataFrame()
-        if emp_valid_chk.empty:
-            if not any(is_attendance_exempt_leave_reason(x) for x in reasons):
-                violations.append({
-                    'Ngày': target_date, 'Tên nhân viên': emp, 'Loại vi phạm': 'Không check mặt',
-                    'Số phút': 0, 'Mức phạt': _attendance_penalty_for_reason('Không check mặt', 100000),
-                    'Chi tiết': 'Auto update · Không có dữ liệu check-in mặt TimeSoft và không có lịch nghỉ hợp lệ ở Nguồn 2/Nguồn 3.'
-                })
-            continue
-
-        late = float(pd.to_numeric(emp_valid_chk.get('LateMinutes', pd.Series(dtype=float)), errors='coerce').fillna(0).max() or 0)
-        early = float(pd.to_numeric(emp_valid_chk.get('EarlyMinutes', pd.Series(dtype=float)), errors='coerce').fillna(0).max() or 0)
-        if late > 0 and not _attendance_permission_reason_exists(reasons, 'late'):
-            violations.append({
-                'Ngày': target_date, 'Tên nhân viên': emp, 'Loại vi phạm': 'Đi trễ không phép',
-                'Số phút': late, 'Mức phạt': _attendance_penalty_for_reason('Đi trễ không phép', 0),
-                'Chi tiết': f'Auto update · TimeSoft ghi nhận đi trễ {late:.0f} phút.'
-            })
-        if early > 0 and not _attendance_permission_reason_exists(reasons, 'early'):
-            violations.append({
-                'Ngày': target_date, 'Tên nhân viên': emp, 'Loại vi phạm': 'Về sớm không phép',
-                'Số phút': early, 'Mức phạt': _attendance_penalty_for_reason('Về sớm không phép', 0),
-                'Chi tiết': f'Auto update · TimeSoft ghi nhận về sớm {early:.0f} phút.'
-            })
-
-    result_df = pd.DataFrame(violations, columns=['Ngày','Tên nhân viên','Loại vi phạm','Số phút','Mức phạt','Chi tiết'])
-    if result_df.empty or not commit:
-        return True, f'Đối soát xong: phát hiện {len(result_df)} vi phạm.', result_df
-
-    newly_saved = []
-    email_candidates = []
-    audit_rows = []
-    already_emailed = _attendance_email_sent_keys() if send_email else set()
-    for _, r in result_df.iterrows():
-        ok, msg = save_lich_nghi_to_backup_sheet(
-            target_date.strftime('%d/%m/%Y'), str(r['Tên nhân viên']), str(r['Loại vi phạm']),
-            str(r['Chi tiết']), 0.0, 0.0, float(r['Mức phạt'] or 0), 'Auto update',
-            df_main_source=leave_all
-        )
-        item = r.to_dict(); item['save_message'] = msg
-        if ok:
-            newly_saved.append(item)
-        # Nếu phiếu đã tồn tại từ một lần chạy trước 18:00 nhưng chưa gửi mail,
-        # lần chạy 18:00 vẫn được phép gửi đúng một lần.
-        duplicate_existing = ('đã có loại nghỉ' in str(msg).casefold()) or ('không được đăng ký trùng' in str(msg).casefold())
-        mail_key = (
-            target_date.strftime('%d/%m/%Y'),
-            normalize_login_name(r['Tên nhân viên']),
-            normalize_leave_reason(r['Loại vi phạm']),
-        )
-        if send_email and (ok or duplicate_existing) and mail_key not in already_emailed:
-            email_candidates.append(item)
-        audit_rows.append({
-            'Ngày': target_date.strftime('%d/%m/%Y'), 'Tên nhân viên': str(r['Tên nhân viên']),
-            'Loại vi phạm': str(r['Loại vi phạm']), 'Số phút': float(r['Số phút'] or 0),
-            'Mức phạt': float(r['Mức phạt'] or 0), 'Ghi phiếu phạt': '1' if ok else ('Đã tồn tại' if duplicate_existing else '0'),
-            'Email': '', 'Chi tiết': str(msg), 'Cập nhật lúc': datetime.now(VN_TZ).strftime('%d/%m/%Y %H:%M:%S'),
-            'Người cập nhật': 'Auto update'
-        })
-
-    email_results = {}
-    if send_email and email_candidates:
-        sender_email, sender_pass = get_smtp_sender_credentials()
-        cc = _attendance_role_cc_emails(credentials_df)
-        grouped = {}
-        for item in email_candidates:
-            grouped.setdefault(str(item['Tên nhân viên']), []).append(item)
-        for emp, rows in grouped.items():
-            hit = credentials_df[credentials_df['Tên nhân viên'].astype(str).apply(normalize_login_name) == normalize_login_name(emp)] if isinstance(credentials_df, pd.DataFrame) else pd.DataFrame()
-            to_email = str(hit.iloc[0].get('Email','')).strip() if not hit.empty else ''
-            if not sender_email or not sender_pass:
-                email_results[emp] = (False, 'Chưa cấu hình SMTP_APP_PASSWORD.')
-            else:
-                email_results[emp] = send_violation_notice_email(sender_email, sender_pass, to_email, cc, emp, target_date, rows)
-        for row in audit_rows:
-            emp = row['Tên nhân viên']
-            if emp in email_results:
-                row['Email'] = '1' if email_results[emp][0] else '0'
-                if not email_results[emp][0]:
-                    row['Chi tiết'] = str(row['Chi tiết']) + ' | Email: ' + str(email_results[emp][1])
-
-    _attendance_append_audit_rows(audit_rows)
-    _clear_dynamic_data_caches()
-    sent_count = sum(1 for ok_mail, _ in email_results.values() if ok_mail)
-    return True, (
-        f'Đối soát xong: {len(result_df)} vi phạm; đã ghi mới {len(newly_saved)} phiếu phạt'
-        + (f'; đã gửi {sent_count} email.' if send_email else '.')
-    ), result_df
 
 @st.cache_data(show_spinner=False)
 def to_excel(df):
@@ -6724,42 +4762,25 @@ def _get_or_create_worksheet(spreadsheet, title, rows=1000, cols=30):
 # ==========================================================
 UI_THEME_HEADERS = ["ThemeKey", "Cấu hình JSON", "Cập nhật lúc", "Người cập nhật"]
 UI_THEME_KEY = "global"
-UI_THEME_GROUP_ORDER = ["main_title", "sub_title", "small_title", "label_content", "dropdown", "table"]
+UI_THEME_GROUP_ORDER = ["main_title", "sub_title", "small_title", "label_content", "table"]
 UI_THEME_GROUP_LABELS = {
     "main_title": "Tiêu đề lớn",
     "sub_title": "Tiêu đề con",
     "small_title": "Tiêu đề nhỏ",
     "label_content": "Label / Nội dung",
-    "dropdown": "Dropdown / Box chọn",
     "table": "Bảng",
 }
 UI_THEME_FONT_OPTIONS = [
     "Roboto", "Arial", "Tahoma", "Verdana", "Times New Roman", "Georgia",
     "Courier New", "Cinzel Decorative"
 ]
-UI_THEME_FONT_STYLE_OPTIONS = ["Thường", "Đậm", "Nghiêng", "Đậm + Nghiêng"]
-UI_THEME_ALIGN_OPTIONS = ["left", "center", "right"]
 UI_THEME_EFFECT_OPTIONS = ["Không", "Bóng nhẹ", "Bóng nổi", "Hover nâng", "Gradient nhẹ"]
-
-
-def _theme_default(desktop_size, mobile_size, text_color, bg_color, *, border_color="#D9D9D9", border_width=0, border_radius=6):
-    return {
-        "desktop_size": desktop_size, "mobile_size": mobile_size, "font_family": "Roboto",
-        "font_style": "Thường", "align": "left",
-        "text_color": text_color, "bg_color": bg_color,
-        "border_color": border_color, "border_width": border_width, "border_radius": border_radius,
-        "effect": "Không",
-    }
-
-
 UI_THEME_DEFAULT = {
-    "main_title": _theme_default(28, 28, "#222222", "#D9D9D9"),
-    "sub_title": _theme_default(22, 22, "#222222", "#D9D9D9"),
-    "small_title": _theme_default(18, 18, "#222222", "#D9D9D9"),
-    "label_content": _theme_default(16, 16, "#333333", "#D9D9D9"),
-    # Mặc định mô phỏng box Cloud Scheduler: nền xanh rất nhạt, viền xanh, bo tròn.
-    "dropdown": _theme_default(14, 14, "#174EA6", "#EEF4FF", border_color="#AECBFA", border_width=1, border_radius=18),
-    "table": _theme_default(13, 13, "#333333", "#D9D9D9", border_color="#D9D9D9", border_width=1, border_radius=0),
+    "main_title": {"desktop_size": 28, "mobile_size": 28, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
+    "sub_title": {"desktop_size": 22, "mobile_size": 22, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
+    "small_title": {"desktop_size": 18, "mobile_size": 18, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
+    "label_content": {"desktop_size": 16, "mobile_size": 16, "font_family": "Roboto", "text_color": "#333333", "bg_color": "#D9D9D9", "effect": "Không"},
+    "table": {"desktop_size": 13, "mobile_size": 13, "font_family": "Roboto", "text_color": "#333333", "bg_color": "#D9D9D9", "effect": "Không"},
 }
 
 
@@ -6784,23 +4805,9 @@ def _normalized_theme_config(raw=None):
             mobile_size = max(8, min(48, int(float(incoming.get("mobile_size", base["mobile_size"])))))
         except Exception:
             mobile_size = int(base["mobile_size"])
-        try:
-            border_width = max(0, min(8, int(float(incoming.get("border_width", base.get("border_width", 0))))))
-        except Exception:
-            border_width = int(base.get("border_width", 0))
-        try:
-            border_radius = max(0, min(40, int(float(incoming.get("border_radius", base.get("border_radius", 6))))))
-        except Exception:
-            border_radius = int(base.get("border_radius", 6))
         font_family = str(incoming.get("font_family", base["font_family"]))
         if font_family not in UI_THEME_FONT_OPTIONS:
             font_family = base["font_family"]
-        font_style = str(incoming.get("font_style", base.get("font_style", "Thường")))
-        if font_style not in UI_THEME_FONT_STYLE_OPTIONS:
-            font_style = base.get("font_style", "Thường")
-        align = str(incoming.get("align", base.get("align", "left"))).lower()
-        if align not in UI_THEME_ALIGN_OPTIONS:
-            align = base.get("align", "left")
         effect = str(incoming.get("effect", base["effect"]))
         if effect not in UI_THEME_EFFECT_OPTIONS:
             effect = base["effect"]
@@ -6808,13 +4815,8 @@ def _normalized_theme_config(raw=None):
             "desktop_size": desktop_size,
             "mobile_size": mobile_size,
             "font_family": font_family,
-            "font_style": font_style,
-            "align": align,
             "text_color": _valid_theme_hex(incoming.get("text_color"), base["text_color"]),
             "bg_color": _valid_theme_hex(incoming.get("bg_color"), base["bg_color"]),
-            "border_color": _valid_theme_hex(incoming.get("border_color"), base.get("border_color", "#D9D9D9")),
-            "border_width": border_width,
-            "border_radius": border_radius,
             "effect": effect,
         }
     return result
@@ -6889,143 +4891,6 @@ def save_ui_theme_config(config, username):
         return False, f"Lỗi lưu cấu hình giao diện: {e}"
 
 
-# ==========================================================
-# V83 - THỨ TỰ MENU TOÀN HỆ THỐNG (ADMIN KÉO - THẢ)
-# ==========================================================
-UI_MENU_HEADERS = ["MenuKey", "Thứ tự JSON", "Cập nhật lúc", "Người cập nhật"]
-UI_MENU_KEY = "global"
-
-
-@st.cache_resource(show_spinner=False)
-def _ensure_ui_menu_storage():
-    try:
-        client = get_gspread_client()
-        if not client:
-            return None, "Chưa cấu hình quyền kết nối Google Sheets."
-        ss = client.open_by_key(SHEET_MAT_KHAU_ID)
-        ws = _get_or_create_worksheet(ss, UI_MENU_WORKSHEET, rows=20, cols=6)
-        header = _gs_call_with_backoff(ws.row_values, 1)
-        if header[:4] != UI_MENU_HEADERS:
-            gspread_update_range(ws, "A1:D1", [UI_MENU_HEADERS])
-        return ws, ""
-    except Exception as e:
-        return None, f"Lỗi khởi tạo cấu hình Menu: {e}"
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_ui_menu_order():
-    ws, err = _ensure_ui_menu_storage()
-    if err or ws is None:
-        return [], err
-    try:
-        values = _gs_call_with_backoff(ws.get_all_values)
-        for row in values[1:]:
-            if row and str(row[0]).strip() == UI_MENU_KEY:
-                try:
-                    raw = json.loads(row[1]) if len(row) > 1 and str(row[1]).strip() else []
-                except Exception:
-                    raw = []
-                return ([str(x) for x in raw] if isinstance(raw, list) else []), ""
-        return [], ""
-    except Exception as e:
-        return [], f"Lỗi đọc thứ tự Menu: {e}"
-
-
-def _clear_ui_menu_cache():
-    try:
-        load_ui_menu_order.clear()
-    except Exception:
-        pass
-
-
-def save_ui_menu_order(order, username):
-    ws, err = _ensure_ui_menu_storage()
-    if err or ws is None:
-        return False, err or "Không mở được sheet cấu hình Menu."
-    clean = []
-    seen = set()
-    for item in order or []:
-        name = str(item).strip()
-        if name and name not in seen:
-            clean.append(name); seen.add(name)
-    try:
-        values = _gs_call_with_backoff(ws.get_all_values)
-        row_idx = None
-        for idx2, row in enumerate(values[1:], start=2):
-            if row and str(row[0]).strip() == UI_MENU_KEY:
-                row_idx = idx2; break
-        now = datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S")
-        payload = [UI_MENU_KEY, json.dumps(clean, ensure_ascii=False), now, str(username)]
-        if row_idx:
-            gspread_update_range(ws, f"A{row_idx}:D{row_idx}", [payload])
-        else:
-            _gs_call_with_backoff(ws.append_row, payload, value_input_option="USER_ENTERED")
-        _clear_ui_menu_cache()
-        return True, "Đã lưu thứ tự Menu Chức năng và áp dụng cho toàn hệ thống."
-    except Exception as e:
-        return False, f"Lỗi lưu thứ tự Menu: {e}"
-
-
-def apply_ui_menu_order(default_order):
-    default_order = [str(x) for x in default_order]
-    saved, _ = load_ui_menu_order()
-    valid_saved = [x for x in saved if x in default_order]
-    return valid_saved + [x for x in default_order if x not in valid_saved]
-
-
-def render_admin_menu_drag_drop_editor(page_order, page_slugs):
-    """HTML5 Drag & Drop; nút Lưu truyền thứ tự về Streamlit bằng query parameter."""
-    if st.session_state.get("current_role") != "admin":
-        return
-    items = [
-        {"label": str(name), "slug": str(page_slugs.get(name, ""))}
-        for name in page_order if str(page_slugs.get(name, "")).strip()
-    ]
-    items_json = json.dumps(items, ensure_ascii=False)
-    height = max(380, min(760, 105 + len(items) * 42))
-    components.html(f"""
-    <div style="font-family:Arial,sans-serif;color:#202124">
-      <div style="margin:0 0 8px 0;color:#5f6368;font-size:13px">Giữ chuột vào ☰ rồi kéo lên/xuống. Bấm <b>Lưu thứ tự</b> để áp dụng cho mọi tài khoản.</div>
-      <div id="veraMenuDnD" style="display:flex;flex-direction:column;gap:6px"></div>
-      <button id="veraMenuSave" style="margin-top:10px;border:1px solid #AECBFA;background:#E8F0FE;color:#174EA6;border-radius:18px;padding:8px 18px;font-weight:700;cursor:pointer">💾 Lưu thứ tự Menu</button>
-    </div>
-    <script>
-    (() => {{
-      const items = {items_json};
-      const box = document.getElementById('veraMenuDnD');
-      let dragged = null;
-      function render() {{
-        box.innerHTML='';
-        items.forEach((it, idx) => {{
-          const row=document.createElement('div');
-          row.draggable=true; row.dataset.slug=it.slug;
-          row.style.cssText='display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid #AECBFA;border-radius:16px;background:#EEF4FF;color:#174EA6;cursor:grab;user-select:none;';
-          row.innerHTML=`<span style="font-weight:700">☰</span><span style="flex:1">${{it.label}}</span><span style="font-size:12px;color:#5f6368">${{idx+1}}</span>`;
-          row.addEventListener('dragstart',()=>{{dragged=it;row.style.opacity='.5';}});
-          row.addEventListener('dragend',()=>{{dragged=null;row.style.opacity='1';}});
-          row.addEventListener('dragover',(e)=>{{e.preventDefault();}});
-          row.addEventListener('drop',(e)=>{{
-            e.preventDefault(); if(!dragged || dragged===it) return;
-            const from=items.indexOf(dragged), to=items.indexOf(it);
-            items.splice(from,1); items.splice(to,0,dragged); render();
-          }});
-          box.appendChild(row);
-        }});
-      }}
-      render();
-      document.getElementById('veraMenuSave').addEventListener('click',()=>{{
-        try {{
-          const value=items.map(x=>x.slug).join(',');
-          const u=new URL(window.parent.location.href);
-          u.searchParams.set('save_menu_order', value);
-          window.parent.location.href=u.toString();
-        }} catch(e) {{ console.error(e); }}
-      }});
-    }})();
-    </script>
-    """, height=height, scrolling=True)
-
-
 def _theme_effect_css(effect, bg_color):
     effect = str(effect)
     if effect == "Bóng nhẹ":
@@ -7043,26 +4908,15 @@ def _theme_hover_css(effect):
     return ""
 
 
-def _theme_font_style_values(style_name):
-    style_name = str(style_name)
-    if style_name == "Đậm":
-        return "700", "normal"
-    if style_name == "Nghiêng":
-        return "400", "italic"
-    if style_name == "Đậm + Nghiêng":
-        return "700", "italic"
-    return "400", "normal"
-
-
 def render_global_ui_theme_css(config=None):
-    """Áp dụng theme Admin đã lưu cho desktop/mobile, gồm box chọn kiểu Cloud Scheduler."""
+    """Áp dụng theme đã lưu cho cả desktop + mobile bằng CSS override cuối cùng."""
     cfg = _normalized_theme_config(config)
     selectors = {
+        # Thêm selector có data-testid để thắng các rule màu/font mặc định của Streamlit.
         "main_title": "[data-testid='stMarkdownContainer'] h1,h1,.custom-main-title",
         "sub_title": "[data-testid='stMarkdownContainer'] h2,[data-testid='stMarkdownContainer'] h3,h2,h3",
         "small_title": "[data-testid='stMarkdownContainer'] h4,[data-testid='stMarkdownContainer'] h5,[data-testid='stMarkdownContainer'] h6,h4,h5,h6,[data-testid='stExpander'] details summary p",
-        "label_content": "p,.stText,[data-testid='stMarkdownContainer'],[data-testid='stWidgetLabel'],[data-testid='stWidgetLabel'] p,[data-testid='stWidgetLabel'] span,[data-testid='stWidgetLabel'] div",
-        "dropdown": "[data-testid='stSelectbox'] [data-baseweb='select']>div,[data-testid='stMultiSelect'] [data-baseweb='select']>div,[data-testid='stDateInput'] input,[data-testid='stTimeInput'] input",
+        "label_content": "p,.stText,[data-testid='stMarkdownContainer'],[data-testid='stWidgetLabel'],[data-testid='stWidgetLabel'] p,[data-testid='stWidgetLabel'] span,[data-testid='stWidgetLabel'] div,input,textarea,button,[data-baseweb='select']",
         "table": "table,table th,table td,[data-testid='stDataFrame'],[data-testid='stDataEditor'],[data-testid='stTable']",
     }
     desktop_rules = []
@@ -7074,62 +4928,45 @@ def render_global_ui_theme_css(config=None):
         font = str(item["font_family"]).replace("'", "")
         color = item["text_color"]
         bg = item["bg_color"]
-        fw, fs = _theme_font_style_values(item.get("font_style"))
-        align = item.get("align", "left")
-        border = f"{int(item.get('border_width', 0))}px solid {item.get('border_color', '#D9D9D9')}"
-        radius = int(item.get("border_radius", 0) or 0)
         effect_css = _theme_effect_css(item["effect"], bg)
-        common = (
-            f"font-family:'{font}',sans-serif!important;font-size:{item['desktop_size']}px!important;"
-            f"font-weight:{fw}!important;font-style:{fs}!important;color:{color}!important;"
-            f"text-align:{align}!important;"
-        )
-
+        # Background applies to headings/labels/table headers, not table data cells or free paragraphs.
         if key == "label_content":
-            desktop_rules.append(f"{selector}{{{common}}}")
+            bg_rule = ""
+            desktop_rules.append(
+                f"{selector}{{font-family:'{font}',sans-serif!important;font-size:{item['desktop_size']}px!important;color:{color}!important;}}"
+            )
             desktop_rules.append(
                 f"[data-testid='stWidgetLabel'],label[data-testid='stWidgetLabel'],div[data-testid='stWidgetLabel'],"
                 f"[data-testid='stSelectbox']>label,[data-testid='stMultiSelect']>label,[data-testid='stDateInput']>label,"
                 f"[data-testid='stTextInput']>label,[data-testid='stTextArea']>label,[data-testid='stNumberInput']>label,"
                 f"[data-testid='stFileUploader']>label,[data-testid='stRadio']>label,[data-testid='stCheckbox']>label,fieldset>legend"
-                f"{{background:{bg}!important;color:{color}!important;border:{border}!important;border-radius:{radius}px!important;{effect_css}}}"
-            )
-        elif key == "dropdown":
-            desktop_rules.append(
-                f"{selector}{{{common}background:{bg}!important;border:{border}!important;border-radius:{radius}px!important;"
-                f"min-height:38px!important;box-sizing:border-box!important;{effect_css}transition:transform .15s ease,box-shadow .15s ease!important;}}"
+                f"{{background:{bg}!important;color:{color}!important;{effect_css}}}"
             )
             desktop_rules.append(
-                f"[data-testid='stSelectbox'] [data-baseweb='select'] span,[data-testid='stMultiSelect'] [data-baseweb='select'] span,"
-                f"[data-testid='stDateInput'] input,[data-testid='stTimeInput'] input"
-                f"{{font-family:'{font}',sans-serif!important;font-size:{item['desktop_size']}px!important;font-weight:{fw}!important;"
-                f"font-style:{fs}!important;color:{color}!important;text-align:{align}!important;}}"
-            )
-            # Menu thả xuống giữ cùng font/màu chữ, nền sáng để dễ đọc.
-            desktop_rules.append(
-                f"[data-baseweb='popover'] [role='option'],[data-baseweb='menu'] [role='option']"
-                f"{{font-family:'{font}',sans-serif!important;font-size:{item['desktop_size']}px!important;color:{color}!important;}}"
+                f"[data-testid='stWidgetLabel'] p,[data-testid='stWidgetLabel'] span,[data-testid='stWidgetLabel'] div,fieldset>legend"
+                f"{{color:{color}!important;font-family:'{font}',sans-serif!important;font-size:{item['desktop_size']}px!important;}}"
             )
         elif key == "table":
-            desktop_rules.append(f"{selector}{{{common}}}")
+            desktop_rules.append(
+                f"{selector}{{font-family:'{font}',sans-serif!important;font-size:{item['desktop_size']}px!important;color:{color}!important;}}"
+            )
             desktop_rules.append(
                 f"table th,[data-testid='stDataFrame'] [role='columnheader'],[data-testid='stDataEditor'] [role='columnheader']"
-                f"{{background:{bg}!important;color:{color}!important;border:{border}!important;{effect_css}}}"
+                f"{{background:{bg}!important;color:{color}!important;{effect_css}}}"
             )
         else:
             desktop_rules.append(
-                f"{selector}{{{common}background:{bg}!important;border:{border}!important;border-radius:{radius}px!important;"
-                f"{effect_css}transition:transform .15s ease,box-shadow .15s ease!important;}}"
+                f"{selector}{{font-family:'{font}',sans-serif!important;font-size:{item['desktop_size']}px!important;color:{color}!important;background:{bg}!important;{effect_css}transition:transform .15s ease,box-shadow .15s ease!important;}}"
             )
-
         if item["effect"] == "Hover nâng":
             hover_rules.append(f"{selector}:hover{{{_theme_hover_css(item['effect'])}}}")
         mobile_rules.append(f"{selector}{{font-size:{item['mobile_size']}px!important;}}")
 
+    # Mobile: giảm padding/gap chứ không ép giảm cỡ chữ; Admin có cột riêng để tự đặt nếu muốn.
     css = "\n".join(desktop_rules + hover_rules)
     mobile_css = "\n".join(mobile_rules)
     st.markdown(f"""
-<style id="vera-global-theme-v83">
+<style id="vera-global-theme-v71">
 {css}
 @media (max-width:768px) {{
 {mobile_css}
@@ -7150,15 +4987,10 @@ def _theme_editor_df(config):
         rows.append({
             "Nhóm": UI_THEME_GROUP_LABELS[key],
             "Font chữ": item["font_family"],
-            "Kiểu chữ": item["font_style"],
-            "Căn lề": item["align"],
             "Cỡ chữ Web": item["desktop_size"],
             "Cỡ chữ Mobile": item["mobile_size"],
             "Màu chữ": item["text_color"],
             "Màu nền": item["bg_color"],
-            "Màu viền": item["border_color"],
-            "Độ dày viền": item["border_width"],
-            "Bo góc": item["border_radius"],
             "Hiệu ứng": item["effect"],
         })
     return pd.DataFrame(rows)
@@ -7175,33 +5007,29 @@ def _theme_from_editor_df(df):
             continue
         result[key] = {
             "font_family": row.get("Font chữ", "Roboto"),
-            "font_style": row.get("Kiểu chữ", "Thường"),
-            "align": row.get("Căn lề", "left"),
             "desktop_size": row.get("Cỡ chữ Web", UI_THEME_DEFAULT[key]["desktop_size"]),
             "mobile_size": row.get("Cỡ chữ Mobile", UI_THEME_DEFAULT[key]["mobile_size"]),
             "text_color": row.get("Màu chữ", UI_THEME_DEFAULT[key]["text_color"]),
             "bg_color": row.get("Màu nền", UI_THEME_DEFAULT[key]["bg_color"]),
-            "border_color": row.get("Màu viền", UI_THEME_DEFAULT[key]["border_color"]),
-            "border_width": row.get("Độ dày viền", UI_THEME_DEFAULT[key]["border_width"]),
-            "border_radius": row.get("Bo góc", UI_THEME_DEFAULT[key]["border_radius"]),
             "effect": row.get("Hiệu ứng", "Không"),
         }
     return _normalized_theme_config(result)
 
 
 def render_admin_theme_config_panel():
-    """Admin tùy chỉnh font/màu/viền/nền/box chọn và lưu làm mặc định toàn hệ thống."""
+    """Bảng tùy chỉnh font/cỡ/màu/hiệu ứng, chỉ Admin mới nhìn thấy và lưu được."""
     if st.session_state.get("current_role") != "admin":
         return
     current, err = load_ui_theme_config()
-    with st.expander("🎨 Cấu hình Font · Màu · Viền · Dropdown", expanded=True):
+    with st.expander("🎨 Cấu hình Font · Màu · Cỡ chữ · Hiệu ứng", expanded=True):
         st.caption(
-            "Có thể chỉnh Font, kiểu chữ, căn lề, cỡ chữ Web/Mobile, màu chữ, màu nền, màu/độ dày viền, "
-            "bo góc và hiệu ứng. Nhóm **Dropdown / Box chọn** mặc định có hình dáng gần Cloud Scheduler."
+            "Mặc định: Tiêu đề lớn 28px · Tiêu đề con 22px · Tiêu đề nhỏ 18px · "
+            "Label/Nội dung 16px · Bảng 13px. Có cột riêng cho Web và Mobile. "
+            "Màu nhập theo mã HEX, ví dụ #D9D9D9."
         )
         if err:
             st.warning(err)
-        editor_key = "admin_global_theme_editor_v83"
+        editor_key = "admin_global_theme_editor_v71"
         edited = st.data_editor(
             _theme_editor_df(current),
             key=editor_key,
@@ -7212,47 +5040,33 @@ def render_admin_theme_config_panel():
             disabled=["Nhóm"],
             row_height=42,
             column_config={
-                "Nhóm": st.column_config.TextColumn("Nhóm", disabled=True, width=165),
-                "Font chữ": st.column_config.SelectboxColumn("Font chữ", options=UI_THEME_FONT_OPTIONS, width=135),
-                "Kiểu chữ": st.column_config.SelectboxColumn("Kiểu chữ", options=UI_THEME_FONT_STYLE_OPTIONS, width=130),
-                "Căn lề": st.column_config.SelectboxColumn("Căn lề", options=UI_THEME_ALIGN_OPTIONS, width=90),
+                "Nhóm": st.column_config.TextColumn("Nhóm", disabled=True, width=150),
+                "Font chữ": st.column_config.SelectboxColumn("Font chữ", options=UI_THEME_FONT_OPTIONS, width=145),
                 "Cỡ chữ Web": st.column_config.NumberColumn("Cỡ chữ Web", min_value=8, max_value=48, step=1, format="%d", width=105),
                 "Cỡ chữ Mobile": st.column_config.NumberColumn("Cỡ chữ Mobile", min_value=8, max_value=48, step=1, format="%d", width=120),
-                "Màu chữ": st.column_config.TextColumn("Màu chữ", width=100, help="HEX: #RRGGBB"),
-                "Màu nền": st.column_config.TextColumn("Màu nền", width=100, help="HEX: #RRGGBB"),
-                "Màu viền": st.column_config.TextColumn("Màu viền", width=100, help="HEX: #RRGGBB"),
-                "Độ dày viền": st.column_config.NumberColumn("Độ dày viền", min_value=0, max_value=8, step=1, format="%d", width=110),
-                "Bo góc": st.column_config.NumberColumn("Bo góc", min_value=0, max_value=40, step=1, format="%d", width=85),
-                "Hiệu ứng": st.column_config.SelectboxColumn("Hiệu ứng", options=UI_THEME_EFFECT_OPTIONS, width=120),
+                "Màu chữ": st.column_config.TextColumn("Màu chữ", width=105, help="HEX: #RRGGBB"),
+                "Màu nền": st.column_config.TextColumn("Màu nền", width=105, help="HEX: #RRGGBB"),
+                "Hiệu ứng": st.column_config.SelectboxColumn("Hiệu ứng", options=UI_THEME_EFFECT_OPTIONS, width=125),
             },
         )
         preview_cfg = _theme_from_editor_df(edited)
+        # Preview dùng HTML đơn giản, không ghi dữ liệu cho tới khi bấm Lưu.
         p1, p2, p3 = preview_cfg["main_title"], preview_cfg["sub_title"], preview_cfg["small_title"]
-        pdp = preview_cfg["dropdown"]
-        def _preview_style(item, pad):
-            fw, fs = _theme_font_style_values(item.get("font_style"))
-            return (
-                f"font-family:'{item['font_family']}';font-size:{item['desktop_size']}px;font-weight:{fw};font-style:{fs};"
-                f"text-align:{item.get('align','left')};color:{item['text_color']};background:{item['bg_color']};"
-                f"border:{item['border_width']}px solid {item['border_color']};border-radius:{item['border_radius']}px;"
-                f"padding:{pad};margin:3px 0;box-sizing:border-box;"
-            )
         st.markdown(
-            f"<div style=\"{_preview_style(p1, '6px 10px')}\">Tiêu đề lớn – Xem trước</div>"
-            f"<div style=\"{_preview_style(p2, '5px 9px')}\">Tiêu đề con – Xem trước</div>"
-            f"<div style=\"{_preview_style(p3, '4px 8px')}\">Tiêu đề nhỏ – Xem trước</div>"
-            f"<div style=\"{_preview_style(pdp, '9px 14px')}max-width:520px;\">Chọn ngày / nhân viên / lý do nghỉ ▾</div>",
+            f"<div style=\"font-family:'{p1['font_family']}';font-size:{p1['desktop_size']}px;color:{p1['text_color']};background:{p1['bg_color']};padding:6px 10px;border-radius:6px;margin:3px 0;\">Tiêu đề lớn – Xem trước</div>"
+            f"<div style=\"font-family:'{p2['font_family']}';font-size:{p2['desktop_size']}px;color:{p2['text_color']};background:{p2['bg_color']};padding:5px 9px;border-radius:6px;margin:3px 0;\">Tiêu đề con – Xem trước</div>"
+            f"<div style=\"font-family:'{p3['font_family']}';font-size:{p3['desktop_size']}px;color:{p3['text_color']};background:{p3['bg_color']};padding:4px 8px;border-radius:6px;margin:3px 0;\">Tiêu đề nhỏ – Xem trước</div>",
             unsafe_allow_html=True,
         )
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("💾 Lưu giao diện làm mặc định", use_container_width=True, key="save_global_theme_v83"):
+            if st.button("💾 Lưu giao diện làm mặc định", use_container_width=True, key="save_global_theme_v71"):
                 ok, msg = save_ui_theme_config(preview_cfg, st.session_state.current_user)
                 (st.success if ok else st.error)(msg)
                 if ok:
                     st.rerun()
         with c2:
-            if st.button("♻️ Khôi phục giao diện mặc định", use_container_width=True, key="reset_global_theme_v83"):
+            if st.button("♻️ Khôi phục 28 · 22 · 18 · 16 · 13", use_container_width=True, key="reset_global_theme_v71"):
                 ok, msg = save_ui_theme_config(UI_THEME_DEFAULT, st.session_state.current_user)
                 (st.success if ok else st.error)(msg)
                 if ok:
@@ -7325,23 +5139,13 @@ def _default_column_alignment(column_name):
     return "left"
 
 
-def _valid_optional_hex(value):
-    value = str(value or "").strip()
-    return value.upper() if re.fullmatch(r"#[0-9A-Fa-f]{6}", value) else ""
-
-
 def _default_column_visual_style(column_name):
-    # Màu để trống nhằm giữ nguyên các màu điều kiện hiện có; Admin có thể đặt riêng khi cần.
     return {
         "font_family": "Roboto",
         "font_size": TABLE_LAYOUT_DEFAULT_FONT_SIZE,
         "font_style": "Thường",
         "align": _default_column_alignment(column_name),
         "wrap": True,
-        "text_color": "",
-        "bg_color": "",
-        "border_color": "",
-        "border_width": 0,
     }
 
 
@@ -7434,7 +5238,7 @@ def get_table_layout(table_key, available_columns):
 
 
 def get_table_visual_settings(table_key, available_columns):
-    """Đọc kiểu hiển thị của bảng: font/căn lề/wrap/màu/nền/viền, tự bù mặc định cho cột mới."""
+    """Đọc cấu hình kiểu hiển thị của bảng, tự bù mặc định cho cột mới."""
     available = [str(c) for c in available_columns]
     layouts, _ = load_table_layouts()
     cfg = layouts.get(str(table_key), {})
@@ -7467,20 +5271,12 @@ def get_table_visual_settings(table_key, available_columns):
             wrap = wrap.strip().lower() in {"1", "true", "yes", "y", "có", "co"}
         else:
             wrap = bool(wrap)
-        try:
-            border_width = max(0, min(8, int(float(saved.get("border_width", d["border_width"])))))
-        except Exception:
-            border_width = 0
         col_styles[c] = {
             "font_family": font_family,
             "font_size": font_size,
             "font_style": font_style,
             "align": align,
             "wrap": wrap,
-            "text_color": _valid_optional_hex(saved.get("text_color", d["text_color"])),
-            "bg_color": _valid_optional_hex(saved.get("bg_color", d["bg_color"])),
-            "border_color": _valid_optional_hex(saved.get("border_color", d["border_color"])),
-            "border_width": border_width,
         }
     return row_height, col_styles
 
@@ -7505,8 +5301,12 @@ def _font_style_css(style_name):
 
 
 
-def neutralize_khong_phep_rows_styler(data_or_styler, reason_col="Lý do nghỉ", table_key="leave_detail"):
-    """Giữ dòng 'Không phép' dễ đọc nhưng tôn trọng màu/font Admin đã cấu hình cho từng cột."""
+def neutralize_khong_phep_rows_styler(data_or_styler, reason_col="Lý do nghỉ"):
+    """V69: Các dòng có Lý do nghỉ chứa 'Không phép' luôn hiển thị rõ bằng màu chữ mặc định tối.
+
+    Không tô nền, không đổi màu chữ, không bold/italic/underline. Hàm này được áp dụng
+    sau cấu hình hiển thị cột để chắc chắn mọi conditional formatting cũ không còn ảnh hưởng.
+    """
     if isinstance(data_or_styler, pd.DataFrame):
         styler = data_or_styler.style
         data = data_or_styler
@@ -7520,34 +5320,29 @@ def neutralize_khong_phep_rows_styler(data_or_styler, reason_col="Lý do nghỉ"
     if not isinstance(data, pd.DataFrame) or data.empty or reason_col not in data.columns:
         return styler
 
-    try:
-        _, custom_styles = get_table_visual_settings(table_key, list(data.columns))
-    except Exception:
-        custom_styles = {}
-
     def _neutral_row(row):
         reason_key = remove_vietnamese_accents(str(row.get(reason_col, ""))).casefold()
         if "khong phep" not in reason_key:
             return [""] * len(row)
-        out = []
-        for col in row.index:
-            cfg = custom_styles.get(str(col), _default_column_visual_style(col))
-            rules = ["opacity:1!important", "text-decoration:none!important"]
-            if not cfg.get("bg_color"):
-                rules.append("background-color:transparent!important")
-            if not cfg.get("text_color"):
-                rules.append("color:#262730!important")
-            if str(cfg.get("font_style", "Thường")) == "Thường":
-                rules.append("font-weight:normal!important")
-                rules.append("font-style:normal!important")
-            out.append(";".join(rules) + ";")
-        return out
+        # Ép màu chữ tối dễ đọc thay vì ``inherit``. Một số theme/Styler cũ có thể
+        # để màu kế thừa thành trắng hoặc xám quá sáng, khiến người dùng tưởng dữ liệu mất.
+        neutral_css = (
+            "background-color: transparent !important;"
+            "color: #262730 !important;"
+            "font-weight: normal !important;"
+            "font-style: normal !important;"
+            "text-decoration: none !important;"
+            "opacity: 1 !important;"
+        )
+        return [neutral_css] * len(row)
 
     return styler.apply(_neutral_row, axis=1)
 
-
 def apply_table_visual_styler(data_or_styler, table_key, columns=None):
-    """Áp dụng style Excel-like theo cột, đồng thời bảo toàn màu điều kiện khi màu nền/chữ để trống."""
+    """
+    Áp dụng font/cỡ chữ/kiểu chữ/căn lề/wrap cho bảng đọc (st.dataframe).
+    Giữ nguyên Styler sẵn có để không làm mất màu điều kiện của Tour/Lịch nghỉ.
+    """
     if isinstance(data_or_styler, pd.DataFrame):
         columns = list(data_or_styler.columns) if columns is None else list(columns)
         styler = data_or_styler.style
@@ -7578,31 +5373,22 @@ def apply_table_visual_styler(data_or_styler, table_key, columns=None):
             "overflow-wrap": "anywhere" if wrap else "normal",
             "word-break": "break-word" if wrap else "normal",
         }
-        if cfg.get("text_color"):
-            props["color"] = cfg["text_color"]
-        if cfg.get("bg_color"):
-            props["background-color"] = cfg["bg_color"]
-        if int(cfg.get("border_width", 0) or 0) > 0 and cfg.get("border_color"):
-            props["border"] = f"{int(cfg['border_width'])}px solid {cfg['border_color']}"
         try:
             styler = styler.set_properties(subset=[c], **props)
         except Exception:
             pass
-        hp = [
-            ("font-family", f"'{cfg.get('font_family', 'Roboto')}', sans-serif"),
-            ("font-size", f"{int(cfg.get('font_size', TABLE_LAYOUT_DEFAULT_FONT_SIZE))}px"),
-            ("font-weight", fw), ("font-style", fs),
-            ("text-align", cfg.get("align", "left")),
-            ("white-space", "normal"), ("overflow-wrap", "anywhere"),
-            ("word-break", "break-word"), ("line-height", "1.15"),
-        ]
-        if cfg.get("text_color"):
-            hp.append(("color", cfg["text_color"]))
-        if cfg.get("bg_color"):
-            hp.append(("background-color", cfg["bg_color"]))
-        if int(cfg.get("border_width", 0) or 0) > 0 and cfg.get("border_color"):
-            hp.append(("border", f"{int(cfg['border_width'])}px solid {cfg['border_color']}"))
-        header_rules.append({"selector": f"th.col_heading.level0.col{idx}", "props": hp})
+        # Dòng tiêu đề cũng dùng font/căn lề theo cột và luôn cho phép wrap nếu cột hẹp.
+        header_rules.append({
+            "selector": f"th.col_heading.level0.col{idx}",
+            "props": [
+                ("font-family", f"'{cfg.get('font_family', 'Roboto')}', sans-serif"),
+                ("font-size", f"{int(cfg.get('font_size', TABLE_LAYOUT_DEFAULT_FONT_SIZE))}px"),
+                ("font-weight", fw), ("font-style", fs),
+                ("text-align", cfg.get("align", "left")),
+                ("white-space", "normal"), ("overflow-wrap", "anywhere"),
+                ("word-break", "break-word"), ("line-height", "1.15"),
+            ]
+        })
     try:
         if header_rules:
             styler = styler.set_table_styles(header_rules, overwrite=False)
@@ -7612,7 +5398,7 @@ def apply_table_visual_styler(data_or_styler, table_key, columns=None):
 
 
 def table_layout_html_css(table_key, columns, selector):
-    """Sinh CSS Excel-like theo từng cột cho các bảng HTML."""
+    """Sinh CSS theo từng cột cho các bảng HTML (hiện dùng ở Bảng lương tổng hợp)."""
     row_height, col_styles = get_table_visual_settings(table_key, columns)
     css = [f"{selector} tbody tr{{height:{int(row_height)}px;}}"]
     for idx, c in enumerate(columns, start=1):
@@ -7625,22 +5411,13 @@ def table_layout_html_css(table_key, columns, selector):
         font = str(cfg.get("font_family", "Roboto")).replace("'", "")
         size = int(cfg.get("font_size", TABLE_LAYOUT_DEFAULT_FONT_SIZE))
         align = cfg.get("align", "left")
-        extras = []
-        if cfg.get("text_color"):
-            extras.append(f"color:{cfg['text_color']}!important")
-        if cfg.get("bg_color"):
-            extras.append(f"background-color:{cfg['bg_color']}!important")
-        if int(cfg.get("border_width", 0) or 0) > 0 and cfg.get("border_color"):
-            extras.append(f"border:{int(cfg['border_width'])}px solid {cfg['border_color']}!important")
-        extra_css = ";".join(extras)
-        if extra_css:
-            extra_css += ";"
         css.append(
             f"{selector} th:nth-child({idx}),{selector} td:nth-child({idx}){{"
             f"font-family:'{font}',sans-serif!important;font-size:{size}px!important;"
             f"font-weight:{fw}!important;font-style:{fs}!important;text-align:{align}!important;"
-            f"white-space:{white}!important;overflow-wrap:{overflow}!important;word-break:{word_break}!important;{extra_css}}}"
+            f"white-space:{white}!important;overflow-wrap:{overflow}!important;word-break:{word_break}!important;}}"
         )
+        # Tiêu đề luôn wrap để không bị mất chữ khi cột nhỏ.
         css.append(
             f"{selector} th:nth-child({idx}){{white-space:nowrap!important;overflow-wrap:normal!important;word-break:normal!important;}}"
         )
@@ -7786,10 +5563,6 @@ def _layout_editor_rows_from_saved(table_key, available_cols):
             "Cỡ chữ": int(vis.get("font_size", TABLE_LAYOUT_DEFAULT_FONT_SIZE)),
             "Kiểu chữ": vis.get("font_style", "Thường"),
             "Căn lề": vis.get("align", _default_column_alignment(col)),
-            "Màu chữ": vis.get("text_color", ""),
-            "Màu nền": vis.get("bg_color", ""),
-            "Màu viền": vis.get("border_color", ""),
-            "Độ dày viền": int(vis.get("border_width", 0) or 0),
             "Wrap text": bool(vis.get("wrap", True)),
         })
     return rows
@@ -7862,10 +5635,6 @@ def _layout_editor_on_change(table_key, editor_key, rows_state_key, version_stat
         if str(r.get("Font chữ", "Roboto")) not in TABLE_LAYOUT_FONT_OPTIONS: r["Font chữ"] = "Roboto"
         if str(r.get("Kiểu chữ", "Thường")) not in TABLE_LAYOUT_FONT_STYLE_OPTIONS: r["Kiểu chữ"] = "Thường"
         if str(r.get("Căn lề", "left")) not in TABLE_LAYOUT_ALIGN_OPTIONS: r["Căn lề"] = "left"
-        for _color_field in ["Màu chữ", "Màu nền", "Màu viền"]:
-            r[_color_field] = _valid_optional_hex(r.get(_color_field, ""))
-        try: r["Độ dày viền"] = max(0, min(8, int(float(r.get("Độ dày viền", 0) or 0))))
-        except Exception: r["Độ dày viền"] = 0
         r["Wrap text"] = bool(r.get("Wrap text", True))
 
     st.session_state[rows_state_key] = sorted(rows, key=lambda x: int(x["Vị trí"]))
@@ -10606,21 +8375,13 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
         emp = str(employee_row.get('Tên Hệ thống',''))
         full = str(employee_row.get('Họ và tên',''))
         subject = f"Bảng lương {emp} - {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}"
-        # V83: chỉ đổi NHÃN hiển thị trong email; giữ nguyên tên cột nội bộ để không ảnh hưởng tính lương.
         money_fields = [
-            ("Tiền Lương", "Tiền Lương"),
-            ("Tiền Hỗ Trợ Hoàn Lại", "Hỗ trợ hoặc Hoàn lại"),
-            ("Tích lũy", "Tích lũy"),
-            ("Chi Phí Sinh Hoạt", "Chi Phí Sinh Hoạt"),
-            ("Tiền phạt trong tháng", "Vi phạm trong kỳ"),
-            ("Vi phạm kỳ trước", "Vi phạm kỳ trước"),
-            ("Tiền ứng lương", "Tiền ứng lương"),
-            ("Tiền hỗ trợ Locker", "Tiền hỗ trợ Locker"),
-            ("Số tiền thực nhận", "Số tiền thực nhận"),
+            "Tiền Lương", "Tiền Hỗ Trợ Hoàn Lại", "Tích lũy", "Chi Phí Sinh Hoạt",
+            "Tiền phạt trong tháng", "Vi phạm kỳ trước", "Tiền ứng lương", "Tiền hỗ trợ Locker", "Số tiền thực nhận"
         ]
         html_rows = "".join(
-            f"<tr><td style='padding:6px;border:1px solid #D9D9D9'>{label}</td><td style='padding:6px;border:1px solid #D9D9D9;text-align:right'>{_money_to_float(employee_row.get(field,0)):,.0f} VNĐ</td></tr>"
-            for field, label in money_fields
+            f"<tr><td style='padding:6px;border:1px solid #D9D9D9'>{field}</td><td style='padding:6px;border:1px solid #D9D9D9;text-align:right'>{_money_to_float(employee_row.get(field,0)):,.0f} VNĐ</td></tr>"
+            for field in money_fields
         )
         vp_df = violation_details.copy() if isinstance(violation_details, pd.DataFrame) else pd.DataFrame()
         if not vp_df.empty:
@@ -10651,10 +8412,7 @@ def send_payroll_email(sender_email, sender_password, to_email, employee_row, st
         </table>
         <p><b>Số tiền thực nhận: {_money_to_float(employee_row.get('Số tiền thực nhận',0)):,.0f} VNĐ</b></p>
         {violation_html}
-        <p>Vui lòng kiểm tra và phản hồi nếu có sai sót.</p>
-        <p>Trân trọng,<br><b>Vera Spa</b><br>
-        <b>Địa chỉ:</b> 193 Trương Định, Tam Hiệp, Đồng Nai<br>
-        <b>Điện Thoại:</b> 0833229939</p>
+        <p>Vui lòng kiểm tra và phản hồi nếu có sai sót.</p><p>Trân trọng,<br><b>VERA SPA</b></p>
         </body></html>
         """
         msg = MIMEMultipart()
@@ -10689,9 +8447,7 @@ def send_payroll_summary_email(sender_email, sender_password, to_email, recipien
         Tổng tiền lương: <b>{total_salary:,.0f} VNĐ</b><br>
         Tổng thực nhận: <b>{total_net:,.0f} VNĐ</b></p>
         <p>File Excel đầy đủ được đính kèm email này.</p>
-        <p>Trân trọng,<br><b>Vera Spa</b><br>
-        <b>Địa chỉ:</b> 193 Trương Định, Tam Hiệp, Đồng Nai<br>
-        <b>Điện Thoại:</b> 0833229939</p>
+        <p>Trân trọng,<br><b>VERA SPA</b></p>
         </body></html>
         """
         msg = MIMEMultipart()
@@ -10738,14 +8494,7 @@ _ui_theme_cfg, _ui_theme_err = load_ui_theme_config()
 render_global_ui_theme_css(_ui_theme_cfg)
 
 if df_lich.empty or df_nv_excel.empty:
-    _source3_err = str(st.session_state.get("source3_last_error", "") or "").strip()
-    st.warning(
-        "Hệ thống chưa tải được dữ liệu Nguồn 3 (file lịch nghỉ trên Google Drive). "
-        "Hệ thống đã ưu tiên Drive API bằng service account/runtime identity và có fallback tải công khai."
-    )
-    if _source3_err:
-        st.caption(f"Chi tiết Nguồn 3: {_source3_err}")
-    st.caption("Nếu file không công khai, hãy chia sẻ quyền Viewer cho service account đang chạy Vera-Spa.")
+    st.warning("Hệ thống chưa tìm thấy dữ liệu.")
     st.stop()
 
 # --- ĐĂNG NHẬP ---
@@ -10897,7 +8646,7 @@ PAGE_SLUGS = {
     "➕ Thêm nhân viên": "them-nhan-vien",
     "✏️ Sửa / Xóa nhân viên": "sua-xoa-nhan-vien",
     "🔒 Khóa đăng nhập": "khoa-dang-nhap",
-    "⏸️ Tạm khóa đăng ký lịch nghỉ": "khoa-quyen-dang-ky",
+    "🔐 Khóa quyền đăng ký": "khoa-quyen-dang-ky",
     "🔄 Đồng bộ dữ liệu": "dong-bo-du-lieu",
     "⚙️ Giao diện tùy chỉnh": "cau-hinh-cot",
     "🔐 Phân quyền chức năng": "phan-quyen-chuc-nang",
@@ -10918,7 +8667,7 @@ PAGE_FEATURE_KEYS = {
     "➕ Thêm nhân viên": "employee_add",
     "✏️ Sửa / Xóa nhân viên": "employee_edit",
     "🔒 Khóa đăng nhập": "account_lock",
-    "⏸️ Tạm khóa đăng ký lịch nghỉ": "registration_lock",
+    "🔐 Khóa quyền đăng ký": "registration_lock",
     "🔄 Đồng bộ dữ liệu": "sync",
     "⚙️ Giao diện tùy chỉnh": "column_config",
     "🔐 Phân quyền chức năng": "permission_admin",
@@ -10942,23 +8691,7 @@ def has_page_access(page_name):
     key = PAGE_FEATURE_KEYS.get(page_name)
     return bool(key and has_feature_access(key))
 
-# V83: Admin có thể kéo-thả thứ tự Menu; lưu theo slug để URL/label vẫn ổn định.
-if st.session_state.get('current_role') == 'admin':
-    _menu_order_param = str(st.query_params.get('save_menu_order', '') or '').strip()
-    if _menu_order_param:
-        _menu_slugs = [x.strip() for x in _menu_order_param.split(',') if x.strip()]
-        _menu_pages = [SLUG_TO_PAGE[x] for x in _menu_slugs if x in SLUG_TO_PAGE]
-        _menu_pages += [p for p in PAGE_FEATURE_KEYS.keys() if p not in _menu_pages]
-        _menu_ok, _menu_msg = save_ui_menu_order(_menu_pages, st.session_state.current_user)
-        try: del st.query_params['save_menu_order']
-        except Exception: pass
-        if _menu_ok:
-            st.toast(_menu_msg, icon='✅')
-        else:
-            st.toast(_menu_msg, icon='⚠️')
-        st.rerun()
-
-PAGE_ORDER = apply_ui_menu_order(list(PAGE_FEATURE_KEYS.keys()))
+PAGE_ORDER = list(PAGE_FEATURE_KEYS.keys())
 allowed_pages = [p for p in PAGE_ORDER if has_page_access(p)]
 # Admin luôn giữ trang phân quyền để tránh tự khóa hệ thống.
 if st.session_state.current_role == 'admin' and "🔐 Phân quyền chức năng" not in allowed_pages:
@@ -11384,11 +9117,9 @@ elif selected_page == "👤 Hồ sơ cá nhân":
 elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access("shift"):
     st.subheader("⏰ Thiết lập ca làm việc")
     st.info(
-        "Bảng phân ca hiển thị nhân sự role `nhanvien`. Người quản lý có thể mở phần cấu hình nâng cao để đổi khung giờ ca, chu kỳ, TimeSoft và mapping nhân sự."
+        "Chỉ hiển thị tài khoản role `nhanvien`. Bảng được đặt trong Form nên khi chỉnh nhiều ô sẽ không tải lại dữ liệu nguồn; "
+        "hệ thống chỉ ghi Google Sheet khi bấm **Lưu Toàn Bộ Cấu Hình Ca**."
     )
-    render_shift_management_tools(df_credentials)
-    shift_options_runtime = get_dynamic_shift_options()
-    cycle_options_runtime = get_dynamic_shift_cycle_options()
 
     shift_base = get_nhanvien_shift_dataframe(df_credentials)
     shift_seed_key = "shift_schedule_working_df"
@@ -11442,9 +9173,9 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
     with f1:
         filter_shift_name = st.text_input("Tìm theo tên nhân viên", key="shift_filter_name", placeholder="Gõ tên để lọc...")
     with f2:
-        shift_filter_value = st.selectbox("Lọc theo ca", ["- Tất cả ca -"] + shift_options_runtime, key="shift_filter_shift")
+        shift_filter_value = st.selectbox("Lọc theo ca", ["- Tất cả ca -"] + SHIFT_OPTIONS, key="shift_filter_shift")
     with f3:
-        cycle_filter_value = st.selectbox("Lọc theo luân phiên", ["- Tất cả luân phiên -"] + cycle_options_runtime, key="shift_filter_cycle")
+        cycle_filter_value = st.selectbox("Lọc theo luân phiên", ["- Tất cả luân phiên -"] + SHIFT_CYCLE_OPTIONS, key="shift_filter_cycle")
 
     filtered_shift = working_shift.copy()
     if str(filter_shift_name).strip():
@@ -11466,11 +9197,11 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                 column_config={
                     "Tên nhân viên": st.column_config.TextColumn("Tên nhân viên", disabled=True),
                     "Ca làm việc": st.column_config.SelectboxColumn(
-                        "Ca làm việc", options=shift_options_runtime, width="large"
+                        "Ca làm việc", options=SHIFT_OPTIONS, width="large"
                     ),
                     "Ngày bắt đầu ca": st.column_config.TextColumn("Ngày bắt đầu (DD/MM/YYYY)"),
                     "Chu kỳ": st.column_config.SelectboxColumn(
-                        "Chu kỳ luân phiên", options=cycle_options_runtime, width="medium"
+                        "Chu kỳ luân phiên", options=SHIFT_CYCLE_OPTIONS, width="medium"
                     )
                 },
                 hide_index=True, use_container_width=True, key="shift_schedule_editor_form"
@@ -11538,82 +9269,16 @@ elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff
 
     cols_staff = [c for c in STAFF_EXPORT_COLUMNS if c in staff_source_df.columns]
     staff_df, staff_widths = apply_table_layout_df(staff_source_df[cols_staff], "staff_list")
-
-    # V84: Admin được sửa trực tiếp danh sách nhân sự và lưu lại ngay trên màn hình.
-    if st.session_state.current_role == "admin":
-        st.markdown("### ✏️ Chỉnh sửa trực tiếp thông tin nhân sự")
-        st.caption(
-            "Tên nhân viên là khóa tài khoản nên chỉ đọc. Admin có thể sửa hồ sơ, phân quyền, "
-            "trạng thái làm việc và trạng thái khóa đăng nhập rồi bấm Lưu thay đổi."
-        )
-        staff_editor_version = int(st.session_state.get("staff_direct_editor_version_v84", 0) or 0)
-        staff_editor_cfg = table_layout_column_config("staff_list", list(staff_df.columns))
-        if "Tên nhân viên" in staff_df.columns:
-            staff_editor_cfg["Tên nhân viên"] = st.column_config.TextColumn(
-                "Tên nhân viên", disabled=True, width=layout_width("staff_list", "Tên nhân viên", "medium")
-            )
-        if "Phân quyền" in staff_df.columns:
-            staff_editor_cfg["Phân quyền"] = st.column_config.SelectboxColumn(
-                "Phân quyền", options=list(ALL_ACCOUNT_ROLES), required=True,
-                width=layout_width("staff_list", "Phân quyền", "small")
-            )
-        if "Trạng thái làm việc" in staff_df.columns:
-            staff_editor_cfg["Trạng thái làm việc"] = st.column_config.SelectboxColumn(
-                "Trạng thái làm việc", options=list(EMPLOYMENT_STATUS_OPTIONS), required=True,
-                width=layout_width("staff_list", "Trạng thái làm việc", "medium")
-            )
-        if "Khóa đăng nhập" in staff_df.columns:
-            staff_editor_cfg["Khóa đăng nhập"] = st.column_config.SelectboxColumn(
-                "Khóa đăng nhập", options=["", "KHÓA"],
-                width=layout_width("staff_list", "Khóa đăng nhập", "small")
-            )
-
-        edited_staff_df = st.data_editor(
-            staff_df,
-            key=f"staff_direct_editor_v84_{staff_editor_version}",
-            width="stretch", height=min(720, max(260, 78 + len(staff_df) * 35)), hide_index=True,
-            row_height=layout_row_height("staff_list"),
-            column_config=staff_editor_cfg,
-            disabled=["Tên nhân viên"] if "Tên nhân viên" in staff_df.columns else None,
-            num_rows="fixed",
-        )
-        c_staff_save, c_staff_reset = st.columns([2, 1])
-        with c_staff_save:
-            if st.button("💾 Lưu thay đổi danh sách nhân sự", use_container_width=True, type="primary", key="save_staff_direct_v84"):
-                direct_staff = edited_staff_df.copy()
-                if "Phân quyền" in direct_staff.columns:
-                    direct_staff["Phân quyền"] = direct_staff["Phân quyền"].astype(str).str.strip().str.lower()
-                ok, msg = batch_import_staff_list(direct_staff, st.session_state.current_user, "admin")
-                (st.success if ok else st.error)(msg)
-                if ok:
-                    st.session_state["staff_direct_editor_version_v84"] = staff_editor_version + 1
-                    st.rerun()
-        with c_staff_reset:
-            if st.button("↩️ Bỏ thay đổi", use_container_width=True, key="reset_staff_direct_v84"):
-                st.session_state["staff_direct_editor_version_v84"] = staff_editor_version + 1
-                st.rerun()
-    else:
-        st.dataframe(
-            apply_table_visual_styler(staff_df, "staff_list", list(staff_df.columns)),
-            width='stretch', height='content', hide_index=True,
-            row_height=layout_row_height("staff_list"),
-            column_config=table_layout_column_config("staff_list", list(staff_df.columns))
-        )
+    st.dataframe(
+        apply_table_visual_styler(staff_df, "staff_list", list(staff_df.columns)),
+        width='stretch', height='content', hide_index=True,
+        row_height=layout_row_height("staff_list"),
+        column_config=table_layout_column_config("staff_list", list(staff_df.columns))
+    )
     render_admin_quick_layout_default("staff_list", list(staff_df.columns), "staff_list_page")
 
 elif selected_page == "⚙️ Giao diện tùy chỉnh" and st.session_state.current_role == "admin":
     st.subheader("⚙️ Giao diện tùy chỉnh")
-
-    with st.expander("🧲 Kéo - Thả Menu Chức năng", expanded=False):
-        st.caption("Thứ tự được lưu dùng chung toàn hệ thống. Quyền nhìn thấy từng nút vẫn tuân theo Phân quyền chức năng.")
-        _menu_current_order = apply_ui_menu_order(list(PAGE_FEATURE_KEYS.keys()))
-        render_admin_menu_drag_drop_editor(_menu_current_order, PAGE_SLUGS)
-        if st.button("♻️ Khôi phục thứ tự Menu mặc định", use_container_width=True, key="reset_global_menu_order_v83"):
-            _ok, _msg = save_ui_menu_order(list(PAGE_FEATURE_KEYS.keys()), st.session_state.current_user)
-            (st.success if _ok else st.error)(_msg)
-            if _ok:
-                st.rerun()
-
     render_admin_theme_config_panel()
 
     with st.expander("⚡ Hạ tầng & hiệu năng (Cloud Run + PostgreSQL)", expanded=False):
@@ -11650,7 +9315,7 @@ elif selected_page == "⚙️ Giao diện tùy chỉnh" and st.session_state.cur
 
     st.info(
         "Admin có thể tùy chỉnh thứ tự, độ rộng cột, độ cao dòng, font, cỡ chữ, kiểu chữ, "
-        "căn lề, màu chữ, màu nền, đường viền và Wrap Text như Excel. Sau khi lưu, cấu hình được dùng chung cho toàn bộ tài khoản."
+        "căn lề và Wrap Text. Sau khi lưu, cấu hình được dùng chung cho toàn bộ tài khoản."
     )
 
     st.markdown(
@@ -11728,10 +9393,6 @@ elif selected_page == "⚙️ Giao diện tùy chỉnh" and st.session_state.cur
                     "Căn lề", options=TABLE_LAYOUT_ALIGN_OPTIONS, width=95,
                     help="left = trái, center = giữa, right = phải"
                 ),
-                "Màu chữ": st.column_config.TextColumn("Màu chữ", width=100, help="Để trống = giữ màu mặc định/điều kiện; hoặc nhập #RRGGBB"),
-                "Màu nền": st.column_config.TextColumn("Màu nền", width=100, help="Để trống = giữ màu mặc định/điều kiện; hoặc nhập #RRGGBB"),
-                "Màu viền": st.column_config.TextColumn("Màu viền", width=100, help="Nhập #RRGGBB khi Độ dày viền > 0"),
-                "Độ dày viền": st.column_config.NumberColumn("Độ dày viền", min_value=0, max_value=8, step=1, format="%d", width=110),
                 "Wrap text": st.column_config.CheckboxColumn(
                     "Wrap text", width=95,
                     help="Bật để nội dung được phép xuống dòng khi chiều rộng cột nhỏ."
@@ -11740,8 +9401,8 @@ elif selected_page == "⚙️ Giao diện tùy chỉnh" and st.session_state.cur
         )
 
         st.caption(
-            "Màu chữ/nền để trống sẽ giữ nguyên conditional formatting hiện có. Có thể nhập mã HEX #RRGGBB và độ dày viền 0–8px. "
-            "Font/căn lề/Wrap Text/màu/viền áp dụng cho bảng hiển thị; độ rộng và độ cao dòng áp dụng cả bảng hiển thị và bảng chỉnh sửa."
+            "Các tiêu đề cột vẫn luôn được phép xuống dòng để tránh mất chữ. Font/căn lề/Wrap Text "
+            "được áp dụng cho bảng hiển thị; độ rộng và độ cao dòng áp dụng cả bảng hiển thị và bảng chỉnh sửa."
         )
 
         c_save_layout, c_default_layout, c_reset_layout = st.columns(3)
@@ -11770,10 +9431,6 @@ elif selected_page == "⚙️ Giao diện tùy chỉnh" and st.session_state.cur
                     "font_size": max(8, min(30, int(float(r.get("Cỡ chữ", TABLE_LAYOUT_DEFAULT_FONT_SIZE))))),
                     "font_style": str(r.get("Kiểu chữ", "Thường")),
                     "align": str(r.get("Căn lề", _default_column_alignment(col))).lower(),
-                    "text_color": _valid_optional_hex(r.get("Màu chữ", "")),
-                    "bg_color": _valid_optional_hex(r.get("Màu nền", "")),
-                    "border_color": _valid_optional_hex(r.get("Màu viền", "")),
-                    "border_width": max(0, min(8, int(float(r.get("Độ dày viền", 0) or 0)))),
                     "wrap": bool(r.get("Wrap text", True)),
                 }
             visual = {
@@ -12090,16 +9747,16 @@ elif selected_page == "🔒 Khóa đăng nhập" and has_feature_access("account
     st.caption(f"Đang khóa: {len(locked_now)} / {len(lockable_df)} tài khoản. Tài khoản Admin đang sử dụng được loại khỏi danh sách để tránh tự khóa chính mình.")
     if not locked_now.empty:
         st.dataframe(locked_now[['Tên nhân viên', 'Phân quyền', 'Khóa đăng nhập']], width='stretch', height='content', hide_index=True)
-elif selected_page == "⏸️ Tạm khóa đăng ký lịch nghỉ" and has_feature_access("registration_lock"):
-    st.subheader("⏸️ Tạm khóa đăng ký lịch nghỉ")
+elif selected_page == "🔐 Khóa quyền đăng ký" and has_feature_access("registration_lock"):
+    st.subheader("🔐 Khóa quyền đăng ký lịch của nhân viên")
     if system_status["lock_nv"]:
-        st.warning("🔴 Quyền đăng ký/xóa lịch của tài khoản Nhân viên đang được TẠM KHÓA.")
+        st.warning("🔴 Quyền đăng ký/xóa lịch của tài khoản Nhân viên đang bị KHÓA tạm thời.")
         if st.button("🔓 Mở lại quyền nhân viên", use_container_width=True):
             system_status["lock_nv"] = False
             st.rerun()
     else:
         st.success("🟢 Quyền đăng ký/xóa lịch của tài khoản Nhân viên đang MỞ.")
-        if st.button("⏸️ Tạm khóa đăng ký lịch nghỉ", use_container_width=True):
+        if st.button("🔒 Khóa quyền nhân viên tạm thời", use_container_width=True):
             system_status["lock_nv"] = True
             st.rerun()
 
@@ -12107,9 +9764,7 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
     st.subheader("🔄 Đồng bộ dữ liệu")
     st.info("Các công cụ đồng bộ chỉ dành cho tài khoản Admin.")
 
-    tab_timesoft, tab_attendance, tab_gsheet = st.tabs([
-        "🌐 TimeSoft", "🧾 Đối soát điểm danh", "🔵 Excel / Google Sheets"
-    ])
+    tab_timesoft, tab_gsheet = st.tabs(["🌐 TimeSoft", "📄 Excel / Google Sheets"])
 
     with tab_timesoft:
         st.markdown("### 🌐 TimeSoft · API trực tiếp + Đồng bộ nền Cloud Run")
@@ -12337,86 +9992,12 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
             "Password, Cookie và Authorization không được hiển thị trên giao diện."
         )
 
-    with tab_attendance:
-        st.markdown("### 🧾 Đối soát điểm danh & Auto update vi phạm")
-        st.caption(
-            "Nguồn 1: TimeSoft ReportEmployeeCheckin · Nguồn 2: Google Sheet quản lý chung · "
-            "Nguồn 3: file lịch nghỉ Google Drive. Hệ thống loại trùng lịch nghỉ trước khi xét vi phạm."
-        )
-        st.info(
-            "Quy tắc **Không check mặt**: không có check-in TimeSoft và đồng thời không có một trong các loại nghỉ được miễn "
-            "(CÓ phép, KHÔNG phép, cuối tuần, phát sinh, bệnh được duyệt, đám hiếu, Leader nghỉ chính sách, Phép năm). "
-            "Phiếu phạt được ghi với Người cập nhật = **Auto update**."
-        )
-        _audit_today = get_vn_today()
-        _audit_date = st.date_input(
-            "Ngày đối soát", value=st.session_state.get("attendance_audit_date_v83", _audit_today),
-            key="attendance_audit_date_v83", format="DD/MM/YYYY", max_value=_audit_today
-        )
-        _now_vn = datetime.now(VN_TZ)
-        _after_18 = (_now_vn.hour, _now_vn.minute, _now_vn.second) >= (ATTENDANCE_AUTO_HOUR, 0, 0)
-        st.caption(
-            f"Giờ Việt Nam hiện tại: {_now_vn.strftime('%H:%M:%S')} · Mốc gửi email tự động: {ATTENDANCE_AUTO_HOUR:02d}:00:00."
-        )
-        _a1, _a2 = st.columns(2)
-        with _a1:
-            _audit_preview = st.button(
-                "🔎 Đối soát thử (không ghi phạt)", use_container_width=True, key="attendance_preview_v83"
-            )
-        with _a2:
-            _disable_today_before_18 = (_audit_date == _audit_today and not _after_18)
-            _audit_commit = st.button(
-                "⚠️ Auto update + gửi email (sau 18:00)", use_container_width=True, type="primary", key="attendance_commit_v83",
-                disabled=_disable_today_before_18,
-                help="Ghi phiếu phạt mới và gửi email cho nhân viên; CC veraspabienhoa@gmail.com + quanly + letan. Ngày hiện tại chỉ mở từ 18:00."
-            )
-            if _disable_today_before_18:
-                st.caption("🔒 Ngày hiện tại chưa tới 18:00: chỉ cho phép Đối soát thử, chưa ghi phạt/gửi email.")
-
-        if _audit_preview or _audit_commit:
-            with st.spinner("Đang lấy TimeSoft và đối soát 3 nguồn dữ liệu..."):
-                _ok_audit, _msg_audit, _df_audit = run_attendance_reconciliation(
-                    _audit_date, df_credentials, commit=bool(_audit_commit), send_email=bool(_audit_commit)
-                )
-                st.session_state["attendance_audit_result_v83"] = _df_audit
-                st.session_state["attendance_audit_msg_v83"] = (_ok_audit, _msg_audit)
-            (st.success if _ok_audit else st.error)(_msg_audit)
-
-        _audit_msg_saved = st.session_state.get("attendance_audit_msg_v83")
-        if _audit_msg_saved and not (_audit_preview or _audit_commit):
-            (_ok_saved, _msg_saved) = _audit_msg_saved
-            (st.success if _ok_saved else st.error)(_msg_saved)
-        _audit_df_saved = st.session_state.get("attendance_audit_result_v83")
-        if isinstance(_audit_df_saved, pd.DataFrame):
-            if _audit_df_saved.empty:
-                st.success("✅ Không phát hiện vi phạm theo các quy tắc hiện tại.")
-            else:
-                _audit_show = _audit_df_saved.copy()
-                if 'Ngày' in _audit_show.columns:
-                    _audit_show['Ngày'] = _audit_show['Ngày'].apply(lambda x: x.strftime('%d/%m/%Y') if hasattr(x, 'strftime') else str(x))
-                if 'Mức phạt' in _audit_show.columns:
-                    _audit_show['Mức phạt'] = pd.to_numeric(_audit_show['Mức phạt'], errors='coerce').fillna(0)
-                st.dataframe(_audit_show, width="stretch", hide_index=True, height="content")
-
-        st.warning(
-            "Để bảo đảm hệ thống **tự chạy đúng 18:00:00 ngay cả khi không có ai mở app**, cần một Cloud Scheduler "
-            "18:00 gọi Cloud Run Job đối soát. `app.py` đã có engine đối soát/ghi phạt/gửi email và màn hình kiểm tra; "
-            "Streamlit không thể tự đánh thức chính nó đúng giờ khi không có phiên người dùng."
-        )
-
     with tab_gsheet:
-        st.markdown("### 🔵 Đồng bộ Excel / Google Sheets")
-        _gs_overwrite = st.checkbox(
-            "⚠️ Ghi đè (overwrite) toàn bộ dữ liệu A:J trên Google Sheet đích",
-            value=False, key="gsheet_overwrite_source3_v83",
-            help="Bật khi muốn Google Sheet đích giống hoàn toàn Nguồn 3. Worksheet vẫn được giữ nguyên; chỉ giá trị A:J bị thay thế."
-        )
-        _gs_button_label = "♻️ Ghi đè Nguồn 3 ➡️ Google Sheets" if _gs_overwrite else "🔄 Đồng bộ Nguồn 3 ➡️ Google Sheets"
-        if st.button(_gs_button_label, help="Bật Ghi đè nếu cần overwrite; tắt để chỉ thêm dòng mới.", use_container_width=True, key="sync_source3_to_gsheet_v83"):
+        if st.button("🔄 Đồng bộ Excel ➡️ Google Sheets", help="Chỉ thêm những dòng mới từ Excel vào Sheet", use_container_width=True):
             with st.spinner("Đang kiểm tra và đồng bộ..."):
-                res, msg = admin_sync_excel_to_gsheet(overwrite=bool(_gs_overwrite))
+                res, msg = admin_sync_excel_to_gsheet()
                 (st.success if res else st.error)(msg)
-        if st.button("⬇️ Tạo Excel mới từ Google Sheets", help="Gộp dữ liệu mới từ Sheet vào file Excel gốc", use_container_width=True, key="gsheet_to_excel_v83"):
+        if st.button("⬇️ Tạo Excel mới từ Google Sheets", help="Gộp dữ liệu mới từ Sheet vào file Excel gốc", use_container_width=True):
             with st.spinner("Đang tạo file..."):
                 df_merged, has_new = admin_sync_gsheet_to_excel(df_backup, df_lich)
                 if has_new:
@@ -13671,21 +11252,11 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                         pass
                     render_admin_quick_layout_default("payroll_history", history_edit_cols, f"history_{batch}")
 
-                    # V84: Lịch sử bảng lương có thêm Tổng tiền vi phạm, chỉ Admin được xem.
-                    if st.session_state.current_role == "admin":
-                        h1, h2, h3, h4 = st.columns(4)
-                    else:
-                        h1, h2, h3 = st.columns(3)
+                    # Hiển thị nhanh tổng sau khi sửa để Admin kiểm tra trước khi ghi đè.
+                    h1, h2, h3 = st.columns(3)
                     h1.metric("Nhân viên", len(edited_saved_table))
                     h2.metric("Tổng Tiền Lương", f"{edited_saved_table['Tiền Lương'].apply(_money_to_float).sum():,.0f} đ".replace(',', '.'))
                     h3.metric("Tổng Thực nhận", f"{edited_saved_table['Số tiền thực nhận'].apply(_money_to_float).sum():,.0f} đ".replace(',', '.'))
-                    if st.session_state.current_role == "admin":
-                        violation_total = 0.0
-                        for _vc in ["Tiền phạt trong tháng", "Vi phạm kỳ trước"]:
-                            if _vc in edited_saved_table.columns:
-                                violation_total += edited_saved_table[_vc].apply(_money_to_float).sum()
-                        h4.metric("Tổng tiền vi phạm", f"{violation_total:,.0f} đ".replace(',', '.'))
-                        st.caption("Tổng tiền vi phạm = Vi phạm trong kỳ + Vi phạm kỳ trước. Chỉ tài khoản Admin nhìn thấy chỉ số này.")
 
                     confirm_overwrite = st.checkbox(
                         f"Tôi xác nhận ghi đè bản lương {batch}",
@@ -13975,40 +11546,6 @@ elif selected_page == "🧭 Bảng tour":
             "≥15 phút = xanh; 0–<15 = vàng; -15–<0 = đỏ; ≤-15 làm trống thời gian; Break = cam."
         )
 
-        if str(st.session_state.current_role).strip().lower() in {"admin", "letan", "quanly"}:
-            st.markdown("### 🚪 Đối soát ra ngoài / Break")
-            st.caption(
-                f"Giờ ra bắt đầu đếm ngược {BANG_TOUR_BREAK_LIMIT_MINUTES} phút. "
-                f"Vi phạm được tự động ghi và gửi email lúc {BANG_TOUR_VIOLATION_HOUR:02d}:{BANG_TOUR_VIOLATION_MINUTE:02d}."
-            )
-            tour_violation_preview = analyze_bang_tour_break_violations(df_tour, get_vn_today())
-            if tour_violation_preview.empty:
-                st.success("✅ Hôm nay chưa phát hiện vi phạm ra ngoài theo dữ liệu hiện có.")
-            else:
-                st.dataframe(
-                    tour_violation_preview, width="stretch", hide_index=True,
-                    height=min(420, 70 + len(tour_violation_preview) * 35)
-                )
-                zero_tour_penalty = tour_violation_preview[
-                    pd.to_numeric(tour_violation_preview['Mức phạt'], errors='coerce').fillna(0) <= 0
-                ]
-                if not zero_tour_penalty.empty:
-                    st.warning(
-                        "⚠️ Có vi phạm chưa tìm thấy mức phạt tương ứng trong sheet LoaiNghi. "
-                        "Hãy thêm/đặt đúng tên loại phạt trên LoaiNghi để Auto update lấy đúng số tiền."
-                    )
-
-            with st.expander("🧪 Kiểm tra thủ công / công cụ Admin", expanded=False):
-                if st.button(
-                    "🧾 Chạy đối soát & Auto update ngay", use_container_width=True,
-                    key="tour_break_manual_reconcile_v84"
-                ):
-                    ok_t, msg_t, result_t = run_bang_tour_break_reconciliation(
-                        get_vn_today(), df_tour=df_tour, credentials_df=df_credentials,
-                        commit=True, send_email=False
-                    )
-                    (st.success if ok_t else st.error)(msg_t)
-
 elif selected_page == "📅 Đăng ký nghỉ phép":
     st.subheader("➕ Đăng ký lịch nghỉ")
     all_users = get_leave_eligible_employee_names(df_credentials, df_nv_excel)
@@ -14020,18 +11557,15 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             chosen_dates = st.date_input("Chọn ngày nghỉ (Khoảng thời gian nếu là Phép năm):", value=(get_vn_today(), get_vn_today()), key="sb_chosen_date")
         else:
             list_nv_input = [st.session_state.current_user]
-            emp_min_date = get_vn_today()
-            role_label = "Leader" if st.session_state.current_role == "leader" else "Nhân viên"
+            emp_min_date, emp_max_date = employee_registration_window()
             chosen_dates = st.date_input(
-                f"Chọn ngày nghỉ ({role_label} chọn 1 ngày):",
+                "Chọn ngày nghỉ (Nhân viên chọn 1 ngày):",
                 get_vn_today(),
                 min_value=emp_min_date,
+                max_value=emp_max_date,
                 key="sb_chosen_date"
             )
-            if st.session_state.current_role == "leader":
-                st.caption("Leader được đăng ký Nghỉ CÓ phép/KHÔNG phép cho mọi ngày từ hôm nay trở đi, kể cả Thứ 7/Chủ Nhật.")
-            else:
-                st.caption("Nhân viên được đăng ký từ hôm nay trở đi; Nghỉ KHÔNG phép không được chọn ngày trong quá khứ.")
+            st.caption(f"Nhân viên được đăng ký từ {emp_min_date.strftime('%d/%m/%Y')} đến hết {emp_max_date.strftime('%d/%m/%Y')}.")
 
         if isinstance(chosen_dates, tuple):
             if len(chosen_dates) == 2: start_date, end_date = chosen_dates
@@ -14059,23 +11593,9 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     dk_ngay = str(row_vals[6]).strip().lower() if len(row_vals) > 6 else ""
                     dk_role = str(row_vals[7]).strip().lower() if len(row_vals) > 7 else ""
 
-                    reason_key_for_permission = normalize_login_name(l_name)
-                    basic_leave_reason = is_employee_co_phep_leave_reason(l_name) or is_employee_khong_phep_leave_reason(l_name)
-                    auto_update_only = "auto update" in normalize_login_name(dk_role)
-
                     role_allowed = True
-                    if auto_update_only:
-                        role_allowed = False
-                    elif current_role == "leader" and basic_leave_reason:
-                        # Leader được đăng ký CÓ phép/KHÔNG phép bất kể cột role trong danh mục.
-                        role_allowed = True
-                    elif current_role == "nhanvien" and basic_leave_reason:
-                        # Quy định V83: Nhân viên luôn được đăng ký Nghỉ CÓ phép/KHÔNG phép;
-                        # điều kiện ngày riêng của CÓ phép vẫn được giữ, KHÔNG phép được mở mọi ngày >= hôm nay.
-                        role_allowed = True
-                    elif dk_role and dk_role not in ["nan", "none", "tất cả", "all", ""]:
-                        if role_for_leave_rules not in dk_role:
-                            role_allowed = False
+                    if dk_role and dk_role not in ["nan", "none", "tất cả", "all", ""]:
+                        if role_for_leave_rules not in dk_role: role_allowed = False
 
                     day_allowed = True
                     if dk_ngay and dk_ngay not in ["nan", "none", "tất cả", "all", ""]:
@@ -14086,12 +11606,6 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                             5: ["bảy", "bẩy", "t7", "cuối tuần"], 6: ["chủ nhật", "chu nhat", "cn", "cuối tuần"]
                         }
                         day_allowed = any(k in dk_ngay for k in wd_map[wd])
-
-                    # Quyền V83 ghi đè điều kiện ngày đối với các trường hợp được nêu rõ.
-                    if current_role == "leader" and basic_leave_reason:
-                        day_allowed = True
-                    elif current_role == "nhanvien" and is_employee_khong_phep_leave_reason(l_name):
-                        day_allowed = True
 
                     if day_allowed and role_allowed:
                         if "không phép" in l_name.lower(): l_name = f"🔴 {l_name}"
@@ -14224,12 +11738,13 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 today = get_vn_today()
                 can_proceed = True
 
-                if current_role in {"nhanvien", "leader"}:
-                    if start_date < today or end_date < today:
-                        st.error("❌ Nhân viên/Leader không được đăng ký lịch nghỉ cho ngày trong quá khứ.")
+                if current_role in EMPLOYEE_LIKE_ROLES:
+                    emp_min_date, emp_max_date = employee_registration_window(today)
+                    if start_date < emp_min_date or end_date > emp_max_date:
+                        st.error(f"❌ Tài khoản NHÂN VIÊN chỉ được đăng ký từ hôm nay đến hết ngày {emp_max_date.strftime('%d/%m/%Y')} (tháng hiện tại và 1 tháng kế tiếp).")
                         can_proceed = False
                 elif current_role in ["letan", "quanly"] and start_date < today:
-                    st.error("❌ Lễ tân/Quản lý không được đăng ký lịch trong quá khứ. Chỉ Admin được thao tác ngày quá khứ.")
+                    st.error("❌ Lỗi: Tài khoản LỄ TÂN/QUẢN LÝ không được đăng ký lịch trong **QUÁ KHỨ**. Muốn sửa lịch cũ, vui lòng liên hệ Admin.")
                     can_proceed = False
 
                 if can_proceed:
@@ -14496,7 +12011,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
         cols_to_hide = ['Phạt vi phạm']
 
     st.markdown("### 📅 Thống kê chi tiết theo từng ngày")
-    st.caption("Nhân viên: Nghỉ CÓ phép chỉ được hủy/thay đổi trước ít nhất 03 ngày; Nghỉ KHÔNG phép chỉ tự hủy ngày tương lai. Ngày hiện tại phải báo Group chat để Lễ tân xử lý.")
+    st.caption("Nhân viên chỉ được hủy, thay đổi những Loại nghỉ CÓ phép của mình trước ít nhất 7 ngày.")
     if not daily_thuc_nghi.empty:
         daily_stats = []
         daily_limit_flags = []
@@ -14891,12 +12406,10 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
 elif selected_page == "✏️ Quản lý lịch nghỉ":
     st.subheader("✏️ Quản lý lịch nghỉ")
     st.markdown("### 🗑️ Xóa / Quản lý lịch nghỉ đã đăng ký")
-    if st.session_state.current_role == "nhanvien":
-        st.caption("Nhân viên: Nghỉ CÓ phép chỉ được hủy/thay đổi trước ít nhất 03 ngày; Nghỉ KHÔNG phép chỉ tự hủy ngày tương lai. Ngày hiện tại báo Group chat để Lễ tân xử lý.")
-    elif st.session_state.current_role == "leader":
-        st.caption("Leader chỉ tự hủy/thay đổi lịch của mình ở ngày tương lai. Ngày hiện tại báo Group chat để Lễ tân xử lý; ngày quá khứ chỉ Admin.")
+    if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:
+        st.caption("Nhân viên chỉ được hủy, thay đổi những Loại nghỉ CÓ phép của mình trước ít nhất 7 ngày.")
     else:
-        st.caption("Sửa trực tiếp nhiều dòng trên bảng. Chỉ Admin được thao tác ngày quá khứ; Lễ tân có thể hỗ trợ ngày hiện tại.")
+        st.caption("Sửa trực tiếp nhiều dòng trên bảng. Dữ liệu chỉ được ghi/reload sau khi bấm Lưu hoặc Xóa.")
 
     manage_today = get_vn_today()
     mf_date, mf_name, mf_refresh = st.columns([5, 4, 2])

@@ -1932,8 +1932,6 @@ BANG_TOUR_AUDIT_WORKSHEET = "DoiSoatRaNgoai"
 BANG_TOUR_BREAK_LIMIT_MINUTES = 90
 BANG_TOUR_VIOLATION_HOUR = 20
 BANG_TOUR_VIOLATION_MINUTE = 10
-BANG_TOUR_CLEANUP_HOUR = 8
-BANG_TOUR_CLEANUP_MINUTE = 0
 BANG_TOUR_SINGLE_SIDE_REASON = str(os.getenv("BANG_TOUR_SINGLE_SIDE_REASON", "Ra ngoài thiếu giờ ra/vào") or "Ra ngoài thiếu giờ ra/vào").strip()
 TIMESOFT_WORKTIME_CONF_PATH = "/ListMan/WorkTimeConf/Index"
 TICHLUY_WORKSHEET = "TichLuy"
@@ -4984,15 +4982,11 @@ def delete_schedule_records(original_rows, updated_by=None):
 
 
 # --- HÀM TẢI FILE TỪ DRIVE ---
-def _google_drive_authorized_session(readwrite=False):
-    """Tạo AuthorizedSession cho Google Drive.
-
-    readwrite=False: chỉ đọc file.
-    readwrite=True: cần quyền Editor trên file Drive và scope drive để cập nhật lại XLSM.
-    """
+def _google_drive_authorized_session():
+    """Tạo AuthorizedSession chỉ-đọc cho Google Drive."""
     try:
         scope = [
-            "https://www.googleapis.com/auth/drive" if readwrite else "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/drive.readonly",
             "https://www.googleapis.com/auth/spreadsheets",
         ]
         env_json = str(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "") or "").strip()
@@ -5020,102 +5014,6 @@ def _write_stream_response_to_file(response, destination):
             if chunk:
                 f.write(chunk)
     return os.path.exists(destination) and os.path.getsize(destination) > 0
-
-
-def upload_file_to_google_drive(file_id, local_path):
-    """Ghi đè nội dung file Google Drive hiện có bằng file local.
-
-    Dùng cho Bảng tour XLSM sau khi xóa dữ liệu cũ. File phải được share quyền Editor
-    cho service account/runtime identity của Cloud Run.
-    """
-    if not os.path.exists(local_path):
-        return False, "File local cần upload không tồn tại."
-    session = _google_drive_authorized_session(readwrite=True)
-    if session is None:
-        return False, "Không tạo được phiên Google Drive có quyền ghi."
-    try:
-        url = f"https://www.googleapis.com/upload/drive/v3/files/{file_id}?uploadType=media&supportsAllDrives=true"
-        with open(local_path, "rb") as f:
-            resp = session.patch(
-                url, data=f,
-                headers={"Content-Type": "application/vnd.ms-excel.sheet.macroEnabled.12"},
-                timeout=120,
-            )
-        if resp.status_code not in {200, 201}:
-            detail = str(resp.text or "")[:500]
-            return False, f"Google Drive update HTTP {resp.status_code}: {detail}"
-        return True, "Đã cập nhật file Google Drive."
-    except Exception as e:
-        return False, f"Không cập nhật được file Google Drive: {e}"
-
-
-def _tour_cell_date(value):
-    """Lấy phần ngày của ô Excel/Bảng tour; trả None nếu không có ngày hợp lệ."""
-    if value is None or value == "":
-        return None
-    if isinstance(value, pd.Timestamp):
-        return value.to_pydatetime().date()
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    try:
-        parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
-        if pd.isna(parsed):
-            return None
-        return parsed.to_pydatetime().date() if isinstance(parsed, pd.Timestamp) else parsed.date()
-    except Exception:
-        return None
-
-
-def clear_bang_tour_previous_day_break_data(target_date=None):
-    """Xóa dữ liệu Bảng tour của ngày hôm qua ở R/S/U, dòng 21:100.
-
-    Chỉ xóa một dòng khi Giờ ra (S) hoặc Giờ vào (U) mang ngày hôm qua.
-    Giữ VBA bằng openpyxl keep_vba=True rồi cập nhật lại chính file Drive.
-    Hàm này phù hợp để Cloud Scheduler gọi lúc 08:00 hằng ngày.
-    """
-    run_date = target_date if isinstance(target_date, date) else get_vn_today()
-    yesterday = run_date - timedelta(days=1)
-    temp_in = f"temp_bangtour_cleanup_in_{os.getpid()}_{int(time.time())}.xlsm"
-    temp_out = f"temp_bangtour_cleanup_out_{os.getpid()}_{int(time.time())}.xlsm"
-    try:
-        download_file_from_google_drive(BANG_TOUR_FILE_ID, temp_in)
-        if not zipfile.is_zipfile(temp_in):
-            return False, "File Bảng tour tải về không phải XLSM hợp lệ.", 0
-        from openpyxl import load_workbook
-        wb = load_workbook(temp_in, keep_vba=True, data_only=False)
-        if "Input" not in wb.sheetnames:
-            return False, "Không tìm thấy sheet Input trong Bảng tour.", 0
-        ws = wb["Input"]
-        cleared = 0
-        for row in range(21, 101):
-            out_date = _tour_cell_date(ws[f"S{row}"].value)
-            in_date = _tour_cell_date(ws[f"U{row}"].value)
-            if out_date == yesterday or in_date == yesterday:
-                for col in ("R", "S", "U"):
-                    ws[f"{col}{row}"] = None
-                cleared += 1
-        if cleared == 0:
-            return True, f"Không có dữ liệu R/S/U của ngày {yesterday.strftime('%d/%m/%Y')} cần xóa.", 0
-        wb.save(temp_out)
-        ok, msg = upload_file_to_google_drive(BANG_TOUR_FILE_ID, temp_out)
-        if not ok:
-            return False, msg, cleared
-        try:
-            load_bang_tour_input.clear()
-        except Exception:
-            pass
-        return True, f"Đã xóa R/S/U dòng 21:100 cho {cleared} nhân viên có dữ liệu ngày {yesterday.strftime('%d/%m/%Y')}.", cleared
-    except Exception as e:
-        return False, f"Lỗi dọn Bảng tour: {e}", 0
-    finally:
-        for fp in (temp_in, temp_out):
-            try:
-                if os.path.exists(fp):
-                    os.remove(fp)
-            except Exception:
-                pass
 
 
 def download_file_from_google_drive(id, destination):
@@ -14059,8 +13957,7 @@ elif selected_page == "🧭 Bảng tour":
             st.markdown("### 🚪 Đối soát ra ngoài / Break")
             st.caption(
                 f"Giờ ra bắt đầu đếm ngược {BANG_TOUR_BREAK_LIMIT_MINUTES} phút. "
-                f"Vi phạm được tự động ghi và gửi email lúc {BANG_TOUR_VIOLATION_HOUR:02d}:{BANG_TOUR_VIOLATION_MINUTE:02d}; "
-                f"dữ liệu R/S/U của ngày hôm qua được dọn lúc {BANG_TOUR_CLEANUP_HOUR:02d}:{BANG_TOUR_CLEANUP_MINUTE:02d}."
+                f"Vi phạm được tự động ghi và gửi email lúc {BANG_TOUR_VIOLATION_HOUR:02d}:{BANG_TOUR_VIOLATION_MINUTE:02d}."
             )
             tour_violation_preview = analyze_bang_tour_break_violations(df_tour, get_vn_today())
             if tour_violation_preview.empty:
@@ -14080,28 +13977,15 @@ elif selected_page == "🧭 Bảng tour":
                     )
 
             with st.expander("🧪 Kiểm tra thủ công / công cụ Admin", expanded=False):
-                c_tour_audit, c_tour_cleanup = st.columns(2)
-                with c_tour_audit:
-                    if st.button(
-                        "🧾 Chạy đối soát & Auto update ngay", use_container_width=True,
-                        key="tour_break_manual_reconcile_v84"
-                    ):
-                        ok_t, msg_t, result_t = run_bang_tour_break_reconciliation(
-                            get_vn_today(), df_tour=df_tour, credentials_df=df_credentials,
-                            commit=True, send_email=False
-                        )
-                        (st.success if ok_t else st.error)(msg_t)
-                with c_tour_cleanup:
-                    if st.session_state.current_role == "admin":
-                        if st.button(
-                            "🧹 Dọn R/S/U ngày hôm qua ngay", use_container_width=True,
-                            key="tour_break_manual_cleanup_v84"
-                        ):
-                            with st.spinner("Đang cập nhật file Bảng tour trên Google Drive..."):
-                                ok_c, msg_c, _ = clear_bang_tour_previous_day_break_data()
-                            (st.success if ok_c else st.error)(msg_c)
-                    else:
-                        st.button("🧹 Dọn R/S/U ngày hôm qua ngay", disabled=True, use_container_width=True, key="tour_break_cleanup_disabled_v84")
+                if st.button(
+                    "🧾 Chạy đối soát & Auto update ngay", use_container_width=True,
+                    key="tour_break_manual_reconcile_v84"
+                ):
+                    ok_t, msg_t, result_t = run_bang_tour_break_reconciliation(
+                        get_vn_today(), df_tour=df_tour, credentials_df=df_credentials,
+                        commit=True, send_email=False
+                    )
+                    (st.success if ok_t else st.error)(msg_t)
 
 elif selected_page == "📅 Đăng ký nghỉ phép":
     st.subheader("➕ Đăng ký lịch nghỉ")

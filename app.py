@@ -1,4 +1,4 @@
-# V79 - Admin-only leave summary + TimeSoft auto API discovery (2026-08-18)
+# V81 - TimeSoft direct API sync + session reuse + safer discovery export (2026-08-18)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -47,17 +47,19 @@ def get_vn_today():
 # username = "..."
 # password = "..."
 #
-# Ba dòng cấu hình chính theo yêu cầu:
-try:
-    TIMESOFT_BASE_URL = st.secrets["TIMESOFT"]["base_url"]
-    TIMESOFT_USERNAME = st.secrets["TIMESOFT"]["username"]
-    TIMESOFT_PASSWORD = st.secrets["TIMESOFT"]["password"]
-except Exception:
-    # Không làm sập toàn bộ ứng dụng nếu Secrets chưa được khai báo.
-    TIMESOFT_BASE_URL = "https://vera.timesoft.vn"
-    TIMESOFT_USERNAME = ""
-    TIMESOFT_PASSWORD = ""
+# V82: Cloud Run ưu tiên biến môi trường/Secret Manager; máy local vẫn dùng Streamlit Secrets.
+def _timesoft_setting(secret_key, env_key, default=""):
+    env_val = str(os.getenv(env_key, "") or "").strip()
+    if env_val:
+        return env_val
+    try:
+        return str(st.secrets["TIMESOFT"].get(secret_key, default) or default).strip()
+    except Exception:
+        return str(default or "").strip()
 
+TIMESOFT_BASE_URL = _timesoft_setting("base_url", "TIMESOFT_BASE_URL", "https://vera.timesoft.vn")
+TIMESOFT_USERNAME = _timesoft_setting("username", "TIMESOFT_USERNAME", "")
+TIMESOFT_PASSWORD = _timesoft_setting("password", "TIMESOFT_PASSWORD", "")
 TIMESOFT_BASE_URL = str(TIMESOFT_BASE_URL or "https://vera.timesoft.vn").rstrip("/")
 TIMESOFT_REPORT_PAGES = {
     "summary_invoice": {
@@ -73,6 +75,21 @@ TIMESOFT_REPORT_PAGES = {
 }
 TIMESOFT_CAPTURE_MAX_CHARS = 250_000
 TIMESOFT_PREVIEW_MAX_CHARS = 6_000
+
+# V81 - API đã được xác định từ request thực tế của TimeSoft.
+TIMESOFT_DIRECT_APIS = {
+    "summary_invoice": {
+        "url": "/Report/ReportSummaryInvoice/SearchFullText",
+        "referer": "/Report/ReportSummaryInvoice/Index",
+    },
+    "employee_checkin": {
+        "url": "/Report/ReportEmployeeCheckin/SearchElastic",
+        "referer": "/Report/ReportEmployeeCheckin/Index",
+    },
+}
+TIMESOFT_HTTP_SESSION_TTL_SECONDS = 15 * 60
+TIMESOFT_CHECKIN_PAGE_SIZE = 100
+TIMESOFT_MAX_CHECKIN_PAGES = 500
 
 
 def timesoft_is_configured():
@@ -185,24 +202,60 @@ def _timesoft_visible_input(page, selectors):
     return None
 
 
-def _timesoft_login_with_playwright(page):
-    """Đăng nhập TimeSoft trên trình duyệt headless; không ghi credential ra log."""
+def _timesoft_login_error_text(page):
+    """Lấy thông báo lỗi đăng nhập đang hiển thị nhưng không lấy giá trị input/credential."""
+    selectors = [
+        '.validation-summary-errors', '.field-validation-error', '.alert-danger',
+        '.alert-warning', '.error', '.error-message', '.text-danger',
+        '[role="alert"]', '.toast-message', '.notifyjs-bootstrap-error',
+    ]
+    messages = []
+    for selector in selectors:
+        try:
+            loc = page.locator(selector)
+            for i in range(min(loc.count(), 8)):
+                node = loc.nth(i)
+                if not node.is_visible():
+                    continue
+                txt = re.sub(r"\s+", " ", str(node.inner_text() or "")).strip()
+                if txt and txt not in messages:
+                    messages.append(txt[:300])
+        except Exception:
+            continue
+    return " | ".join(messages[:4])
+
+
+def _timesoft_login_with_playwright(page, verify_url=None):
+    """Đăng nhập TimeSoft và xác minh bằng cách mở lại trang báo cáo thật.
+
+    V80: không kết luận thất bại chỉ vì URL Login chưa đổi ngay sau submit.
+    Một số bản TimeSoft xử lý đăng nhập bằng JavaScript/AJAX rồi mới tạo session.
+    Sau khi submit, hàm chủ động mở verify_url; chỉ khi verify_url lại redirect về
+    /User/Login và vẫn có ô password thì mới xem là đăng nhập thất bại.
+    Credential/cookie/authorization tuyệt đối không được ghi ra log/UI.
+    """
     password_box = _timesoft_visible_input(page, [
         'input[type="password"]',
         'input[name*="password" i]',
         'input[id*="password" i]',
+        'input[name*="pass" i]',
+        'input[id*="pass" i]',
     ])
     if password_box is None:
-        # Nếu không có ô password thì có thể session đã đăng nhập.
-        return True, "Session đã đăng nhập."
+        # Không có ô password: có thể session đã đăng nhập sẵn.
+        return True, "Session TimeSoft đã đăng nhập."
 
     username_box = _timesoft_visible_input(page, [
         'input[name="UserName"]',
         'input[name="Username"]',
+        'input[name*="username" i]',
+        'input[id*="username" i]',
         'input[name*="user" i]',
         'input[id*="user" i]',
         'input[name*="account" i]',
         'input[id*="account" i]',
+        'input[name*="login" i]',
+        'input[id*="login" i]',
         'input[type="email"]',
         'input[type="text"]',
     ])
@@ -210,47 +263,98 @@ def _timesoft_login_with_playwright(page):
         return False, "Không nhận diện được ô tài khoản trên trang đăng nhập TimeSoft."
 
     try:
+        # click + fill giúp kích hoạt đúng event input/change của framework phía trang web.
+        username_box.click()
         username_box.fill(str(TIMESOFT_USERNAME))
+        password_box.click()
         password_box.fill(str(TIMESOFT_PASSWORD))
+        try:
+            password_box.press("Tab")
+        except Exception:
+            pass
+        page.wait_for_timeout(250)
     except Exception as e:
         return False, f"Không nhập được thông tin đăng nhập TimeSoft: {type(e).__name__}"
 
     submit = None
-    for selector in [
+    submit_selectors = [
         'button[type="submit"]',
         'input[type="submit"]',
+        'input[type="button"][value*="đăng" i]',
+        'input[type="button"][value*="login" i]',
         'button:has-text("Đăng nhập")',
+        'button:has-text("Đăng Nhập")',
         'button:has-text("Login")',
         'a:has-text("Đăng nhập")',
-    ]:
+        'a:has-text("Đăng Nhập")',
+        '[onclick*="login" i]',
+        '[id*="login" i]',
+    ]
+    for selector in submit_selectors:
         try:
             loc = page.locator(selector)
-            if loc.count() and loc.first.is_visible():
-                submit = loc.first
+            for i in range(min(loc.count(), 10)):
+                node = loc.nth(i)
+                if node.is_visible() and node.is_enabled():
+                    submit = node
+                    break
+            if submit is not None:
                 break
         except Exception:
-            pass
+            continue
 
     try:
         if submit is not None:
-            submit.click()
+            submit.click(timeout=8_000)
         else:
+            # Fallback an toàn: Enter trên ô password thường kích hoạt submit/JS login.
             password_box.press("Enter")
+
+        # Không phụ thuộc hoàn toàn vào networkidle vì TimeSoft có thể polling.
         try:
-            page.wait_for_load_state("networkidle", timeout=15_000)
+            page.wait_for_load_state("domcontentloaded", timeout=10_000)
         except Exception:
-            page.wait_for_timeout(2_500)
+            pass
+        page.wait_for_timeout(2_000)
     except Exception as e:
         return False, f"Không gửi được biểu mẫu đăng nhập TimeSoft: {type(e).__name__}"
 
-    # Kiểm tra lại ô password: còn hiển thị thường đồng nghĩa đăng nhập thất bại.
+    # Xác minh session bằng chính trang report, tránh false-negative nếu Login dùng AJAX.
+    target_url = verify_url or urljoin(
+        TIMESOFT_BASE_URL + "/",
+        TIMESOFT_REPORT_PAGES["summary_invoice"]["path"].lstrip("/"),
+    )
     try:
-        still_password = _timesoft_visible_input(page, ['input[type="password"]'])
-        if still_password is not None and "/user/login" in str(page.url).lower():
-            return False, "TimeSoft vẫn ở trang đăng nhập. Hãy kiểm tra username/password trong Secrets."
+        page.goto(target_url, wait_until="domcontentloaded", timeout=35_000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=8_000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1_000)
+    except Exception as e:
+        return False, f"Đã gửi đăng nhập nhưng không mở được trang kiểm tra TimeSoft: {type(e).__name__}"
+
+    final_url = str(page.url or "")
+    try:
+        still_password = _timesoft_visible_input(page, [
+            'input[type="password"]',
+            'input[name*="password" i]',
+            'input[id*="password" i]',
+        ])
     except Exception:
-        pass
-    return True, "Đăng nhập TimeSoft thành công."
+        still_password = None
+
+    is_login_url = "/user/login" in final_url.lower()
+    if is_login_url and still_password is not None:
+        err = _timesoft_login_error_text(page)
+        suffix = f" Thông báo từ TimeSoft: {err}" if err else ""
+        return False, (
+            "TimeSoft vẫn chuyển về trang đăng nhập sau khi xác minh session. "
+            "Tài khoản đã được nạp từ Secrets nhưng form/luồng đăng nhập tự động chưa hoàn tất."
+            + suffix
+        )
+
+    return True, f"Đăng nhập TimeSoft thành công · đã xác minh bằng trang báo cáo ({final_url})."
 
 
 def timesoft_auto_discover_apis():
@@ -331,7 +435,7 @@ def timesoft_auto_discover_apis():
             )
             page.goto(first_url, wait_until="domcontentloaded", timeout=35_000)
             page.wait_for_timeout(1_000)
-            ok_login, login_msg = _timesoft_login_with_playwright(page)
+            ok_login, login_msg = _timesoft_login_with_playwright(page, verify_url=first_url)
             if not ok_login:
                 context.close()
                 browser.close()
@@ -386,29 +490,387 @@ def _timesoft_discovery_rows(discovery):
 
 
 def _timesoft_sanitized_discovery(discovery):
-    """Bản JSON cho Admin tải về: không có password/cookie/authorization."""
+    """JSON kỹ thuật an toàn hơn: chỉ giữ request cần thiết, không xuất response/PII/token."""
     safe = {}
+    allowed = {
+        "method", "url", "resource_type", "status", "content_type",
+        "post_data", "request_headers", "json_kind", "score",
+    }
     for report_key, info in (discovery or {}).items():
-        safe_info = {
-            "report": info.get("report", report_key),
-            "page_url": info.get("page_url", ""),
-            "best": None,
-            "candidates": [],
+        best = (info or {}).get("best") or {}
+        safe_best = {k: v for k, v in best.items() if k in allowed}
+        # Tuyệt đối không xuất Cookie/Authorization nếu về sau header capture thay đổi.
+        headers = dict(safe_best.get("request_headers") or {})
+        for bad in ["cookie", "authorization", "proxy-authorization"]:
+            headers.pop(bad, None)
+        safe_best["request_headers"] = headers
+        safe[report_key] = {
+            "report": (info or {}).get("report", report_key),
+            "page_url": (info or {}).get("page_url", ""),
+            "best": safe_best or None,
         }
-        for source_name in ["best"]:
-            item = info.get(source_name)
-            if item:
-                safe_info[source_name] = {
-                    k: v for k, v in item.items()
-                    if k not in {"body", "cookies", "authorization", "cookie"}
-                }
-        for item in info.get("candidates", [])[:20]:
-            safe_info["candidates"].append({
-                k: v for k, v in item.items()
-                if k not in {"body", "cookies", "authorization", "cookie"}
-            })
-        safe[report_key] = safe_info
     return safe
+
+
+def _timesoft_date_range_text(start_date, end_date):
+    if isinstance(start_date, datetime):
+        start_date = start_date.date()
+    if isinstance(end_date, datetime):
+        end_date = end_date.date()
+    if not isinstance(start_date, date) or not isinstance(end_date, date):
+        raise ValueError("Khoảng ngày TimeSoft không hợp lệ.")
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+    return f"{start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}"
+
+
+def _timesoft_requests_session_from_browser_cookies(cookies, user_agent=""):
+    session = requests.Session()
+    session.headers.update({
+        "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.7",
+        "User-Agent": str(user_agent or "Mozilla/5.0"),
+    })
+    for cookie in cookies or []:
+        name = str(cookie.get("name", "") or "")
+        value = str(cookie.get("value", "") or "")
+        if not name:
+            continue
+        kwargs = {}
+        domain = str(cookie.get("domain", "") or "").strip()
+        path = str(cookie.get("path", "") or "/").strip() or "/"
+        if domain:
+            kwargs["domain"] = domain
+        if path:
+            kwargs["path"] = path
+        try:
+            session.cookies.set(name, value, **kwargs)
+        except Exception:
+            session.cookies.set(name, value)
+    return session
+
+
+def _timesoft_new_authenticated_http_session():
+    """Dùng Playwright chỉ để đăng nhập, sau đó chuyển cookie sang requests.Session."""
+    if not timesoft_is_configured():
+        return False, "Chưa khai báo đầy đủ [TIMESOFT] trong Streamlit Secrets.", None
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return False, "Chưa cài Playwright/Chromium cho TimeSoft.", None
+
+    browser = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
+            context = browser.new_context(
+                ignore_https_errors=False,
+                viewport={"width": 1440, "height": 1000},
+                locale="vi-VN",
+            )
+            page = context.new_page()
+            verify_url = urljoin(
+                TIMESOFT_BASE_URL + "/",
+                TIMESOFT_REPORT_PAGES["summary_invoice"]["path"].lstrip("/"),
+            )
+            page.goto(verify_url, wait_until="domcontentloaded", timeout=35_000)
+            page.wait_for_timeout(600)
+            ok_login, login_msg = _timesoft_login_with_playwright(page, verify_url=verify_url)
+            if not ok_login:
+                context.close()
+                browser.close()
+                browser = None
+                return False, login_msg, None
+
+            cookies = context.cookies()
+            try:
+                user_agent = page.evaluate("navigator.userAgent")
+            except Exception:
+                user_agent = "Mozilla/5.0"
+            context.close()
+            browser.close()
+            browser = None
+
+        http_session = _timesoft_requests_session_from_browser_cookies(cookies, user_agent)
+        return True, "Đã tạo phiên TimeSoft và chuyển session sang API trực tiếp.", http_session
+    except Exception as e:
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:
+            pass
+        return False, f"Không tạo được phiên API TimeSoft: {type(e).__name__}: {e}", None
+
+
+def _timesoft_get_http_session(force_login=False):
+    key_session = "_timesoft_http_session_v81"
+    key_time = "_timesoft_http_session_time_v81"
+    now_ts = time.time()
+    if not force_login:
+        existing = st.session_state.get(key_session)
+        created_at = float(st.session_state.get(key_time, 0) or 0)
+        if existing is not None and (now_ts - created_at) < TIMESOFT_HTTP_SESSION_TTL_SECONDS:
+            return True, "Đang dùng lại phiên TimeSoft còn hiệu lực.", existing
+
+    ok, msg, session = _timesoft_new_authenticated_http_session()
+    if ok and session is not None:
+        st.session_state[key_session] = session
+        st.session_state[key_time] = now_ts
+    return ok, msg, session
+
+
+def _timesoft_post_json(session, api_path, referer_path, payload, timeout=60):
+    url = urljoin(TIMESOFT_BASE_URL + "/", str(api_path).lstrip("/"))
+    referer = urljoin(TIMESOFT_BASE_URL + "/", str(referer_path).lstrip("/"))
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json;charset=UTF-8",
+        "Referer": referer,
+        "Origin": TIMESOFT_BASE_URL,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    try:
+        resp = session.post(url, json=payload, headers=headers, timeout=timeout, allow_redirects=True)
+    except Exception as e:
+        return False, f"Không gọi được TimeSoft API: {type(e).__name__}: {e}", None, False
+
+    final_url = str(resp.url or "")
+    ctype = str(resp.headers.get("content-type", "") or "").lower()
+    if resp.status_code in {401, 403} or "/user/login" in final_url.lower():
+        return False, "Phiên đăng nhập TimeSoft đã hết hạn.", None, True
+    if resp.status_code != 200:
+        return False, f"TimeSoft API HTTP {resp.status_code}.", None, False
+    if "json" not in ctype:
+        # Login page đôi lúc trả HTTP 200 HTML.
+        body_start = str(resp.text or "")[:1000].lower()
+        if "login" in final_url.lower() or "password" in body_start or "đăng nhập" in body_start:
+            return False, "Phiên đăng nhập TimeSoft không còn hợp lệ.", None, True
+    try:
+        data = resp.json()
+    except Exception:
+        return False, "TimeSoft API không trả JSON hợp lệ.", None, False
+
+    return_code = str((data or {}).get("ReturnCode", "") or "")
+    if return_code and return_code != "000000":
+        msg = str((data or {}).get("Message", "") or "").strip()
+        return False, f"TimeSoft trả mã {return_code}: {msg or 'Không rõ lỗi'}", data, False
+    return True, "OK", data, False
+
+
+def _timesoft_summary_invoice_payload(start_date, end_date):
+    return {
+        "objectSearch": {
+            "TypeData": 0,
+            "TypeInvoice": 1,
+            "TachInvoiceSpa": 0,
+            "CreateTimeRange": _timesoft_date_range_text(start_date, end_date),
+        },
+        "pageSize": 0,
+    }
+
+
+def _timesoft_employee_checkin_payload(start_date, end_date, page_index=1, page_size=TIMESOFT_CHECKIN_PAGE_SIZE):
+    return {
+        "objectSearch": {
+            "CreateDateRange": _timesoft_date_range_text(start_date, end_date),
+        },
+        "pageIndex": int(page_index),
+        "pageSize": int(page_size),
+    }
+
+
+def _timesoft_fetch_summary_invoice(session, start_date, end_date):
+    cfg = TIMESOFT_DIRECT_APIS["summary_invoice"]
+    payload = _timesoft_summary_invoice_payload(start_date, end_date)
+    ok, msg, data, auth_failed = _timesoft_post_json(
+        session, cfg["url"], cfg["referer"], payload
+    )
+    if not ok:
+        return False, msg, {}, pd.DataFrame(), auth_failed
+    rows = (data or {}).get("Data") or []
+    df = pd.json_normalize(rows, sep=".") if isinstance(rows, list) and rows else pd.DataFrame()
+    summary_keys = [
+        "Total", "TotalMoney", "TotalDiscount", "TotalQuantity", "TotalInvoice",
+        "TotalActualRevenu", "TotalPromotion", "TotalPayment", "TotalActualTerm",
+        "TotalDebt", "ReportByYear", "Message",
+    ]
+    meta = {k: (data or {}).get(k) for k in summary_keys if k in (data or {})}
+    return True, "Đã lấy báo cáo tổng hợp doanh thu.", meta, df, False
+
+
+def _timesoft_fetch_employee_checkin(session, start_date, end_date):
+    cfg = TIMESOFT_DIRECT_APIS["employee_checkin"]
+    all_rows = []
+    total_expected = None
+    for page_index in range(1, TIMESOFT_MAX_CHECKIN_PAGES + 1):
+        payload = _timesoft_employee_checkin_payload(
+            start_date, end_date, page_index=page_index, page_size=TIMESOFT_CHECKIN_PAGE_SIZE
+        )
+        ok, msg, data, auth_failed = _timesoft_post_json(
+            session, cfg["url"], cfg["referer"], payload
+        )
+        if not ok:
+            return False, msg, pd.DataFrame(), {"Total": total_expected}, auth_failed
+        if total_expected is None:
+            try:
+                total_expected = int((data or {}).get("Total") or 0)
+            except Exception:
+                total_expected = 0
+        page_rows = (data or {}).get("Data") or []
+        if not isinstance(page_rows, list) or not page_rows:
+            break
+        all_rows.extend(page_rows)
+        if total_expected and len(all_rows) >= total_expected:
+            break
+
+    df = pd.json_normalize(all_rows, sep=".") if all_rows else pd.DataFrame()
+    meta = {"Total": total_expected if total_expected is not None else len(all_rows)}
+    return True, "Đã lấy báo cáo chấm công nhân viên.", df, meta, False
+
+
+def timesoft_direct_sync(start_date, end_date, force_login=False):
+    """Đồng bộ trực tiếp 2 API. Nếu session hết hạn, tự đăng nhập lại và thử thêm 1 lần."""
+    if not timesoft_is_configured():
+        return False, "Chưa cấu hình TimeSoft trong Secrets.", {}
+
+    last_error = ""
+    for attempt in range(2):
+        force_now = bool(force_login or attempt > 0)
+        ok_session, session_msg, session = _timesoft_get_http_session(force_login=force_now)
+        if not ok_session or session is None:
+            return False, session_msg, {}
+
+        ok_inv, msg_inv, inv_meta, inv_df, inv_auth = _timesoft_fetch_summary_invoice(
+            session, start_date, end_date
+        )
+        if not ok_inv:
+            last_error = msg_inv
+            if inv_auth and attempt == 0:
+                continue
+            return False, msg_inv, {}
+
+        ok_chk, msg_chk, chk_df, chk_meta, chk_auth = _timesoft_fetch_employee_checkin(
+            session, start_date, end_date
+        )
+        if not ok_chk:
+            last_error = msg_chk
+            if chk_auth and attempt == 0:
+                continue
+            return False, msg_chk, {}
+
+        result = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "synced_at": datetime.now(VN_TZ),
+            "session_message": session_msg,
+            "summary_invoice_meta": inv_meta,
+            "summary_invoice_df": inv_df,
+            "employee_checkin_meta": chk_meta,
+            "employee_checkin_df": chk_df,
+        }
+        return True, (
+            f"Đồng bộ TimeSoft thành công: {len(inv_df)} dòng doanh thu chi tiết, "
+            f"{len(chk_df)} dòng chấm công."
+        ), result
+
+    return False, last_error or "Không đồng bộ được TimeSoft.", {}
+
+
+# ==========================================================
+# V82 - SNAPSHOT ĐỒNG BỘ NỀN CLOUD RUN / POSTGRESQL
+# ==========================================================
+def _timesoft_bg_key(prefix, target_date=None):
+    d = target_date if isinstance(target_date, date) else get_vn_today()
+    return f"{prefix}_{d.strftime('%Y%m%d')}"
+
+
+def _timesoft_read_background_snapshot(target_date=None):
+    """Đọc snapshot do Cloud Run Job ghi vào PostgreSQL; không gọi TimeSoft."""
+    if vpg is None or not vpg.is_enabled():
+        return {}
+    d = target_date if isinstance(target_date, date) else get_vn_today()
+    try:
+        return {
+            "date": d,
+            "status": vpg.read_dataset("timesoft_background_status", allow_stale=True),
+            "summary_invoice": vpg.read_dataset(_timesoft_bg_key("timesoft_summary_invoice", d), allow_stale=True),
+            "summary_totals": vpg.read_dataset(_timesoft_bg_key("timesoft_summary_totals", d), allow_stale=True),
+            "employee_checkin": vpg.read_dataset(_timesoft_bg_key("timesoft_employee_checkin", d), allow_stale=True),
+        }
+    except Exception:
+        return {}
+
+
+def _timesoft_background_status_row():
+    snap = _timesoft_read_background_snapshot(get_vn_today())
+    df = snap.get("status") if isinstance(snap, dict) else None
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        return df.iloc[0].to_dict()
+    return {}
+
+
+def _timesoft_checkin_display_df(df):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+    preferred = [
+        "WorkDateStr",
+        "employeeInfo.EmployeeCode",
+        "employeeInfo.Name",
+        "WorkTimeName",
+        "StartWorkTime",
+        "EndWorkTime",
+        "MachineTimeCheckInStr",
+        "MachineTimeCheckOutStr",
+        "GoWorkTypeName",
+        "LastCheckInTypeName",
+        "TotalMinuteInGoLate",
+        "TotalMinuteBackHomeEarly",
+        "TotalMinuteInDay",
+        "TotalCheckInOneDay",
+    ]
+    cols = [c for c in preferred if c in df.columns]
+    out = df[cols].copy() if cols else df.copy()
+    rename = {
+        "WorkDateStr": "Ngày",
+        "employeeInfo.EmployeeCode": "Mã NV",
+        "employeeInfo.Name": "Nhân viên",
+        "WorkTimeName": "Ca",
+        "StartWorkTime": "Giờ bắt đầu ca",
+        "EndWorkTime": "Giờ kết thúc ca",
+        "MachineTimeCheckInStr": "Check-in",
+        "MachineTimeCheckOutStr": "Check-out",
+        "GoWorkTypeName": "Trạng thái vào",
+        "LastCheckInTypeName": "Trạng thái ra",
+        "TotalMinuteInGoLate": "Phút đi trễ",
+        "TotalMinuteBackHomeEarly": "Phút về sớm",
+        "TotalMinuteInDay": "Tổng phút trong ngày",
+        "TotalCheckInOneDay": "Số lần check-in",
+    }
+    return out.rename(columns=rename)
+
+
+def _timesoft_export_workbook(sync_result):
+    output = io.BytesIO()
+    inv_df = sync_result.get("summary_invoice_df")
+    chk_df = sync_result.get("employee_checkin_df")
+    inv_meta = sync_result.get("summary_invoice_meta") or {}
+    chk_meta = sync_result.get("employee_checkin_meta") or {}
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        summary_rows = []
+        for k, v in inv_meta.items():
+            summary_rows.append({"Nhóm": "Doanh thu", "Chỉ số": k, "Giá trị": v})
+        for k, v in chk_meta.items():
+            summary_rows.append({"Nhóm": "Chấm công", "Chỉ số": k, "Giá trị": v})
+        pd.DataFrame(summary_rows).to_excel(writer, index=False, sheet_name="TongHop")
+        (inv_df if isinstance(inv_df, pd.DataFrame) else pd.DataFrame()).to_excel(
+            writer, index=False, sheet_name="DoanhThu"
+        )
+        (chk_df if isinstance(chk_df, pd.DataFrame) else pd.DataFrame()).to_excel(
+            writer, index=False, sheet_name="ChamCong"
+        )
+    return output.getvalue()
 
 
 # --- CHUẨN HÓA TÊN / TÀI KHOẢN ---
@@ -9302,96 +9764,226 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
     tab_timesoft, tab_gsheet = st.tabs(["🌐 TimeSoft", "📄 Excel / Google Sheets"])
 
     with tab_timesoft:
-        st.markdown("### 🌐 TimeSoft · Tự động đăng nhập & phát hiện API")
+        st.markdown("### 🌐 TimeSoft · API trực tiếp + Đồng bộ nền Cloud Run")
         st.caption(
-            "Hệ thống tự đăng nhập bằng Streamlit Secrets, mở 2 trang báo cáo và bắt request XHR/fetch thật. "
-            "API được xác định từ request thực tế của TimeSoft, không đoán tên endpoint."
+            "V82 giữ chế độ đồng bộ trực tiếp và bổ sung Cloud Run Job chạy nền mỗi 15 phút. "
+            "Snapshot nền được lưu PostgreSQL để mọi instance cùng dùng dữ liệu mới nhất."
         )
 
         if timesoft_is_configured():
             st.success(f"✅ Đã cấu hình TimeSoft: {TIMESOFT_BASE_URL} · tài khoản đã được nạp từ Secrets.")
         else:
             st.error(
-                "❌ Chưa đủ cấu hình TimeSoft. Hãy thêm [TIMESOFT] với base_url, username, password vào Streamlit Secrets."
+                "❌ Chưa đủ cấu hình TimeSoft. Hãy cấu hình Secret Manager trên Cloud Run hoặc [TIMESOFT] trong Streamlit Secrets."
             )
 
-        c_ts1, c_ts2 = st.columns([3, 2])
-        with c_ts1:
-            discover_now = st.button(
-                "🔍 Tự phát hiện API TimeSoft",
+        st.markdown("#### ☁️ Đồng bộ nền 24/7 · mỗi 15 phút")
+        if vpg is not None and vpg.is_enabled():
+            bg_status = _timesoft_background_status_row()
+            if bg_status:
+                bg_ok = str(bg_status.get("status", "")).lower() == "success"
+                last_sync = str(bg_status.get("synced_at_vn", "") or bg_status.get("synced_at", ""))
+                (st.success if bg_ok else st.warning)(
+                    f"{'✅' if bg_ok else '⚠️'} Cloud Run Job: {bg_status.get('status', 'unknown')} · "
+                    f"lần chạy gần nhất {last_sync or 'chưa rõ'}"
+                )
+                b1, b2, b3, b4 = st.columns(4)
+                b1.metric("Chu kỳ", "15 phút")
+                b2.metric("Doanh thu · dòng", int(float(bg_status.get("invoice_rows", 0) or 0)))
+                b3.metric("Chấm công · dòng", int(float(bg_status.get("checkin_rows", 0) or 0)))
+                b4.metric("Thời gian chạy", f"{float(bg_status.get('duration_seconds', 0) or 0):.1f}s")
+                bg_date = get_vn_today()
+                bg_snap = _timesoft_read_background_snapshot(bg_date)
+                with st.expander("📦 Xem snapshot nền hôm nay", expanded=False):
+                    bg_tot = bg_snap.get("summary_totals")
+                    if isinstance(bg_tot, pd.DataFrame) and not bg_tot.empty:
+                        tr = bg_tot.iloc[0].to_dict()
+                        t1, t2, t3 = st.columns(3)
+                        t1.metric("Tổng tiền", f"{float(tr.get('TotalMoney', 0) or 0):,.0f} đ".replace(",", "."))
+                        t2.metric("Giảm giá", f"{float(tr.get('TotalDiscount', 0) or 0):,.0f} đ".replace(",", "."))
+                        t3.metric("Doanh thu thực", f"{float(tr.get('TotalActualRevenu', 0) or 0):,.0f} đ".replace(",", "."))
+                    bg_inv = bg_snap.get("summary_invoice")
+                    if isinstance(bg_inv, pd.DataFrame) and not bg_inv.empty:
+                        st.caption("Doanh thu nền hôm nay")
+                        st.dataframe(bg_inv, width="stretch", hide_index=True, height=300)
+                    bg_chk = bg_snap.get("employee_checkin")
+                    bg_chk_view = _timesoft_checkin_display_df(bg_chk)
+                    if isinstance(bg_chk_view, pd.DataFrame) and not bg_chk_view.empty:
+                        st.caption("Chấm công nền hôm nay")
+                        st.dataframe(bg_chk_view, width="stretch", hide_index=True, height=340)
+            else:
+                st.info("PostgreSQL đã bật nhưng chưa có snapshot TimeSoft nền. Sau khi Cloud Scheduler chạy Job lần đầu, trạng thái sẽ xuất hiện tại đây.")
+        else:
+            st.caption("Máy local không bật PostgreSQL nên chỉ hiển thị chế độ trực tiếp. Trên Cloud Run, snapshot nền sẽ được đọc từ PostgreSQL.")
+
+        st.markdown("#### 🔄 Lấy dữ liệu trực tiếp / kiểm tra thủ công")
+        ts_today = get_vn_today()
+        ts_default_start = st.session_state.get("timesoft_start_date_v81", ts_today)
+        ts_default_end = st.session_state.get("timesoft_end_date_v81", ts_today)
+        c_date1, c_date2 = st.columns(2)
+        with c_date1:
+            ts_start_date = st.date_input(
+                "Từ ngày",
+                value=ts_default_start,
+                key="timesoft_start_date_v81",
+                format="DD/MM/YYYY",
+            )
+        with c_date2:
+            ts_end_date = st.date_input(
+                "Đến ngày",
+                value=ts_default_end,
+                key="timesoft_end_date_v81",
+                format="DD/MM/YYYY",
+            )
+
+        if ts_start_date > ts_end_date:
+            st.warning("Từ ngày đang lớn hơn Đến ngày. Hệ thống sẽ tự đảo khoảng ngày khi đồng bộ.")
+
+        c_sync1, c_sync2, c_sync3 = st.columns([2.2, 2.2, 1.4])
+        with c_sync1:
+            ts_sync_now = st.button(
+                "🔄 Đồng bộ TimeSoft ngay",
                 use_container_width=True,
                 disabled=not timesoft_is_configured(),
-                key="timesoft_auto_discover_v79",
+                key="timesoft_direct_sync_v81",
+                type="primary",
             )
-        with c_ts2:
-            if st.button(
-                "🧹 Xóa kết quả phát hiện",
+        with c_sync2:
+            ts_force_sync = st.button(
+                "🔐 Đăng nhập lại & đồng bộ",
                 use_container_width=True,
-                disabled=not bool(st.session_state.get("timesoft_api_discovery_v79")),
-                key="timesoft_clear_discovery_v79",
+                disabled=not timesoft_is_configured(),
+                key="timesoft_force_sync_v81",
+            )
+        with c_sync3:
+            if st.button(
+                "🧹 Xóa dữ liệu",
+                use_container_width=True,
+                disabled=not bool(st.session_state.get("timesoft_direct_result_v81")),
+                key="timesoft_clear_direct_v81",
             ):
-                st.session_state.pop("timesoft_api_discovery_v79", None)
-                st.session_state.pop("timesoft_api_discovery_msg_v79", None)
+                st.session_state.pop("timesoft_direct_result_v81", None)
+                st.session_state.pop("timesoft_direct_msg_v81", None)
                 st.rerun()
 
-        if discover_now:
-            with st.spinner("Đang đăng nhập TimeSoft và bắt request thật của 2 báo cáo..."):
-                ok_ts, msg_ts, discovery_ts = timesoft_auto_discover_apis()
-                st.session_state["timesoft_api_discovery_v79"] = discovery_ts
-                st.session_state["timesoft_api_discovery_msg_v79"] = (ok_ts, msg_ts)
+        if ts_sync_now or ts_force_sync:
+            with st.spinner("Đang đăng nhập/kiểm tra session và gọi trực tiếp 2 API TimeSoft..."):
+                ok_direct, msg_direct, result_direct = timesoft_direct_sync(
+                    ts_start_date,
+                    ts_end_date,
+                    force_login=bool(ts_force_sync),
+                )
+                st.session_state["timesoft_direct_result_v81"] = result_direct
+                st.session_state["timesoft_direct_msg_v81"] = (ok_direct, msg_direct)
 
-        discovery_ts = st.session_state.get("timesoft_api_discovery_v79", {})
-        discovery_msg = st.session_state.get("timesoft_api_discovery_msg_v79")
-        if discovery_msg:
-            ok_ts, msg_ts = discovery_msg
-            (st.success if ok_ts else st.warning)(msg_ts)
+        direct_msg = st.session_state.get("timesoft_direct_msg_v81")
+        if direct_msg:
+            ok_direct, msg_direct = direct_msg
+            (st.success if ok_direct else st.error)(msg_direct)
 
-        if discovery_ts:
-            best_df = _timesoft_discovery_rows(discovery_ts)
-            st.dataframe(best_df, width="stretch", hide_index=True, height="content")
+        direct_result = st.session_state.get("timesoft_direct_result_v81") or {}
+        if direct_result:
+            synced_at = direct_result.get("synced_at")
+            if isinstance(synced_at, datetime):
+                st.caption(f"Lần đồng bộ: {synced_at.strftime('%d/%m/%Y %H:%M:%S')} · {direct_result.get('session_message', '')}")
 
-            for report_key, info in discovery_ts.items():
-                best = (info or {}).get("best") or {}
-                report_label = (info or {}).get("report", report_key)
-                with st.expander(f"🔎 {report_label} · Request được chọn", expanded=False):
-                    if not best:
-                        st.warning("Chưa bắt được request phù hợp.")
-                        continue
-                    st.code(
-                        f"{best.get('method', '')} {best.get('url', '')}\n"
-                        f"HTTP {best.get('status', '')}\n"
-                        f"Content-Type: {best.get('content_type', '')}\n"
-                        f"POST data: {best.get('post_data', '')[:4000]}",
-                        language="text",
-                    )
-                    body_preview = str(best.get("body_preview", "") or "")
-                    if body_preview:
-                        st.caption("Response preview")
-                        st.code(body_preview[:6000], language="json" if best.get("json_kind") else "text")
+            inv_meta = direct_result.get("summary_invoice_meta") or {}
+            inv_df = direct_result.get("summary_invoice_df")
+            chk_meta = direct_result.get("employee_checkin_meta") or {}
+            chk_df = direct_result.get("employee_checkin_df")
 
-            safe_json = json.dumps(
-                _timesoft_sanitized_discovery(discovery_ts),
-                ensure_ascii=False,
-                indent=2,
-            ).encode("utf-8")
-            st.download_button(
-                "📥 Tải cấu hình API TimeSoft đã phát hiện",
-                data=safe_json,
-                file_name="timesoft_api_discovery.json",
-                mime="application/json",
-                use_container_width=True,
-                key="download_timesoft_discovery_v79",
+            st.markdown("##### 💰 Báo cáo tổng hợp doanh thu")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Số dòng chi tiết", len(inv_df) if isinstance(inv_df, pd.DataFrame) else 0)
+            m2.metric("Tổng tiền", f"{float(inv_meta.get('TotalMoney') or 0):,.0f} đ".replace(",", "."))
+            m3.metric("Tổng giảm giá", f"{float(inv_meta.get('TotalDiscount') or 0):,.0f} đ".replace(",", "."))
+            m4.metric("Doanh thu thực", f"{float(inv_meta.get('TotalActualRevenu') or 0):,.0f} đ".replace(",", "."))
+            if isinstance(inv_df, pd.DataFrame) and not inv_df.empty:
+                st.dataframe(inv_df, width="stretch", hide_index=True, height=360)
+            else:
+                st.info("Khoảng ngày đã chọn không có dòng doanh thu chi tiết hoặc TimeSoft trả Data rỗng.")
+
+            st.markdown("##### 🕒 Báo cáo chấm công nhân viên")
+            chk_display = _timesoft_checkin_display_df(chk_df)
+            cc1, cc2 = st.columns(2)
+            cc1.metric("Tổng bản ghi", int(chk_meta.get("Total") or (len(chk_df) if isinstance(chk_df, pd.DataFrame) else 0)))
+            cc2.metric("Đã tải", len(chk_df) if isinstance(chk_df, pd.DataFrame) else 0)
+            if isinstance(chk_display, pd.DataFrame) and not chk_display.empty:
+                st.dataframe(chk_display, width="stretch", hide_index=True, height=420)
+            else:
+                st.info("Khoảng ngày đã chọn chưa có dữ liệu chấm công.")
+
+            try:
+                export_bytes = _timesoft_export_workbook(direct_result)
+                start_txt = direct_result.get("start_date").strftime("%Y%m%d") if isinstance(direct_result.get("start_date"), date) else "from"
+                end_txt = direct_result.get("end_date").strftime("%Y%m%d") if isinstance(direct_result.get("end_date"), date) else "to"
+                st.download_button(
+                    "📥 Tải Excel dữ liệu TimeSoft",
+                    data=export_bytes,
+                    file_name=f"TimeSoft_{start_txt}_{end_txt}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="timesoft_download_excel_v81",
+                )
+            except Exception as e:
+                st.warning(f"Không tạo được file Excel TimeSoft: {e}")
+
+        st.markdown("---")
+        with st.expander("🧪 Công cụ kỹ thuật · Phát hiện lại API", expanded=False):
+            st.caption(
+                "Chỉ dùng khi TimeSoft thay đổi hệ thống. V81 đã biết 2 endpoint hiện tại nên bình thường không cần chạy discovery."
             )
+            c_ts1, c_ts2 = st.columns([3, 2])
+            with c_ts1:
+                discover_now = st.button(
+                    "🔍 Phát hiện lại API TimeSoft",
+                    use_container_width=True,
+                    disabled=not timesoft_is_configured(),
+                    key="timesoft_auto_discover_v81",
+                )
+            with c_ts2:
+                if st.button(
+                    "🧹 Xóa kết quả phát hiện",
+                    use_container_width=True,
+                    disabled=not bool(st.session_state.get("timesoft_api_discovery_v81")),
+                    key="timesoft_clear_discovery_v81",
+                ):
+                    st.session_state.pop("timesoft_api_discovery_v81", None)
+                    st.session_state.pop("timesoft_api_discovery_msg_v81", None)
+                    st.rerun()
 
-        st.markdown("#### Báo cáo được kiểm tra tự động")
-        st.code(
-            "/Report/ReportSummaryInvoice/Index\n"
-            "/Report/ReportEmployeeCheckin/Index",
-            language="text",
-        )
+            if discover_now:
+                with st.spinner("Đang đăng nhập TimeSoft và bắt request thật của 2 báo cáo..."):
+                    ok_ts, msg_ts, discovery_ts = timesoft_auto_discover_apis()
+                    st.session_state["timesoft_api_discovery_v81"] = discovery_ts
+                    st.session_state["timesoft_api_discovery_msg_v81"] = (ok_ts, msg_ts)
+
+            discovery_ts = st.session_state.get("timesoft_api_discovery_v81", {})
+            discovery_msg = st.session_state.get("timesoft_api_discovery_msg_v81")
+            if discovery_msg:
+                ok_ts, msg_ts = discovery_msg
+                (st.success if ok_ts else st.warning)(msg_ts)
+
+            if discovery_ts:
+                best_df = _timesoft_discovery_rows(discovery_ts)
+                st.dataframe(best_df, width="stretch", hide_index=True, height="content")
+                safe_json = json.dumps(
+                    _timesoft_sanitized_discovery(discovery_ts),
+                    ensure_ascii=False,
+                    indent=2,
+                ).encode("utf-8")
+                st.download_button(
+                    "📥 Tải cấu hình API kỹ thuật (đã loại response/PII/token)",
+                    data=safe_json,
+                    file_name="timesoft_api_discovery_safe.json",
+                    mime="application/json",
+                    use_container_width=True,
+                    key="download_timesoft_discovery_v81",
+                )
+
         st.caption(
-            "Bảo mật: app không hiển thị password, Cookie hoặc Authorization. "
-            "Nếu môi trường chưa có Playwright/Chromium, trang sẽ báo rõ dependency cần cài."
+            "API V81: ReportSummaryInvoice/SearchFullText và ReportEmployeeCheckin/SearchElastic. "
+            "Password, Cookie và Authorization không được hiển thị trên giao diện."
         )
 
     with tab_gsheet:

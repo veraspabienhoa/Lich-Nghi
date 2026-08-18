@@ -1,4 +1,4 @@
-# V78 - Dropdown/Search UI customization in Giao diện tùy chỉnh (2026-08-18)
+# V76 - UI/permissions/staff import-export update (2026-08-18)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -3935,54 +3935,12 @@ UI_THEME_FONT_OPTIONS = [
     "Courier New", "Cinzel Decorative"
 ]
 UI_THEME_EFFECT_OPTIONS = ["Không", "Bóng nhẹ", "Bóng nổi", "Hover nâng", "Gradient nhẹ"]
-
-# V77 - Tùy chỉnh riêng MENU CHỨC NĂNG trong cùng cấu hình giao diện toàn hệ thống.
-# Các giá trị chiều rộng dùng phần trăm để thích ứng tốt trên cả desktop và mobile.
-MENU_UI_DEFAULT = {
-    "title_desktop_size": 18,
-    "title_mobile_size": 18,
-    "button_desktop_size": 16,
-    "button_mobile_size": 16,
-    "selected_desktop_size": 16,
-    "selected_mobile_size": 16,
-    "note_desktop_size": 16,
-    "note_mobile_size": 16,
-    "button_width_desktop_pct": 100,
-    "button_width_mobile_pct": 100,
-}
-
-# V78 - Giao diện chung cho Selectbox / MultiSelect / Searchable Dropdown.
-# Giá trị mặc định giữ đúng phong cách đang dùng trước V78.
-DROPDOWN_SEARCH_UI_DEFAULT = {
-    "content_desktop_size": 16,
-    "content_mobile_size": 16,
-    "label_desktop_size": 16,
-    "label_mobile_size": 16,
-    "box_text_color": "#333333",
-    "box_bg_color": "#FFFFFF",
-    "label_text_color": "#222222",
-    "label_bg_color": "#D9D9D9",
-    "border_color": "#F2F2F2",
-    "hover_bg_color": "#F7E8EF",
-    "hover_icon_color": "#A85F86",
-    "option_hover_bg_color": "#F3DCE8",
-    "option_hover_text_color": "#7D3159",
-    "label_radius_px": 5,
-    "label_padding_y_px": 4.5,
-    "label_padding_x_px": 8.0,
-    "option_hover_indent_px": 14,
-    "popover_max_height_vh": 85,
-    "mobile_popover_edge_gap_px": 12,
-}
-
 UI_THEME_DEFAULT = {
     "main_title": {"desktop_size": 28, "mobile_size": 28, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
     "sub_title": {"desktop_size": 22, "mobile_size": 22, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
     "small_title": {"desktop_size": 18, "mobile_size": 18, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
     "label_content": {"desktop_size": 16, "mobile_size": 16, "font_family": "Roboto", "text_color": "#333333", "bg_color": "#D9D9D9", "effect": "Không"},
     "table": {"desktop_size": 13, "mobile_size": 13, "font_family": "Roboto", "text_color": "#333333", "bg_color": "#D9D9D9", "effect": "Không"},
-    "menu": dict(MENU_UI_DEFAULT),
-    "dropdown_search": dict(DROPDOWN_SEARCH_UI_DEFAULT),
 }
 
 
@@ -4021,58 +3979,6 @@ def _normalized_theme_config(raw=None):
             "bg_color": _valid_theme_hex(incoming.get("bg_color"), base["bg_color"]),
             "effect": effect,
         }
-
-    menu_in = raw.get("menu", {}) if isinstance(raw.get("menu", {}), dict) else {}
-    menu = dict(MENU_UI_DEFAULT)
-    for field in [
-        "title_desktop_size", "title_mobile_size",
-        "button_desktop_size", "button_mobile_size",
-        "selected_desktop_size", "selected_mobile_size",
-        "note_desktop_size", "note_mobile_size",
-    ]:
-        try:
-            menu[field] = max(8, min(36, int(float(menu_in.get(field, menu[field])))))
-        except Exception:
-            pass
-    for field in ["button_width_desktop_pct", "button_width_mobile_pct"]:
-        try:
-            menu[field] = max(35, min(100, int(float(menu_in.get(field, menu[field])))))
-        except Exception:
-            pass
-    result["menu"] = menu
-
-    # V78: cấu hình Dropdown / Search box độc lập với Label/Nội dung chung.
-    dd_in = raw.get("dropdown_search", {}) if isinstance(raw.get("dropdown_search", {}), dict) else {}
-    dd = dict(DROPDOWN_SEARCH_UI_DEFAULT)
-    for field in ["content_desktop_size", "content_mobile_size", "label_desktop_size", "label_mobile_size"]:
-        try:
-            dd[field] = max(8, min(36, int(float(dd_in.get(field, dd[field])))))
-        except Exception:
-            pass
-    for field in [
-        "box_text_color", "box_bg_color", "label_text_color", "label_bg_color", "border_color",
-        "hover_bg_color", "hover_icon_color", "option_hover_bg_color", "option_hover_text_color",
-    ]:
-        dd[field] = _valid_theme_hex(dd_in.get(field), dd[field])
-    for field, low, high in [
-        ("label_radius_px", 0, 30),
-        ("option_hover_indent_px", 0, 40),
-        ("popover_max_height_vh", 30, 95),
-        ("mobile_popover_edge_gap_px", 0, 60),
-    ]:
-        try:
-            dd[field] = max(low, min(high, int(float(dd_in.get(field, dd[field])))))
-        except Exception:
-            pass
-    for field, low, high in [
-        ("label_padding_y_px", 0.0, 20.0),
-        ("label_padding_x_px", 0.0, 30.0),
-    ]:
-        try:
-            dd[field] = max(low, min(high, float(dd_in.get(field, dd[field]))))
-        except Exception:
-            pass
-    result["dropdown_search"] = dd
     return result
 
 
@@ -4216,101 +4122,14 @@ def render_global_ui_theme_css(config=None):
             hover_rules.append(f"{selector}:hover{{{_theme_hover_css(item['effect'])}}}")
         mobile_rules.append(f"{selector}{{font-size:{item['mobile_size']}px!important;}}")
 
-    # V77: MENU CHỨC NĂNG có bảng cấu hình riêng về cỡ chữ và chiều rộng button.
-    menu = cfg.get("menu", dict(MENU_UI_DEFAULT))
-    menu_desktop_css = f"""
-.vera-menu-title,.vera-menu-title * {{font-size:{menu['title_desktop_size']}px!important;}}
-[data-testid='stSidebar'] div.stButton > button {{width:{menu['button_width_desktop_pct']}%!important;max-width:100%!important;margin-left:0!important;margin-right:auto!important;}}
-[data-testid='stSidebar'] div.stButton > button,[data-testid='stSidebar'] div.stButton > button * {{font-size:{menu['button_desktop_size']}px!important;}}
-[data-testid='stSidebar'] div.stButton > button[kind='primary'],[data-testid='stSidebar'] div.stButton > button[kind='primary'] * {{font-size:{menu['selected_desktop_size']}px!important;}}
-.vera-menu-note,.vera-menu-note * {{font-size:{menu['note_desktop_size']}px!important;line-height:1.35!important;}}
-"""
-    menu_mobile_css = f"""
-  .vera-menu-title,.vera-menu-title * {{font-size:{menu['title_mobile_size']}px!important;}}
-  [data-testid='stSidebar'] div.stButton > button {{width:{menu['button_width_mobile_pct']}%!important;}}
-  [data-testid='stSidebar'] div.stButton > button,[data-testid='stSidebar'] div.stButton > button * {{font-size:{menu['button_mobile_size']}px!important;}}
-  [data-testid='stSidebar'] div.stButton > button[kind='primary'],[data-testid='stSidebar'] div.stButton > button[kind='primary'] * {{font-size:{menu['selected_mobile_size']}px!important;}}
-  .vera-menu-note,.vera-menu-note * {{font-size:{menu['note_mobile_size']}px!important;}}
-"""
-
-    # V78: override cuối cùng cho toàn bộ Selectbox / MultiSelect / dropdown có search.
-    dd = cfg.get("dropdown_search", dict(DROPDOWN_SEARCH_UI_DEFAULT))
-    dd_desktop_css = f"""
-[data-testid='stSelectbox'] [data-testid='stWidgetLabel'],
-[data-testid='stMultiSelect'] [data-testid='stWidgetLabel'],
-[data-testid='stSelectbox'] > label,
-[data-testid='stMultiSelect'] > label {{
-  background:{dd['label_bg_color']}!important;color:{dd['label_text_color']}!important;
-  border-radius:{dd['label_radius_px']}px!important;
-  padding:{dd['label_padding_y_px']}px {dd['label_padding_x_px']}px!important;
-  font-size:{dd['label_desktop_size']}px!important;
-}}
-[data-testid='stSelectbox'] [data-testid='stWidgetLabel'] *,
-[data-testid='stMultiSelect'] [data-testid='stWidgetLabel'] *,
-[data-testid='stSelectbox'] > label *,
-[data-testid='stMultiSelect'] > label * {{
-  color:{dd['label_text_color']}!important;font-size:{dd['label_desktop_size']}px!important;
-}}
-[data-testid='stSelectbox'] div[data-baseweb='select'] > div,
-[data-testid='stMultiSelect'] div[data-baseweb='select'] > div,
-div[data-baseweb='select'] > div {{
-  background:{dd['box_bg_color']}!important;color:{dd['box_text_color']}!important;
-  border-color:{dd['border_color']}!important;box-shadow:0 0 0 1px {dd['border_color']} inset!important;
-  font-size:{dd['content_desktop_size']}px!important;
-}}
-[data-testid='stSelectbox'] div[data-baseweb='select'] *,
-[data-testid='stMultiSelect'] div[data-baseweb='select'] * {{
-  font-size:{dd['content_desktop_size']}px!important;
-}}
-[data-testid='stSelectbox'] div[data-baseweb='select'] input,
-[data-testid='stMultiSelect'] div[data-baseweb='select'] input,
-div[data-baseweb='popover'] input {{
-  color:{dd['box_text_color']}!important;font-size:{dd['content_desktop_size']}px!important;
-}}
-[data-testid='stSelectbox']:hover div[data-baseweb='select'] > div,
-[data-testid='stMultiSelect']:hover div[data-baseweb='select'] > div,
-div[data-baseweb='select']:hover > div {{
-  background:{dd['hover_bg_color']}!important;border-color:{dd['border_color']}!important;
-  box-shadow:0 0 0 1px {dd['border_color']} inset!important;
-}}
-[data-testid='stSelectbox']:hover svg,
-[data-testid='stMultiSelect']:hover svg,
-div[data-baseweb='select']:hover svg {{fill:{dd['hover_icon_color']}!important;color:{dd['hover_icon_color']}!important;}}
-div[data-baseweb='popover'],div[data-baseweb='menu'],ul[role='listbox'] {{border-color:{dd['border_color']}!important;}}
-div[data-baseweb='popover'] [role='option'],div[data-baseweb='menu'] [role='option'],
-ul[role='listbox'] li,ul[role='listbox'] [role='option'] {{
-  font-size:{dd['content_desktop_size']}px!important;color:{dd['box_text_color']}!important;
-}}
-div[data-baseweb='popover'] [role='option']:hover,div[data-baseweb='menu'] [role='option']:hover,
-ul[role='listbox'] li:hover,ul[role='listbox'] [role='option']:hover {{
-  background:{dd['option_hover_bg_color']}!important;color:{dd['option_hover_text_color']}!important;
-  padding-left:{dd['option_hover_indent_px']}px!important;
-}}
-div[data-baseweb='popover'] > div,div[data-baseweb='select'] ul[role='listbox'],div[data-testid='stSelectboxVirtualDropdown'] {{
-  max-height:{dd['popover_max_height_vh']}vh!important;
-}}
-"""
-    dd_mobile_css = f"""
-  [data-testid='stSelectbox'] [data-testid='stWidgetLabel'],[data-testid='stMultiSelect'] [data-testid='stWidgetLabel'],
-  [data-testid='stSelectbox'] > label,[data-testid='stMultiSelect'] > label,
-  [data-testid='stSelectbox'] [data-testid='stWidgetLabel'] *,[data-testid='stMultiSelect'] [data-testid='stWidgetLabel'] * {{font-size:{dd['label_mobile_size']}px!important;}}
-  [data-testid='stSelectbox'] div[data-baseweb='select'] *,[data-testid='stMultiSelect'] div[data-baseweb='select'] *,
-  div[data-baseweb='popover'] [role='option'],div[data-baseweb='menu'] [role='option'],ul[role='listbox'] [role='option'],div[data-baseweb='popover'] input {{font-size:{dd['content_mobile_size']}px!important;}}
-  div[data-baseweb='popover'] {{max-width:calc(100vw - {dd['mobile_popover_edge_gap_px']}px)!important;}}
-"""
-
     # Mobile: giảm padding/gap chứ không ép giảm cỡ chữ; Admin có cột riêng để tự đặt nếu muốn.
     css = "\n".join(desktop_rules + hover_rules)
     mobile_css = "\n".join(mobile_rules)
     st.markdown(f"""
 <style id="vera-global-theme-v71">
 {css}
-{menu_desktop_css}
-{dd_desktop_css}
 @media (max-width:768px) {{
 {mobile_css}
-{menu_mobile_css}
-{dd_mobile_css}
   h1,h2,h3,h4,h5,h6,.custom-main-title {{padding:.32rem .48rem!important;margin-top:.18rem!important;margin-bottom:.3rem!important;overflow-wrap:anywhere!important;}}
   [data-testid='stWidgetLabel'] {{padding:.22rem .4rem!important;overflow-wrap:anywhere!important;}}
   .block-container {{padding-left:.4rem!important;padding-right:.4rem!important;}}
@@ -4337,12 +4156,11 @@ def _theme_editor_df(config):
     return pd.DataFrame(rows)
 
 
-def _theme_from_editor_df(df, base_config=None):
-    # Giữ nguyên cấu hình MENU CHỨC NĂNG khi Admin chỉ chỉnh bảng theme chung.
-    result = dict(base_config) if isinstance(base_config, dict) else {}
+def _theme_from_editor_df(df):
+    result = {}
     label_to_key = {v: k for k, v in UI_THEME_GROUP_LABELS.items()}
     if not isinstance(df, pd.DataFrame):
-        return _normalized_theme_config(result)
+        return _normalized_theme_config()
     for _, row in df.iterrows():
         key = label_to_key.get(str(row.get("Nhóm", "")).strip())
         if not key:
@@ -4356,52 +4174,6 @@ def _theme_from_editor_df(df, base_config=None):
             "effect": row.get("Hiệu ứng", "Không"),
         }
     return _normalized_theme_config(result)
-
-
-def _menu_ui_editor_df(config):
-    menu = _normalized_theme_config(config).get("menu", dict(MENU_UI_DEFAULT))
-    return pd.DataFrame([
-        {"Thành phần": "📌 MENU CHỨC NĂNG", "Cỡ chữ Web": menu["title_desktop_size"], "Cỡ chữ Mobile": menu["title_mobile_size"]},
-        {"Thành phần": "Các nút chức năng", "Cỡ chữ Web": menu["button_desktop_size"], "Cỡ chữ Mobile": menu["button_mobile_size"]},
-        {"Thành phần": "Nút đang được chọn", "Cỡ chữ Web": menu["selected_desktop_size"], "Cỡ chữ Mobile": menu["selected_mobile_size"]},
-        {"Thành phần": "Ghi chú cuối menu", "Cỡ chữ Web": menu["note_desktop_size"], "Cỡ chữ Mobile": menu["note_mobile_size"]},
-    ])
-
-
-def _menu_ui_from_editor_df(df, base_menu=None, width_web=None, width_mobile=None):
-    menu = dict(MENU_UI_DEFAULT)
-    if isinstance(base_menu, dict):
-        menu.update(base_menu)
-    mapping = {
-        "📌 MENU CHỨC NĂNG": ("title_desktop_size", "title_mobile_size"),
-        "Các nút chức năng": ("button_desktop_size", "button_mobile_size"),
-        "Nút đang được chọn": ("selected_desktop_size", "selected_mobile_size"),
-        "Ghi chú cuối menu": ("note_desktop_size", "note_mobile_size"),
-    }
-    if isinstance(df, pd.DataFrame):
-        for _, row in df.iterrows():
-            fields = mapping.get(str(row.get("Thành phần", "")).strip())
-            if not fields:
-                continue
-            try:
-                menu[fields[0]] = max(8, min(36, int(float(row.get("Cỡ chữ Web", menu[fields[0]])))))
-            except Exception:
-                pass
-            try:
-                menu[fields[1]] = max(8, min(36, int(float(row.get("Cỡ chữ Mobile", menu[fields[1]])))))
-            except Exception:
-                pass
-    try:
-        if width_web is not None:
-            menu["button_width_desktop_pct"] = max(35, min(100, int(float(width_web))))
-    except Exception:
-        pass
-    try:
-        if width_mobile is not None:
-            menu["button_width_mobile_pct"] = max(35, min(100, int(float(width_mobile))))
-    except Exception:
-        pass
-    return menu
 
 
 def render_admin_theme_config_panel():
@@ -4437,7 +4209,7 @@ def render_admin_theme_config_panel():
                 "Hiệu ứng": st.column_config.SelectboxColumn("Hiệu ứng", options=UI_THEME_EFFECT_OPTIONS, width=125),
             },
         )
-        preview_cfg = _theme_from_editor_df(edited, current)
+        preview_cfg = _theme_from_editor_df(edited)
         # Preview dùng HTML đơn giản, không ghi dữ liệu cho tới khi bấm Lưu.
         p1, p2, p3 = preview_cfg["main_title"], preview_cfg["sub_title"], preview_cfg["small_title"]
         st.markdown(
@@ -4455,216 +4227,7 @@ def render_admin_theme_config_panel():
                     st.rerun()
         with c2:
             if st.button("♻️ Khôi phục 28 · 22 · 18 · 16 · 13", use_container_width=True, key="reset_global_theme_v71"):
-                reset_cfg = _normalized_theme_config(UI_THEME_DEFAULT)
-                reset_cfg["menu"] = dict(current.get("menu", MENU_UI_DEFAULT))
-                reset_cfg["dropdown_search"] = dict(current.get("dropdown_search", DROPDOWN_SEARCH_UI_DEFAULT))
-                ok, msg = save_ui_theme_config(reset_cfg, st.session_state.current_user)
-                (st.success if ok else st.error)(msg)
-                if ok:
-                    st.rerun()
-
-    # V77 - Đưa toàn bộ bảng cỡ chữ MENU CHỨC NĂNG vào Giao diện tùy chỉnh.
-    with st.expander("📌 MENU CHỨC NĂNG · Cỡ chữ · Chiều rộng button", expanded=True):
-        st.caption(
-            "Tùy chỉnh riêng tiêu đề MENU, chữ các nút, chữ nút đang chọn và ghi chú cuối menu. "
-            "Chiều rộng button dùng % chiều rộng sidebar để tự thích ứng theo màn hình."
-        )
-        menu_current = dict(current.get("menu", MENU_UI_DEFAULT))
-        menu_edited = st.data_editor(
-            _menu_ui_editor_df(current),
-            key="admin_menu_ui_editor_v77",
-            hide_index=True,
-            num_rows="fixed",
-            width="stretch",
-            height="content",
-            disabled=["Thành phần"],
-            row_height=42,
-            column_config={
-                "Thành phần": st.column_config.TextColumn("Thành phần", disabled=True, width=230),
-                "Cỡ chữ Web": st.column_config.NumberColumn("Cỡ chữ Web", min_value=8, max_value=36, step=1, format="%d", width=115),
-                "Cỡ chữ Mobile": st.column_config.NumberColumn("Cỡ chữ Mobile", min_value=8, max_value=36, step=1, format="%d", width=130),
-            },
-        )
-        mw1, mw2 = st.columns(2)
-        with mw1:
-            menu_width_web = st.number_input(
-                "Chiều rộng button Web (%)", min_value=35, max_value=100, step=5,
-                value=int(menu_current.get("button_width_desktop_pct", 100)), key="menu_button_width_web_v77",
-                help="100% = nút rộng hết sidebar; 80% = nút chiếm 80% chiều rộng sidebar."
-            )
-        with mw2:
-            menu_width_mobile = st.number_input(
-                "Chiều rộng button Mobile (%)", min_value=35, max_value=100, step=5,
-                value=int(menu_current.get("button_width_mobile_pct", 100)), key="menu_button_width_mobile_v77",
-                help="Áp dụng khi chiều rộng màn hình nhỏ hơn hoặc bằng 768px."
-            )
-
-        menu_preview = _menu_ui_from_editor_df(
-            menu_edited, menu_current, width_web=menu_width_web, width_mobile=menu_width_mobile
-        )
-        st.markdown(
-            f"<div style='border:1px solid #D9D9D9;border-radius:8px;padding:10px 12px;margin:4px 0 8px 0;'>"
-            f"<div style='font-size:{menu_preview['title_desktop_size']}px;font-weight:800;margin-bottom:7px;'>📌 MENU CHỨC NĂNG</div>"
-            f"<button style='width:{menu_preview['button_width_desktop_pct']}%;font-size:{menu_preview['button_desktop_size']}px;padding:7px 10px;margin:3px 0;'>🧭 Bảng tour</button><br>"
-            f"<button style='width:{menu_preview['button_width_desktop_pct']}%;font-size:{menu_preview['selected_desktop_size']}px;padding:7px 10px;margin:3px 0;font-weight:700;'>📅 Đăng ký nghỉ phép · đang chọn</button>"
-            f"<div style='font-size:{menu_preview['note_desktop_size']}px;margin-top:7px;'>🔐 Ghi chú cuối menu</div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-        mc1, mc2 = st.columns(2)
-        with mc1:
-            if st.button("💾 Lưu MENU làm mặc định", use_container_width=True, key="save_menu_ui_v77"):
-                cfg_to_save = _normalized_theme_config(current)
-                cfg_to_save["menu"] = menu_preview
-                ok, msg = save_ui_theme_config(cfg_to_save, st.session_state.current_user)
-                (st.success if ok else st.error)(msg)
-                if ok:
-                    st.rerun()
-        with mc2:
-            if st.button("♻️ Khôi phục MENU 18 · 16 · 16 · 16 · 100%", use_container_width=True, key="reset_menu_ui_v77"):
-                cfg_to_save = _normalized_theme_config(current)
-                cfg_to_save["menu"] = dict(MENU_UI_DEFAULT)
-                ok, msg = save_ui_theme_config(cfg_to_save, st.session_state.current_user)
-                (st.success if ok else st.error)(msg)
-                if ok:
-                    st.rerun()
-
-
-    # V78 - Đưa giao diện chung của Dropdown/Search box vào Giao diện tùy chỉnh.
-    with st.expander("🔽 Dropdown / Search box · Giao diện chung", expanded=True):
-        st.caption(
-            "Áp dụng toàn hệ thống cho Selectbox, MultiSelect và dropdown có ô gõ tìm kiếm. "
-            "Chế độ tìm kiếm hiện giữ kiểu contains (gõ một phần tên vẫn tìm được)."
-        )
-        dd_current = dict(current.get("dropdown_search", DROPDOWN_SEARCH_UI_DEFAULT))
-
-        st.markdown("**Cỡ chữ**")
-        ds1, ds2, ds3, ds4 = st.columns(4)
-        with ds1:
-            dd_content_web = st.number_input(
-                "Nội dung Web (px)", min_value=8, max_value=36, step=1,
-                value=int(dd_current.get("content_desktop_size", 16)), key="dd_content_web_v78"
-            )
-        with ds2:
-            dd_content_mobile = st.number_input(
-                "Nội dung Mobile (px)", min_value=8, max_value=36, step=1,
-                value=int(dd_current.get("content_mobile_size", 16)), key="dd_content_mobile_v78"
-            )
-        with ds3:
-            dd_label_web = st.number_input(
-                "Label Web (px)", min_value=8, max_value=36, step=1,
-                value=int(dd_current.get("label_desktop_size", 16)), key="dd_label_web_v78"
-            )
-        with ds4:
-            dd_label_mobile = st.number_input(
-                "Label Mobile (px)", min_value=8, max_value=36, step=1,
-                value=int(dd_current.get("label_mobile_size", 16)), key="dd_label_mobile_v78"
-            )
-
-        st.markdown("**Màu sắc**")
-        dc1, dc2, dc3 = st.columns(3)
-        with dc1:
-            dd_box_text = st.color_picker("Màu chữ trong box", dd_current.get("box_text_color", "#333333"), key="dd_box_text_v78")
-            dd_box_bg = st.color_picker("Màu nền box", dd_current.get("box_bg_color", "#FFFFFF"), key="dd_box_bg_v78")
-            dd_border = st.color_picker("Màu border", dd_current.get("border_color", "#F2F2F2"), key="dd_border_v78")
-        with dc2:
-            dd_label_text = st.color_picker("Màu chữ label", dd_current.get("label_text_color", "#222222"), key="dd_label_text_v78")
-            dd_label_bg = st.color_picker("Màu nền label", dd_current.get("label_bg_color", "#D9D9D9"), key="dd_label_bg_v78")
-            dd_hover_bg = st.color_picker("Màu nền khi hover box", dd_current.get("hover_bg_color", "#F7E8EF"), key="dd_hover_bg_v78")
-        with dc3:
-            dd_hover_icon = st.color_picker("Màu icon khi hover", dd_current.get("hover_icon_color", "#A85F86"), key="dd_hover_icon_v78")
-            dd_option_hover_bg = st.color_picker("Nền item khi hover", dd_current.get("option_hover_bg_color", "#F3DCE8"), key="dd_option_hover_bg_v78")
-            dd_option_hover_text = st.color_picker("Chữ item khi hover", dd_current.get("option_hover_text_color", "#7D3159"), key="dd_option_hover_text_v78")
-
-        st.markdown("**Kích thước / khoảng cách**")
-        dg1, dg2, dg3, dg4 = st.columns(4)
-        with dg1:
-            dd_label_radius = st.number_input(
-                "Bo góc label (px)", min_value=0, max_value=30, step=1,
-                value=int(dd_current.get("label_radius_px", 5)), key="dd_label_radius_v78"
-            )
-        with dg2:
-            dd_pad_y = st.number_input(
-                "Padding label dọc (px)", min_value=0.0, max_value=20.0, step=0.5,
-                value=float(dd_current.get("label_padding_y_px", 4.5)), key="dd_pad_y_v78"
-            )
-        with dg3:
-            dd_pad_x = st.number_input(
-                "Padding label ngang (px)", min_value=0.0, max_value=30.0, step=0.5,
-                value=float(dd_current.get("label_padding_x_px", 8.0)), key="dd_pad_x_v78"
-            )
-        with dg4:
-            dd_hover_indent = st.number_input(
-                "Dịch item khi hover (px)", min_value=0, max_value=40, step=1,
-                value=int(dd_current.get("option_hover_indent_px", 14)), key="dd_hover_indent_v78"
-            )
-
-        dh1, dh2 = st.columns(2)
-        with dh1:
-            dd_max_height = st.number_input(
-                "Chiều cao tối đa danh sách dropdown (vh)", min_value=30, max_value=95, step=5,
-                value=int(dd_current.get("popover_max_height_vh", 85)), key="dd_max_height_v78",
-                help="85vh = tối đa 85% chiều cao màn hình."
-            )
-        with dh2:
-            dd_mobile_gap = st.number_input(
-                "Khoảng hở popover Mobile so với mép màn hình (px)", min_value=0, max_value=60, step=2,
-                value=int(dd_current.get("mobile_popover_edge_gap_px", 12)), key="dd_mobile_gap_v78",
-                help="Giữ danh sách dropdown không tràn khỏi màn hình điện thoại."
-            )
-
-        dd_preview = {
-            "content_desktop_size": int(dd_content_web),
-            "content_mobile_size": int(dd_content_mobile),
-            "label_desktop_size": int(dd_label_web),
-            "label_mobile_size": int(dd_label_mobile),
-            "box_text_color": dd_box_text,
-            "box_bg_color": dd_box_bg,
-            "label_text_color": dd_label_text,
-            "label_bg_color": dd_label_bg,
-            "border_color": dd_border,
-            "hover_bg_color": dd_hover_bg,
-            "hover_icon_color": dd_hover_icon,
-            "option_hover_bg_color": dd_option_hover_bg,
-            "option_hover_text_color": dd_option_hover_text,
-            "label_radius_px": int(dd_label_radius),
-            "label_padding_y_px": float(dd_pad_y),
-            "label_padding_x_px": float(dd_pad_x),
-            "option_hover_indent_px": int(dd_hover_indent),
-            "popover_max_height_vh": int(dd_max_height),
-            "mobile_popover_edge_gap_px": int(dd_mobile_gap),
-        }
-
-        st.markdown("**Xem trước Web**")
-        st.markdown(
-            f"<div style='max-width:520px;margin:4px 0 10px 0;'>"
-            f"<div style='font-size:{dd_preview['label_desktop_size']}px;color:{dd_preview['label_text_color']};"
-            f"background:{dd_preview['label_bg_color']};border-radius:{dd_preview['label_radius_px']}px;"
-            f"padding:{dd_preview['label_padding_y_px']}px {dd_preview['label_padding_x_px']}px;margin-bottom:4px;'>👤 Tìm kiếm nhân viên:</div>"
-            f"<div style='font-size:{dd_preview['content_desktop_size']}px;color:{dd_preview['box_text_color']};"
-            f"background:{dd_preview['box_bg_color']};border:1px solid {dd_preview['border_color']};"
-            f"border-radius:6px;padding:8px 10px;'>Chọn nhân viên <span style='float:right;color:{dd_preview['hover_icon_color']};'>⌄</span></div>"
-            f"<div style='margin-top:5px;border:1px solid {dd_preview['border_color']};border-radius:6px;overflow:hidden;'>"
-            f"<div style='padding:7px 10px;font-size:{dd_preview['content_desktop_size']}px;'>Nguyễn Văn A</div>"
-            f"<div style='padding:7px {dd_preview['option_hover_indent_px']}px;font-size:{dd_preview['content_desktop_size']}px;"
-            f"background:{dd_preview['option_hover_bg_color']};color:{dd_preview['option_hover_text_color']};'>Trần Thị B · hover</div>"
-            f"</div></div>", unsafe_allow_html=True
-        )
-
-        dd_save1, dd_save2 = st.columns(2)
-        with dd_save1:
-            if st.button("💾 Lưu Dropdown/Search làm mặc định", use_container_width=True, key="save_dropdown_search_ui_v78"):
-                cfg_to_save = _normalized_theme_config(current)
-                cfg_to_save["dropdown_search"] = dd_preview
-                ok, msg = save_ui_theme_config(cfg_to_save, st.session_state.current_user)
-                (st.success if ok else st.error)(msg)
-                if ok:
-                    st.rerun()
-        with dd_save2:
-            if st.button("♻️ Khôi phục Dropdown/Search mặc định", use_container_width=True, key="reset_dropdown_search_ui_v78"):
-                cfg_to_save = _normalized_theme_config(current)
-                cfg_to_save["dropdown_search"] = dict(DROPDOWN_SEARCH_UI_DEFAULT)
-                ok, msg = save_ui_theme_config(cfg_to_save, st.session_state.current_user)
+                ok, msg = save_ui_theme_config(UI_THEME_DEFAULT, st.session_state.current_user)
                 (st.success if ok else st.error)(msg)
                 if ok:
                     st.rerun()
@@ -8576,7 +8139,7 @@ if st.session_state.current_role in ["nhanvien", "leader", "locker"]:
     """, unsafe_allow_html=True)
 else:
     st.sidebar.markdown(
-        "<div class='vera-menu-title' style='font-weight:800;line-height:1.15;margin:2px 0 10px 0;'>📌 MENU CHỨC NĂNG</div>",
+        "<div style='font-size:18px;font-weight:800;line-height:1.15;margin:2px 0 10px 0;'>📌 MENU CHỨC NĂNG</div>",
         unsafe_allow_html=True
     )
     for page_name in allowed_pages:
@@ -8585,10 +8148,7 @@ else:
             open_app_page(page_name)
     if st.session_state.current_role == "admin":
         st.sidebar.markdown("---")
-        st.sidebar.markdown(
-            "<div class='vera-menu-note'>🔐 Quyền từng chức năng/từng vai trò/từng tài khoản được quản lý tại trang Phân quyền chức năng.</div>",
-            unsafe_allow_html=True
-        )
+        st.sidebar.caption("🔐 Quyền từng chức năng/từng vai trò/từng tài khoản được quản lý tại trang Phân quyền chức năng.")
     collapse_sidebar_after_navigation_once()
 
 # --- GIAO DIỆN HEADER ---
@@ -11365,8 +10925,11 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             co_phep_df = df_thuc_nghi[(ly_do_lower != 'nghỉ phát sinh') & (~ly_do_lower.str.contains('không phép', na=False))]
         tong_phat = filtered_df['Phạt vi phạm'].sum()
 
-    st.write("") 
-    if st.session_state.current_role == "admin":
+    # Chỉ tài khoản admin được xem khối thống kê tổng quan nghỉ/phạt.
+    # Các tài khoản khác không render khối này (không chỉ ẩn bằng CSS).
+    is_admin = str(st.session_state.get("current_role", "")).strip().lower() == "admin"
+    if is_admin:
+        st.write("")
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Tổng số người nghỉ", len(df_thuc_nghi))
         c2.metric("✅ CÓ phép", len(co_phep_df))
@@ -11375,11 +10938,6 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
         c5.metric("💰 Tổng tiền phạt", f"{tong_phat:,.0f} đ".replace(",", "."))
         cols_to_hide = []
     else:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Tổng số người nghỉ", len(df_thuc_nghi))
-        c2.metric("✅ CÓ phép", len(co_phep_df))
-        c3.metric("⚠️ PHÁT SINH", len(phat_sinh_df))
-        c4.metric("❌ KHÔNG phép", len(khong_phep_df))
         cols_to_hide = ['Phạt vi phạm']
 
     st.markdown("### 📅 Thống kê chi tiết theo từng ngày")

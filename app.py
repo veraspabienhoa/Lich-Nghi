@@ -1,4 +1,4 @@
-# V82 - TimeSoft direct API sync + session reuse + safer discovery export (2026-08-18)
+# V83 - TimeSoft background 30-minute schedule UI + manual fetch labels (2026-08-19)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -90,6 +90,9 @@ TIMESOFT_DIRECT_APIS = {
 TIMESOFT_HTTP_SESSION_TTL_SECONDS = 15 * 60
 TIMESOFT_CHECKIN_PAGE_SIZE = 100
 TIMESOFT_MAX_CHECKIN_PAGES = 500
+
+# V83 - Chu kỳ HIỂN THỊ khớp Cloud Scheduler. app.py không tự tạo timer nền.
+TIMESOFT_BACKGROUND_INTERVAL_MINUTES = 30
 
 
 def timesoft_is_configured():
@@ -771,7 +774,7 @@ def timesoft_direct_sync(start_date, end_date, force_login=False):
             "employee_checkin_df": chk_df,
         }
         return True, (
-            f"Đồng bộ TimeSoft thành công: {len(inv_df)} dòng doanh thu chi tiết, "
+            f"Lấy dữ liệu TimeSoft thành công: {len(inv_df)} dòng doanh thu chi tiết, "
             f"{len(chk_df)} dòng chấm công."
         ), result
 
@@ -9766,8 +9769,9 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
     with tab_timesoft:
         st.markdown("### 🌐 TimeSoft · API trực tiếp + Đồng bộ nền Cloud Run")
         st.caption(
-            "V82 giữ chế độ đồng bộ trực tiếp và bổ sung Cloud Run Job chạy nền mỗi 15 phút. "
-            "Snapshot nền được lưu PostgreSQL để mọi instance cùng dùng dữ liệu mới nhất."
+            "V83 giữ chế độ lấy dữ liệu trực tiếp và hiển thị snapshot nền. "
+            f"Cloud Scheduler gọi Cloud Run Job mỗi {TIMESOFT_BACKGROUND_INTERVAL_MINUTES} phút; "
+            "snapshot được lưu PostgreSQL để mọi instance cùng dùng dữ liệu mới nhất."
         )
 
         if timesoft_is_configured():
@@ -9777,7 +9781,9 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
                 "❌ Chưa đủ cấu hình TimeSoft. Hãy cấu hình Secret Manager trên Cloud Run hoặc [TIMESOFT] trong Streamlit Secrets."
             )
 
-        st.markdown("#### ☁️ Đồng bộ nền 24/7 · mỗi 15 phút")
+        st.markdown(
+            f"#### ☁️ Đồng bộ TimeSoft tự động 24/7 · mỗi {TIMESOFT_BACKGROUND_INTERVAL_MINUTES} phút"
+        )
         if vpg is not None and vpg.is_enabled():
             bg_status = _timesoft_background_status_row()
             if bg_status:
@@ -9788,7 +9794,7 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
                     f"lần chạy gần nhất {last_sync or 'chưa rõ'}"
                 )
                 b1, b2, b3, b4 = st.columns(4)
-                b1.metric("Chu kỳ", "15 phút")
+                b1.metric("Chu kỳ", f"{TIMESOFT_BACKGROUND_INTERVAL_MINUTES} phút")
                 b2.metric("Doanh thu · dòng", int(float(bg_status.get("invoice_rows", 0) or 0)))
                 b3.metric("Chấm công · dòng", int(float(bg_status.get("checkin_rows", 0) or 0)))
                 b4.metric("Thời gian chạy", f"{float(bg_status.get('duration_seconds', 0) or 0):.1f}s")
@@ -9812,11 +9818,11 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
                         st.caption("Chấm công nền hôm nay")
                         st.dataframe(bg_chk_view, width="stretch", hide_index=True, height=340)
             else:
-                st.info("PostgreSQL đã bật nhưng chưa có snapshot TimeSoft nền. Sau khi Cloud Scheduler chạy Job lần đầu, trạng thái sẽ xuất hiện tại đây.")
+                st.info("PostgreSQL đã bật nhưng chưa có snapshot TimeSoft nền. Sau khi Cloud Scheduler gọi Cloud Run Job thành công lần đầu, trạng thái sẽ xuất hiện tại đây.")
         else:
             st.caption("Máy local không bật PostgreSQL nên chỉ hiển thị chế độ trực tiếp. Trên Cloud Run, snapshot nền sẽ được đọc từ PostgreSQL.")
 
-        st.markdown("#### 🔄 Lấy dữ liệu trực tiếp / kiểm tra thủ công")
+        st.markdown("#### 📥 Lấy dữ liệu TimeSoft thủ công")
         ts_today = get_vn_today()
         ts_default_start = st.session_state.get("timesoft_start_date_v81", ts_today)
         ts_default_end = st.session_state.get("timesoft_end_date_v81", ts_today)
@@ -9837,12 +9843,12 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
             )
 
         if ts_start_date > ts_end_date:
-            st.warning("Từ ngày đang lớn hơn Đến ngày. Hệ thống sẽ tự đảo khoảng ngày khi đồng bộ.")
+            st.warning("Từ ngày đang lớn hơn Đến ngày. Hệ thống sẽ tự đảo khoảng ngày khi lấy dữ liệu.")
 
         c_sync1, c_sync2, c_sync3 = st.columns([2.2, 2.2, 1.4])
         with c_sync1:
             ts_sync_now = st.button(
-                "🔄 Đồng bộ TimeSoft ngay",
+                "📥 Lấy dữ liệu TimeSoft",
                 use_container_width=True,
                 disabled=not timesoft_is_configured(),
                 key="timesoft_direct_sync_v81",
@@ -9850,7 +9856,7 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
             )
         with c_sync2:
             ts_force_sync = st.button(
-                "🔐 Đăng nhập lại & đồng bộ",
+                "🔐 Đăng nhập lại & lấy dữ liệu",
                 use_container_width=True,
                 disabled=not timesoft_is_configured(),
                 key="timesoft_force_sync_v81",
@@ -9867,7 +9873,7 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
                 st.rerun()
 
         if ts_sync_now or ts_force_sync:
-            with st.spinner("Đang đăng nhập/kiểm tra session và gọi trực tiếp 2 API TimeSoft..."):
+            with st.spinner("Đang đăng nhập/kiểm tra session và lấy dữ liệu trực tiếp từ 2 API TimeSoft..."):
                 ok_direct, msg_direct, result_direct = timesoft_direct_sync(
                     ts_start_date,
                     ts_end_date,

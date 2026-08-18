@@ -1,4 +1,4 @@
-# V81 - TimeSoft direct API sync + session reuse + safer discovery export (2026-08-18)
+# V82 - TimeSoft direct API sync + session reuse + safer discovery export (2026-08-18)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone

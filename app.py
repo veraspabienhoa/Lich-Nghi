@@ -6023,105 +6023,321 @@ def combine_leave_sources_for_daily_stats(*sources):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_lich_nghi(url):
-    """Tự tải Nguồn 3 từ Drive và tự nhận diện XLSB/XLSX/XLSM.
+    """
+    Tự tải Nguồn 3 từ Google Drive và tự nhận diện:
+    - XLSX / XLSM  -> openpyxl
+    - XLSB         -> pyxlsb
+    - XLS cũ       -> xlrd
 
-    Ưu tiên tải có xác thực bằng service account để Cloud Run không phụ thuộc việc file
-    phải đặt Public. Trả về đúng 3 DataFrame cũ để không phá các chức năng hiện tại.
+    Ưu tiên tải bằng Google Drive API có xác thực qua service account/runtime identity.
+    Trả về:
+        df_lich
+        df_nv_excel
+        df_loai_nghi
     """
     temp_file = f"temp_lichnghi_{os.getpid()}_{time.time_ns()}"
+
     try:
+        # =====================================================
+        # 1. LẤY FILE ID NGUỒN 3
+        # =====================================================
         match = re.search(r'/d/([^/]+)', str(url or ''))
         file_id = match.group(1) if match else str(SHEET_CHINH_ID)
+
         download_file_from_google_drive(file_id, temp_file)
 
-        # XLSX/XLSM là ZIP; XLSB là OLE Compound File.
-        engine = None
+        if not os.path.exists(temp_file) or os.path.getsize(temp_file) <= 0:
+            raise RuntimeError("Nguồn 3 tải về bị rỗng hoặc không tồn tại.")
+
+        # =====================================================
+        # 2. NHẬN DIỆN ĐỊNH DẠNG EXCEL
+        # =====================================================
+        engines_to_try = []
+
+        # XLSX/XLSM thực chất là ZIP package.
         if zipfile.is_zipfile(temp_file):
-            engine = 'openpyxl'
+            engines_to_try = ["openpyxl"]
         else:
             try:
-                with open(temp_file, 'rb') as f:
+                with open(temp_file, "rb") as f:
                     magic = f.read(8)
             except Exception:
-                magic = b''
-            if magic.startswith(b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1'):
-                engine = 'pyxlsb'
-        if engine is None:
-            preview = ''
+                magic = b""
+
+            # XLS / XLSB đều có thể dùng OLE Compound File signature.
+            if magic.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"):
+                # Thử XLSB trước, nếu không được thì thử XLS cũ.
+                engines_to_try = ["pyxlsb", "xlrd"]
+
+        # =====================================================
+        # 3. NẾU KHÔNG NHẬN DIỆN ĐƯỢC
+        # =====================================================
+        if not engines_to_try:
+            preview = ""
             try:
-                preview = open(temp_file, 'r', encoding='utf-8', errors='ignore').read(160)
+                with open(temp_file, "r", encoding="utf-8", errors="ignore") as f:
+                    preview = f.read(500)
             except Exception:
                 pass
-            if '<html' in preview.lower():
-                raise RuntimeError('Google Drive trả trang HTML thay vì file lịch nghỉ. Hãy share file cho service account của Vera-Spa.')
-            raise RuntimeError('Nguồn 3 tải về không phải XLSB/XLSX/XLSM hợp lệ.')
 
-        xls = pd.read_excel(
-            temp_file,
-            sheet_name=['LichNghi', 'DanhSachNV', 'LoaiNghi'],
-            engine=engine,
-        )
-        df_lich = xls['LichNghi'].iloc[:, :10].copy()
+            if "<html" in preview.lower():
+                raise RuntimeError(
+                    "Google Drive trả trang HTML thay vì file Excel. "
+                    "Hãy chia sẻ file Nguồn 3 cho service account đang chạy Vera-Spa "
+                    "hoặc bật quyền truy cập phù hợp."
+                )
+
+            if "accounts.google" in preview.lower():
+                raise RuntimeError(
+                    "Google Drive yêu cầu đăng nhập để tải Nguồn 3. "
+                    "Hãy cấp quyền Viewer cho service account Vera-Spa."
+                )
+
+            raise RuntimeError(
+                "Nguồn 3 tải về không phải file XLS/XLSB/XLSX/XLSM hợp lệ."
+            )
+
+        # =====================================================
+        # 4. THỬ ĐỌC WORKBOOK BẰNG CÁC ENGINE PHÙ HỢP
+        # =====================================================
+        xls = None
+        read_errors = []
+
+        required_sheets = ["LichNghi", "DanhSachNV", "LoaiNghi"]
+
+        for engine in engines_to_try:
+            try:
+                xls = pd.read_excel(
+                    temp_file,
+                    sheet_name=required_sheets,
+                    engine=engine,
+                )
+
+                if not isinstance(xls, dict):
+                    raise RuntimeError("Không đọc được danh sách sheet từ Nguồn 3.")
+
+                missing_sheets = [s for s in required_sheets if s not in xls]
+                if missing_sheets:
+                    raise RuntimeError("Thiếu sheet: " + ", ".join(missing_sheets))
+
+                break
+
+            except Exception as e:
+                read_errors.append(f"{engine}: {type(e).__name__}: {e}")
+                xls = None
+
+        if xls is None:
+            raise RuntimeError(
+                "Không đọc được Nguồn 3 bằng các định dạng Excel hỗ trợ. "
+                + " | ".join(read_errors)
+            )
+
+        # =====================================================
+        # 5. ĐỌC SHEET LỊCH NGHỈ
+        # =====================================================
+        df_lich = xls["LichNghi"].iloc[:, :10].copy()
+
         df_lich.columns = [
-            'Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 'Số ngày tính',
-            'Số ngày phép cộng dồn', 'Phạt vi phạm', 'Ngày cập nhật',
-            'Giờ cập nhật', 'Người cập nhật'
+            "Ngày",
+            "Tên nhân viên",
+            "Lý do nghỉ",
+            "Chi tiết",
+            "Số ngày tính",
+            "Số ngày phép cộng dồn",
+            "Phạt vi phạm",
+            "Ngày cập nhật",
+            "Giờ cập nhật",
+            "Người cập nhật",
         ]
 
+        # =====================================================
+        # 6. CHUẨN HÓA NGÀY
+        # =====================================================
         def safe_date_parse(val):
             try:
-                if pd.isna(val): return pd.NaT
-                if isinstance(val, datetime): return val.date()
-                if isinstance(val, date): return val
-                if isinstance(val, (int, float)):
-                    return pd.to_datetime(val, unit='D', origin='1899-12-30').date()
-                text = str(val).strip().split(' ')[0]
-                return pd.to_datetime(text, dayfirst=True, errors='raise').date()
+                if val is None:
+                    return pd.NaT
+
+                if isinstance(val, float) and pd.isna(val):
+                    return pd.NaT
+
+                if isinstance(val, datetime):
+                    return val.date()
+
+                if isinstance(val, date):
+                    return val
+
+                if isinstance(val, numbers.Number):
+                    return pd.to_datetime(
+                        float(val),
+                        unit="D",
+                        origin="1899-12-30",
+                    ).date()
+
+                text = str(val).strip()
+                if not text or text.casefold() in {"nan", "none", "nat"}:
+                    return pd.NaT
+
+                parsed = pd.to_datetime(
+                    text,
+                    dayfirst=True,
+                    errors="coerce",
+                )
+
+                if pd.isna(parsed):
+                    return pd.NaT
+
+                return parsed.date()
+
             except Exception:
                 return pd.NaT
 
-        df_lich['Ngày'] = df_lich['Ngày'].apply(safe_date_parse)
-        df_lich = df_lich.dropna(subset=['Ngày']).copy()
-        df_lich['Số ngày tính'] = df_lich['Số ngày tính'].apply(lambda v: _parse_leave_number(v, 0.0, money=False))
-        df_lich['Số ngày phép cộng dồn'] = df_lich['Số ngày phép cộng dồn'].apply(lambda v: _parse_leave_number(v, 0.0, money=False))
-        df_lich['Phạt vi phạm'] = df_lich['Phạt vi phạm'].apply(lambda v: _parse_leave_number(v, 0.0, money=True))
+        df_lich["Ngày"] = df_lich["Ngày"].apply(safe_date_parse)
+        df_lich = df_lich.dropna(subset=["Ngày"]).copy()
 
+        # =====================================================
+        # 7. CHUẨN HÓA SỐ
+        # =====================================================
+        df_lich["Số ngày tính"] = df_lich["Số ngày tính"].apply(
+            lambda v: _parse_leave_number(v, 0.0, money=False)
+        )
+
+        df_lich["Số ngày phép cộng dồn"] = df_lich[
+            "Số ngày phép cộng dồn"
+        ].apply(
+            lambda v: _parse_leave_number(v, 0.0, money=False)
+        )
+
+        df_lich["Phạt vi phạm"] = df_lich["Phạt vi phạm"].apply(
+            lambda v: _parse_leave_number(v, 0.0, money=True)
+        )
+
+        # =====================================================
+        # 8. FORMAT NGÀY CẬP NHẬT
+        # =====================================================
         def format_excel_date(val):
-            if pd.isna(val) or str(val).strip() == "": return ""
+            if val is None:
+                return ""
+
+            if isinstance(val, float) and pd.isna(val):
+                return ""
+
             try:
-                if isinstance(val, (int, float)):
-                    return pd.to_datetime(val, unit='D', origin='1899-12-30').strftime('%d/%m/%Y')
-                if hasattr(val, 'strftime'): return val.strftime('%d/%m/%Y')
-                parsed = pd.to_datetime(str(val).strip(), dayfirst=True, errors='coerce')
-                return parsed.strftime('%d/%m/%Y') if pd.notna(parsed) else str(val).split(' ')[0]
+                if isinstance(val, numbers.Number):
+                    parsed = pd.to_datetime(
+                        float(val),
+                        unit="D",
+                        origin="1899-12-30",
+                    )
+                    return parsed.strftime("%d/%m/%Y")
+
+                if isinstance(val, datetime):
+                    return val.strftime("%d/%m/%Y")
+
+                if isinstance(val, date):
+                    return val.strftime("%d/%m/%Y")
+
+                text = str(val).strip()
+                if not text:
+                    return ""
+
+                parsed = pd.to_datetime(
+                    text,
+                    dayfirst=True,
+                    errors="coerce",
+                )
+
+                if pd.notna(parsed):
+                    return parsed.strftime("%d/%m/%Y")
+
+                return text.split(" ")[0]
+
             except Exception:
                 return str(val)
 
+        # =====================================================
+        # 9. FORMAT GIỜ CẬP NHẬT
+        # =====================================================
         def format_excel_time(val):
-            if pd.isna(val) or str(val).strip() == "": return ""
+            if val is None:
+                return ""
+
+            if isinstance(val, float) and pd.isna(val):
+                return ""
+
             try:
-                if isinstance(val, (int, float)):
-                    seconds = int(round(float(val) * 86400)) % 86400
-                    return f"{seconds // 3600:02d}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
-                if hasattr(val, 'strftime'): return val.strftime('%H:%M:%S')
-                return str(val)
+                if isinstance(val, numbers.Number):
+                    number = float(val)
+                    fraction = number % 1
+                    seconds = int(round(fraction * 86400)) % 86400
+
+                    hh = seconds // 3600
+                    mm = (seconds % 3600) // 60
+                    ss = seconds % 60
+
+                    return f"{hh:02d}:{mm:02d}:{ss:02d}"
+
+                if isinstance(val, datetime):
+                    return val.strftime("%H:%M:%S")
+
+                if hasattr(val, "strftime"):
+                    return val.strftime("%H:%M:%S")
+
+                text = str(val).strip()
+                return text if text else ""
+
             except Exception:
                 return str(val)
 
-        df_lich['Ngày cập nhật'] = df_lich['Ngày cập nhật'].apply(format_excel_date)
-        df_lich['Giờ cập nhật'] = df_lich['Giờ cập nhật'].apply(format_excel_time)
+        df_lich["Ngày cập nhật"] = df_lich["Ngày cập nhật"].apply(
+            format_excel_date
+        )
+        df_lich["Giờ cập nhật"] = df_lich["Giờ cập nhật"].apply(
+            format_excel_time
+        )
 
-        df_nv_excel = xls['DanhSachNV'].copy()
-        if 'Tên nhân viên' in df_nv_excel.columns:
-            df_nv_excel = df_nv_excel.dropna(subset=['Tên nhân viên'])
-        return df_lich, df_nv_excel, xls['LoaiNghi']
-    except Exception as e:
-        # Không chặn toàn app bằng exception; UI phía dưới sẽ hiển thị cảnh báo nguồn rỗng.
+        # =====================================================
+        # 10. DANH SÁCH NHÂN VIÊN
+        # =====================================================
+        df_nv_excel = xls["DanhSachNV"].copy()
+
+        if "Tên nhân viên" in df_nv_excel.columns:
+            df_nv_excel = df_nv_excel.dropna(
+                subset=["Tên nhân viên"]
+            ).copy()
+
+            df_nv_excel["Tên nhân viên"] = (
+                df_nv_excel["Tên nhân viên"].astype(str).str.strip()
+            )
+
+            df_nv_excel = df_nv_excel[
+                df_nv_excel["Tên nhân viên"] != ""
+            ].copy()
+
+        # =====================================================
+        # 11. DANH MỤC LOẠI NGHỈ
+        # =====================================================
+        df_loai_nghi = xls["LoaiNghi"].copy()
+
+        # =====================================================
+        # 12. XÓA LỖI CŨ TRONG SESSION
+        # =====================================================
         try:
-            st.session_state['source3_last_error'] = str(e)
+            st.session_state.pop("source3_last_error", None)
         except Exception:
             pass
+
+        return df_lich, df_nv_excel, df_loai_nghi
+
+    except Exception as e:
+        # Không làm crash toàn app. Lưu lỗi để giao diện hiển thị cho Admin.
+        try:
+            st.session_state["source3_last_error"] = str(e)
+        except Exception:
+            pass
+
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
     finally:
         try:
             if os.path.exists(temp_file):

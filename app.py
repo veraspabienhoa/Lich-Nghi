@@ -3935,12 +3935,29 @@ UI_THEME_FONT_OPTIONS = [
     "Courier New", "Cinzel Decorative"
 ]
 UI_THEME_EFFECT_OPTIONS = ["Không", "Bóng nhẹ", "Bóng nổi", "Hover nâng", "Gradient nhẹ"]
+
+# V77 - Tùy chỉnh riêng MENU CHỨC NĂNG trong cùng cấu hình giao diện toàn hệ thống.
+# Các giá trị chiều rộng dùng phần trăm để thích ứng tốt trên cả desktop và mobile.
+MENU_UI_DEFAULT = {
+    "title_desktop_size": 18,
+    "title_mobile_size": 18,
+    "button_desktop_size": 16,
+    "button_mobile_size": 16,
+    "selected_desktop_size": 16,
+    "selected_mobile_size": 16,
+    "note_desktop_size": 16,
+    "note_mobile_size": 16,
+    "button_width_desktop_pct": 100,
+    "button_width_mobile_pct": 100,
+}
+
 UI_THEME_DEFAULT = {
     "main_title": {"desktop_size": 28, "mobile_size": 28, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
     "sub_title": {"desktop_size": 22, "mobile_size": 22, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
     "small_title": {"desktop_size": 18, "mobile_size": 18, "font_family": "Roboto", "text_color": "#222222", "bg_color": "#D9D9D9", "effect": "Không"},
     "label_content": {"desktop_size": 16, "mobile_size": 16, "font_family": "Roboto", "text_color": "#333333", "bg_color": "#D9D9D9", "effect": "Không"},
     "table": {"desktop_size": 13, "mobile_size": 13, "font_family": "Roboto", "text_color": "#333333", "bg_color": "#D9D9D9", "effect": "Không"},
+    "menu": dict(MENU_UI_DEFAULT),
 }
 
 
@@ -3979,6 +3996,25 @@ def _normalized_theme_config(raw=None):
             "bg_color": _valid_theme_hex(incoming.get("bg_color"), base["bg_color"]),
             "effect": effect,
         }
+
+    menu_in = raw.get("menu", {}) if isinstance(raw.get("menu", {}), dict) else {}
+    menu = dict(MENU_UI_DEFAULT)
+    for field in [
+        "title_desktop_size", "title_mobile_size",
+        "button_desktop_size", "button_mobile_size",
+        "selected_desktop_size", "selected_mobile_size",
+        "note_desktop_size", "note_mobile_size",
+    ]:
+        try:
+            menu[field] = max(8, min(36, int(float(menu_in.get(field, menu[field])))))
+        except Exception:
+            pass
+    for field in ["button_width_desktop_pct", "button_width_mobile_pct"]:
+        try:
+            menu[field] = max(35, min(100, int(float(menu_in.get(field, menu[field])))))
+        except Exception:
+            pass
+    result["menu"] = menu
     return result
 
 
@@ -4122,14 +4158,33 @@ def render_global_ui_theme_css(config=None):
             hover_rules.append(f"{selector}:hover{{{_theme_hover_css(item['effect'])}}}")
         mobile_rules.append(f"{selector}{{font-size:{item['mobile_size']}px!important;}}")
 
+    # V77: MENU CHỨC NĂNG có bảng cấu hình riêng về cỡ chữ và chiều rộng button.
+    menu = cfg.get("menu", dict(MENU_UI_DEFAULT))
+    menu_desktop_css = f"""
+.vera-menu-title,.vera-menu-title * {{font-size:{menu['title_desktop_size']}px!important;}}
+[data-testid='stSidebar'] div.stButton > button {{width:{menu['button_width_desktop_pct']}%!important;max-width:100%!important;margin-left:0!important;margin-right:auto!important;}}
+[data-testid='stSidebar'] div.stButton > button,[data-testid='stSidebar'] div.stButton > button * {{font-size:{menu['button_desktop_size']}px!important;}}
+[data-testid='stSidebar'] div.stButton > button[kind='primary'],[data-testid='stSidebar'] div.stButton > button[kind='primary'] * {{font-size:{menu['selected_desktop_size']}px!important;}}
+.vera-menu-note,.vera-menu-note * {{font-size:{menu['note_desktop_size']}px!important;line-height:1.35!important;}}
+"""
+    menu_mobile_css = f"""
+  .vera-menu-title,.vera-menu-title * {{font-size:{menu['title_mobile_size']}px!important;}}
+  [data-testid='stSidebar'] div.stButton > button {{width:{menu['button_width_mobile_pct']}%!important;}}
+  [data-testid='stSidebar'] div.stButton > button,[data-testid='stSidebar'] div.stButton > button * {{font-size:{menu['button_mobile_size']}px!important;}}
+  [data-testid='stSidebar'] div.stButton > button[kind='primary'],[data-testid='stSidebar'] div.stButton > button[kind='primary'] * {{font-size:{menu['selected_mobile_size']}px!important;}}
+  .vera-menu-note,.vera-menu-note * {{font-size:{menu['note_mobile_size']}px!important;}}
+"""
+
     # Mobile: giảm padding/gap chứ không ép giảm cỡ chữ; Admin có cột riêng để tự đặt nếu muốn.
     css = "\n".join(desktop_rules + hover_rules)
     mobile_css = "\n".join(mobile_rules)
     st.markdown(f"""
 <style id="vera-global-theme-v71">
 {css}
+{menu_desktop_css}
 @media (max-width:768px) {{
 {mobile_css}
+{menu_mobile_css}
   h1,h2,h3,h4,h5,h6,.custom-main-title {{padding:.32rem .48rem!important;margin-top:.18rem!important;margin-bottom:.3rem!important;overflow-wrap:anywhere!important;}}
   [data-testid='stWidgetLabel'] {{padding:.22rem .4rem!important;overflow-wrap:anywhere!important;}}
   .block-container {{padding-left:.4rem!important;padding-right:.4rem!important;}}
@@ -4156,11 +4211,12 @@ def _theme_editor_df(config):
     return pd.DataFrame(rows)
 
 
-def _theme_from_editor_df(df):
-    result = {}
+def _theme_from_editor_df(df, base_config=None):
+    # Giữ nguyên cấu hình MENU CHỨC NĂNG khi Admin chỉ chỉnh bảng theme chung.
+    result = dict(base_config) if isinstance(base_config, dict) else {}
     label_to_key = {v: k for k, v in UI_THEME_GROUP_LABELS.items()}
     if not isinstance(df, pd.DataFrame):
-        return _normalized_theme_config()
+        return _normalized_theme_config(result)
     for _, row in df.iterrows():
         key = label_to_key.get(str(row.get("Nhóm", "")).strip())
         if not key:
@@ -4174,6 +4230,52 @@ def _theme_from_editor_df(df):
             "effect": row.get("Hiệu ứng", "Không"),
         }
     return _normalized_theme_config(result)
+
+
+def _menu_ui_editor_df(config):
+    menu = _normalized_theme_config(config).get("menu", dict(MENU_UI_DEFAULT))
+    return pd.DataFrame([
+        {"Thành phần": "📌 MENU CHỨC NĂNG", "Cỡ chữ Web": menu["title_desktop_size"], "Cỡ chữ Mobile": menu["title_mobile_size"]},
+        {"Thành phần": "Các nút chức năng", "Cỡ chữ Web": menu["button_desktop_size"], "Cỡ chữ Mobile": menu["button_mobile_size"]},
+        {"Thành phần": "Nút đang được chọn", "Cỡ chữ Web": menu["selected_desktop_size"], "Cỡ chữ Mobile": menu["selected_mobile_size"]},
+        {"Thành phần": "Ghi chú cuối menu", "Cỡ chữ Web": menu["note_desktop_size"], "Cỡ chữ Mobile": menu["note_mobile_size"]},
+    ])
+
+
+def _menu_ui_from_editor_df(df, base_menu=None, width_web=None, width_mobile=None):
+    menu = dict(MENU_UI_DEFAULT)
+    if isinstance(base_menu, dict):
+        menu.update(base_menu)
+    mapping = {
+        "📌 MENU CHỨC NĂNG": ("title_desktop_size", "title_mobile_size"),
+        "Các nút chức năng": ("button_desktop_size", "button_mobile_size"),
+        "Nút đang được chọn": ("selected_desktop_size", "selected_mobile_size"),
+        "Ghi chú cuối menu": ("note_desktop_size", "note_mobile_size"),
+    }
+    if isinstance(df, pd.DataFrame):
+        for _, row in df.iterrows():
+            fields = mapping.get(str(row.get("Thành phần", "")).strip())
+            if not fields:
+                continue
+            try:
+                menu[fields[0]] = max(8, min(36, int(float(row.get("Cỡ chữ Web", menu[fields[0]])))))
+            except Exception:
+                pass
+            try:
+                menu[fields[1]] = max(8, min(36, int(float(row.get("Cỡ chữ Mobile", menu[fields[1]])))))
+            except Exception:
+                pass
+    try:
+        if width_web is not None:
+            menu["button_width_desktop_pct"] = max(35, min(100, int(float(width_web))))
+    except Exception:
+        pass
+    try:
+        if width_mobile is not None:
+            menu["button_width_mobile_pct"] = max(35, min(100, int(float(width_mobile))))
+    except Exception:
+        pass
+    return menu
 
 
 def render_admin_theme_config_panel():
@@ -4209,7 +4311,7 @@ def render_admin_theme_config_panel():
                 "Hiệu ứng": st.column_config.SelectboxColumn("Hiệu ứng", options=UI_THEME_EFFECT_OPTIONS, width=125),
             },
         )
-        preview_cfg = _theme_from_editor_df(edited)
+        preview_cfg = _theme_from_editor_df(edited, current)
         # Preview dùng HTML đơn giản, không ghi dữ liệu cho tới khi bấm Lưu.
         p1, p2, p3 = preview_cfg["main_title"], preview_cfg["sub_title"], preview_cfg["small_title"]
         st.markdown(
@@ -4227,7 +4329,75 @@ def render_admin_theme_config_panel():
                     st.rerun()
         with c2:
             if st.button("♻️ Khôi phục 28 · 22 · 18 · 16 · 13", use_container_width=True, key="reset_global_theme_v71"):
-                ok, msg = save_ui_theme_config(UI_THEME_DEFAULT, st.session_state.current_user)
+                reset_cfg = _normalized_theme_config(UI_THEME_DEFAULT)
+                reset_cfg["menu"] = dict(current.get("menu", MENU_UI_DEFAULT))
+                ok, msg = save_ui_theme_config(reset_cfg, st.session_state.current_user)
+                (st.success if ok else st.error)(msg)
+                if ok:
+                    st.rerun()
+
+    # V77 - Đưa toàn bộ bảng cỡ chữ MENU CHỨC NĂNG vào Giao diện tùy chỉnh.
+    with st.expander("📌 MENU CHỨC NĂNG · Cỡ chữ · Chiều rộng button", expanded=True):
+        st.caption(
+            "Tùy chỉnh riêng tiêu đề MENU, chữ các nút, chữ nút đang chọn và ghi chú cuối menu. "
+            "Chiều rộng button dùng % chiều rộng sidebar để tự thích ứng theo màn hình."
+        )
+        menu_current = dict(current.get("menu", MENU_UI_DEFAULT))
+        menu_edited = st.data_editor(
+            _menu_ui_editor_df(current),
+            key="admin_menu_ui_editor_v77",
+            hide_index=True,
+            num_rows="fixed",
+            width="stretch",
+            height="content",
+            disabled=["Thành phần"],
+            row_height=42,
+            column_config={
+                "Thành phần": st.column_config.TextColumn("Thành phần", disabled=True, width=230),
+                "Cỡ chữ Web": st.column_config.NumberColumn("Cỡ chữ Web", min_value=8, max_value=36, step=1, format="%d", width=115),
+                "Cỡ chữ Mobile": st.column_config.NumberColumn("Cỡ chữ Mobile", min_value=8, max_value=36, step=1, format="%d", width=130),
+            },
+        )
+        mw1, mw2 = st.columns(2)
+        with mw1:
+            menu_width_web = st.number_input(
+                "Chiều rộng button Web (%)", min_value=35, max_value=100, step=5,
+                value=int(menu_current.get("button_width_desktop_pct", 100)), key="menu_button_width_web_v77",
+                help="100% = nút rộng hết sidebar; 80% = nút chiếm 80% chiều rộng sidebar."
+            )
+        with mw2:
+            menu_width_mobile = st.number_input(
+                "Chiều rộng button Mobile (%)", min_value=35, max_value=100, step=5,
+                value=int(menu_current.get("button_width_mobile_pct", 100)), key="menu_button_width_mobile_v77",
+                help="Áp dụng khi chiều rộng màn hình nhỏ hơn hoặc bằng 768px."
+            )
+
+        menu_preview = _menu_ui_from_editor_df(
+            menu_edited, menu_current, width_web=menu_width_web, width_mobile=menu_width_mobile
+        )
+        st.markdown(
+            f"<div style='border:1px solid #D9D9D9;border-radius:8px;padding:10px 12px;margin:4px 0 8px 0;'>"
+            f"<div style='font-size:{menu_preview['title_desktop_size']}px;font-weight:800;margin-bottom:7px;'>📌 MENU CHỨC NĂNG</div>"
+            f"<button style='width:{menu_preview['button_width_desktop_pct']}%;font-size:{menu_preview['button_desktop_size']}px;padding:7px 10px;margin:3px 0;'>🧭 Bảng tour</button><br>"
+            f"<button style='width:{menu_preview['button_width_desktop_pct']}%;font-size:{menu_preview['selected_desktop_size']}px;padding:7px 10px;margin:3px 0;font-weight:700;'>📅 Đăng ký nghỉ phép · đang chọn</button>"
+            f"<div style='font-size:{menu_preview['note_desktop_size']}px;margin-top:7px;'>🔐 Ghi chú cuối menu</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            if st.button("💾 Lưu MENU làm mặc định", use_container_width=True, key="save_menu_ui_v77"):
+                cfg_to_save = _normalized_theme_config(current)
+                cfg_to_save["menu"] = menu_preview
+                ok, msg = save_ui_theme_config(cfg_to_save, st.session_state.current_user)
+                (st.success if ok else st.error)(msg)
+                if ok:
+                    st.rerun()
+        with mc2:
+            if st.button("♻️ Khôi phục MENU 18 · 16 · 16 · 16 · 100%", use_container_width=True, key="reset_menu_ui_v77"):
+                cfg_to_save = _normalized_theme_config(current)
+                cfg_to_save["menu"] = dict(MENU_UI_DEFAULT)
+                ok, msg = save_ui_theme_config(cfg_to_save, st.session_state.current_user)
                 (st.success if ok else st.error)(msg)
                 if ok:
                     st.rerun()
@@ -8139,7 +8309,7 @@ if st.session_state.current_role in ["nhanvien", "leader", "locker"]:
     """, unsafe_allow_html=True)
 else:
     st.sidebar.markdown(
-        "<div style='font-size:18px;font-weight:800;line-height:1.15;margin:2px 0 10px 0;'>📌 MENU CHỨC NĂNG</div>",
+        "<div class='vera-menu-title' style='font-weight:800;line-height:1.15;margin:2px 0 10px 0;'>📌 MENU CHỨC NĂNG</div>",
         unsafe_allow_html=True
     )
     for page_name in allowed_pages:
@@ -8148,7 +8318,10 @@ else:
             open_app_page(page_name)
     if st.session_state.current_role == "admin":
         st.sidebar.markdown("---")
-        st.sidebar.caption("🔐 Quyền từng chức năng/từng vai trò/từng tài khoản được quản lý tại trang Phân quyền chức năng.")
+        st.sidebar.markdown(
+            "<div class='vera-menu-note'>🔐 Quyền từng chức năng/từng vai trò/từng tài khoản được quản lý tại trang Phân quyền chức năng.</div>",
+            unsafe_allow_html=True
+        )
     collapse_sidebar_after_navigation_once()
 
 # --- GIAO DIỆN HEADER ---

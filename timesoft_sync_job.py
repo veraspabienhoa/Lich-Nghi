@@ -590,7 +590,12 @@ def process_tour_penalties(client: gspread.Client, cfg: dict, employee_map: dict
         return result
     if df.empty:
         return result
-    name_col = _find_col(df, "Tên nhân viên") or _find_col(df, "Tên Nhân Viên")
+    name_col = (
+        _find_col(df, "Tên nhân viên")
+        or _find_col(df, "Tên Nhân Viên")
+        or _find_col(df, "Nhân viên")
+        or _find_col(df, "NV")
+    )
     late_col = _find_col(df, "Vào trễ")
     out_col = _find_col(df, "Giờ ra")
     in_col = _find_col(df, "Giờ vào")
@@ -931,7 +936,13 @@ def process_timesoft_penalties(
         result["errors"] += 1
         return result
     threshold = max(AUTO_PENALTY_MINUTES, int(cfg.get("threshold_minutes", AUTO_PENALTY_MINUTES)))
+    today = datetime.now(VN_TZ).date()
+
     for target_date, df in checkin_by_date:
+        # V84.1: Auto phạt chỉ xử lý dữ liệu của NGÀY HÔM NAY.
+        # PostgreSQL vẫn được phép đồng bộ hôm nay + hôm qua theo SYNC_DAYS.
+        if target_date != today:
+            continue
         if not isinstance(df, pd.DataFrame) or df.empty:
             continue
         for _, row in df.iterrows():

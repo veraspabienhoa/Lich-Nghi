@@ -14977,36 +14977,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
     st.subheader("✏️ Quản lý lịch nghỉ")
     st.markdown("### 🗑️ Xóa / Quản lý lịch nghỉ đã đăng ký")
     st.markdown("""
-### 3. Quy định Sửa / Hủy lịch nghỉ
 
-****
-
-- 
-- 
-- Nghỉ CÓ phép phải thực hiện Sửa/Hủy trước ít nhất **3 ngày**.
-- 
-
-****
-
-- 
-
-****
-
-- 
-- 
-
-****
-
-- ``
-- ``
-- ``
-
-
-
-****
-
-- Admin/Lễ tân/Quản lý được cập nhật hoặc hủy `Nghỉ đám hiếu` không bị giới hạn 3 ngày và không bị giới hạn theo thứ/ngày trong tuần.
-""")
 
     render_leave_filter_label_css()
     manage_today = get_vn_today()

@@ -1,4 +1,4 @@
-# V83 - TimeSoft background 30-minute schedule UI + manual fetch labels (2026-08-19)
+# V84 - Auto penalty >=5 minutes + Admin pause + Excel→Google sync V1/V2 + star-safe employee matching (2026-08-19)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -891,6 +891,20 @@ def normalize_login_name(value):
     """Tên đăng nhập: không phân biệt dấu, HOA/thường; không ép kiểu số."""
     return " ".join(remove_vietnamese_accents(str(value)).strip().split()).casefold()
 
+def clean_employee_match_name(value):
+    """
+    Tên dùng để ĐỐI CHIẾU dữ liệu nhân viên giữa Bảng tour / TimeSoft / Google Sheet.
+    Dấu * ở cuối tên trong Bảng tour chỉ là ký hiệu vận hành, không phải một phần tên nhân viên.
+    Ví dụ: ``Cẩm Nhung *`` == ``Cẩm Nhung``.
+    Không dùng hàm này để thay đổi tên đăng nhập hiển thị/lưu hồ sơ.
+    """
+    text = normalize_name(value)
+    text = re.sub(r"\s*\*+\s*$", "", str(text)).strip()
+    return " ".join(text.split())
+
+def normalize_employee_match_name(value):
+    return normalize_login_name(clean_employee_match_name(value))
+
 def sort_employee_names(values):
     """Sắp xếp tên nhân viên A→Z, bỏ trùng theo chuẩn không dấu/không phân biệt hoa thường."""
     by_key = {}
@@ -1691,6 +1705,16 @@ SHEET_LICH_NGHI_2_ID = "1bLxn-L5gXui8pCL1b9TxshCNcykM7jg0J49Dkr5b4DI"
 SHEET_CHINH_ID = "1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT"
 BANG_TOUR_FILE_ID = "1yA1Oog_6R-HmDFatcku-x8s-59p2dP9R"
 PAYROLL_SOURCE_SHEET_ID = "1WtYsbEAlifL1PZ-nSGBojgL4Bnur-1vF"
+
+# V84 - Điều khiển Auto Update phạt. Trạng thái lưu trên Google Sheet để mọi instance dùng chung.
+AUTO_PENALTY_CONFIG_WORKSHEET = "CauHinhAutoPhat"
+AUTO_PENALTY_MINUTES = 5
+AUTO_PENALTY_CONFIG_HEADERS = [
+    "Key", "Trạng thái", "Ngưỡng phút", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
+]
+AUTO_PENALTY_CONFIG_KEY = "AUTO_PENALTY"
+AUTO_PENALTY_RUNNING = "RUNNING"
+AUTO_PENALTY_PAUSED = "PAUSED"
 PAYROLL_SOURCE_WORKSHEET = "Báo cáo doanh thu hóa đơn"
 PAYROLL_STORAGE_WORKSHEET = "BangLuong"
 PAYROLL_CONFIG_WORKSHEET = "CauHinhLuong"
@@ -1743,6 +1767,7 @@ FEATURE_DEFINITIONS = {
     "employee_delete": "🗑️ Xóa nhân viên",
     "account_lock": "🔒 Khóa đăng nhập",
     "registration_lock": "🔐 Khóa quyền đăng ký",
+    "auto_penalty": "⏸️ Auto Update phạt",
     "sync": "🔄 Đồng bộ dữ liệu",
     "column_config": "⚙️ Giao diện tùy chỉnh",
     "profile": "👤 Hồ sơ cá nhân",
@@ -2278,6 +2303,91 @@ def _clear_dynamic_data_caches():
         except Exception:
             pass
 
+# ==========================================================
+# V84 - TRẠNG THÁI AUTO UPDATE PHẠT (DÙNG CHUNG TOÀN HỆ THỐNG)
+# ==========================================================
+def _get_auto_penalty_config_worksheet(client=None):
+    client = client or get_gspread_client()
+    if not client:
+        return None
+    ss = client.open_by_key(SHEET_DU_PHONG_ID)
+    try:
+        ws = ss.worksheet(AUTO_PENALTY_CONFIG_WORKSHEET)
+    except Exception:
+        ws = ss.add_worksheet(title=AUTO_PENALTY_CONFIG_WORKSHEET, rows=20, cols=8)
+    return ws
+
+def load_auto_penalty_config():
+    """Đọc LIVE trạng thái RUNNING/PAUSED để nút Admin có hiệu lực trên mọi phiên/instance."""
+    default = {
+        "paused": False,
+        "status": AUTO_PENALTY_RUNNING,
+        "threshold_minutes": AUTO_PENALTY_MINUTES,
+        "updated_date": "",
+        "updated_time": "",
+        "updated_by": "",
+        "error": "",
+    }
+    try:
+        client = get_gspread_client()
+        ws = _get_auto_penalty_config_worksheet(client)
+        if ws is None:
+            default["error"] = "Chưa cấu hình Google Sheets."
+            return default
+        vals = _gs_call_with_backoff(ws.get, 'A1:F2')
+        if not vals or not vals[0] or vals[0][:6] != AUTO_PENALTY_CONFIG_HEADERS:
+            gspread_update_range(ws, 'A1:F1', [AUTO_PENALTY_CONFIG_HEADERS], value_input_option='USER_ENTERED')
+        row = vals[1] if len(vals) > 1 else []
+        if not row or str(row[0]).strip() != AUTO_PENALTY_CONFIG_KEY:
+            now = datetime.now(VN_TZ)
+            row = [
+                AUTO_PENALTY_CONFIG_KEY, AUTO_PENALTY_RUNNING, AUTO_PENALTY_MINUTES,
+                now.strftime('%d/%m/%Y'), now.strftime('%H:%M:%S'), 'Hệ thống'
+            ]
+            gspread_update_range(ws, 'A2:F2', [row], value_input_option='USER_ENTERED')
+        row = list(row) + [""] * max(0, 6 - len(row))
+        status = str(row[1] or AUTO_PENALTY_RUNNING).strip().upper()
+        try:
+            threshold = int(float(row[2] or AUTO_PENALTY_MINUTES))
+        except Exception:
+            threshold = AUTO_PENALTY_MINUTES
+        # V84: ngưỡng nghiệp vụ cố định tối thiểu là 5 phút.
+        threshold = max(AUTO_PENALTY_MINUTES, threshold)
+        return {
+            "paused": status == AUTO_PENALTY_PAUSED,
+            "status": status,
+            "threshold_minutes": threshold,
+            "updated_date": str(row[3] or ""),
+            "updated_time": str(row[4] or ""),
+            "updated_by": str(row[5] or ""),
+            "error": "",
+        }
+    except Exception as e:
+        default["error"] = str(e)
+        return default
+
+def set_auto_penalty_paused(paused, updated_by):
+    try:
+        client = get_gspread_client()
+        ws = _get_auto_penalty_config_worksheet(client)
+        if ws is None:
+            return False, "Chưa cấu hình quyền kết nối Google Sheets."
+        now = datetime.now(VN_TZ)
+        status = AUTO_PENALTY_PAUSED if bool(paused) else AUTO_PENALTY_RUNNING
+        gspread_update_range(ws, 'A1:F1', [AUTO_PENALTY_CONFIG_HEADERS], value_input_option='USER_ENTERED')
+        gspread_update_range(ws, 'A2:F2', [[
+            AUTO_PENALTY_CONFIG_KEY, status, AUTO_PENALTY_MINUTES,
+            now.strftime('%d/%m/%Y'), now.strftime('%H:%M:%S'), str(updated_by or 'Admin')
+        ]], value_input_option='USER_ENTERED')
+        state_vi = "TẠM DỪNG" if paused else "HOẠT ĐỘNG"
+        return True, f"Auto Update phạt đã chuyển sang trạng thái {state_vi}. Ngưỡng tự động: từ {AUTO_PENALTY_MINUTES} phút."
+    except Exception as e:
+        return False, f"Không cập nhật được trạng thái Auto Update: {e}"
+
+def is_auto_penalty_paused():
+    return bool(load_auto_penalty_config().get("paused", False))
+
+
 def get_postgres_runtime_status():
     """Dùng cho kiểm tra triển khai: không làm app lỗi nếu PostgreSQL tạm unavailable."""
     if vpg is None or not vpg.is_enabled():
@@ -2288,71 +2398,162 @@ def get_postgres_runtime_status():
         return False, f"PostgreSQL lỗi: {exc}"
 
 
-# --- ĐỒNG BỘ EXCEL SANG GOOGLE SHEETS (CHỈ THÊM MỚI) ---
-def admin_sync_excel_to_gsheet():
+# ==========================================================
+# V84 - ĐỒNG BỘ EXCEL -> GOOGLE SHEET: 2 PHIÊN BẢN
+#   V1: cho phép ghi đè, paste toàn bộ dữ liệu từ A2:J...
+#   V2: không ghi đè, chỉ thêm dòng mới đúng LAST ROW trong A:J
+# ==========================================================
+def _load_excel_leave_rows_for_google_sync():
+    file_id = SHEET_CHINH_ID
+    temp_file = f"temp_sync_{os.getpid()}_{int(time.time())}.xlsb"
+    try:
+        download_file_from_google_drive(file_id, temp_file)
+        xls = pd.read_excel(temp_file, sheet_name='LichNghi', engine='pyxlsb')
+        df_excel = xls.iloc[:, :10].copy()
+        if df_excel.shape[1] < 10:
+            return pd.DataFrame(), "Sheet LichNghi của Excel chưa đủ 10 cột A:J."
+
+        df_excel = df_excel.iloc[:, :10]
+        df_excel.columns = [
+            "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+            "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
+            "Giờ cập nhật", "Người cập nhật"
+        ]
+
+        def clean_date(val):
+            if val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip().lower() in {"", "nan", "nat", "none"}:
+                return ""
+            try:
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    return pd.to_datetime(val, unit='D', origin='1899-12-30').strftime('%d/%m/%Y')
+                if hasattr(val, 'strftime'):
+                    return val.strftime('%d/%m/%Y')
+                return pd.to_datetime(str(val).strip().split(' ')[0], dayfirst=True).strftime('%d/%m/%Y')
+            except Exception:
+                return str(val).strip()
+
+        def clean_text(val):
+            try:
+                if pd.isna(val):
+                    return ""
+            except Exception:
+                pass
+            text = str(val).strip()
+            return "" if text.casefold() in {"nan", "nat", "none"} else text
+
+        df_excel['Ngày'] = df_excel['Ngày'].apply(clean_date)
+        df_excel['Ngày cập nhật'] = df_excel['Ngày cập nhật'].apply(clean_date)
+        for c in df_excel.columns:
+            if c not in {'Ngày', 'Ngày cập nhật'}:
+                df_excel[c] = df_excel[c].apply(clean_text)
+
+        # Bỏ dòng hoàn toàn trống. Dấu * ở tên chỉ được bỏ khi đối chiếu, không tự sửa dữ liệu gốc.
+        df_excel = df_excel[
+            df_excel.apply(lambda r: any(str(v).strip() for v in r.tolist()), axis=1)
+        ].reset_index(drop=True)
+        return df_excel, ""
+    except Exception as e:
+        return pd.DataFrame(), f"Không đọc được Excel LichNghi: {e}"
+    finally:
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+        except Exception:
+            pass
+
+def _leave_sync_merge_key(row):
+    if isinstance(row, pd.Series):
+        getv = row.get
+    else:
+        getv = lambda k, d='': row.get(k, d)
+    return (
+        normalize_schedule_date(getv('Ngày', '')),
+        normalize_employee_match_name(getv('Tên nhân viên', '')),
+        normalize_leave_reason(getv('Lý do nghỉ', getv('Loại nghỉ', ''))),
+    )
+
+def _ensure_leave_sheet_header(sheet_dp):
+    header = [
+        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
+        "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
+        "Giờ cập nhật", "Người cập nhật"
+    ]
+    current = _gs_call_with_backoff(sheet_dp.get, 'A1:J1')
+    current = current[0] if current else []
+    if not any(str(v).strip() for v in current):
+        gspread_update_range(sheet_dp, 'A1:J1', [header], value_input_option='USER_ENTERED')
+    return header
+
+def admin_sync_excel_to_gsheet_overwrite():
+    """Phiên bản 1: xóa dữ liệu cũ A2:J rồi paste toàn bộ Excel bắt đầu đúng A2."""
     try:
         client = get_gspread_client()
-        if not client: return False, "Chưa cấu hình quyền kết nối Google Sheets."
-        
-        file_id = "1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT"
-        temp_file = "temp_sync.xlsb"
-        download_file_from_google_drive(file_id, temp_file)
-        
-        xls = pd.read_excel(temp_file, sheet_name='LichNghi', engine='pyxlsb')
-        if os.path.exists(temp_file): os.remove(temp_file)
-        
-        df_excel = xls.iloc[:, :10].copy()
-        
-        def clean_val(val, is_date=False):
-            try:
-                if pd.isna(val) or str(val).strip() in ["nan", "NaT", "None", ""]: return ""
-                if is_date or hasattr(val, 'strftime'):
-                    if hasattr(val, 'strftime'): return val.strftime('%d/%m/%Y')
-                    if isinstance(val, (int, float)): return pd.to_datetime(val, unit='D', origin='1899-12-30').strftime('%d/%m/%Y')
-                    return pd.to_datetime(str(val).strip().split(' ')[0], dayfirst=True).strftime('%d/%m/%Y')
-                return str(val).strip()
-            except: return str(val).strip()
-
-        cols = df_excel.columns.tolist()
-        if len(cols) > 0: df_excel[cols[0]] = df_excel[cols[0]].apply(lambda x: clean_val(x, is_date=True))
-        if len(cols) > 7: df_excel[cols[7]] = df_excel[cols[7]].apply(lambda x: clean_val(x, is_date=True))
-        for c in cols:
-            if c not in [cols[0], cols[7]] if len(cols)>7 else [cols[0]]:
-                df_excel[c] = df_excel[c].apply(lambda x: clean_val(x))
-
-        df_excel = df_excel.fillna("")
-        df_excel.columns = ["Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"]
-        
-        # Tải dữ liệu hiện tại trên GSheet
+        if not client:
+            return False, "Chưa cấu hình quyền kết nối Google Sheets."
+        df_excel, err = _load_excel_leave_rows_for_google_sync()
+        if err:
+            return False, err
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        gsheet_data = _gs_call_with_backoff(sheet_dp.get_all_values)
-        
-        if len(gsheet_data) > 1:
-            df_gsheet = pd.DataFrame(gsheet_data[1:], columns=gsheet_data[0])
-        else:
-            df_gsheet = pd.DataFrame(columns=df_excel.columns)
-
-        # Lọc ra những dòng chưa có trên GSheet
-        df_gsheet['Merge_Key'] = df_gsheet['Ngày'].astype(str) + "_" + df_gsheet['Tên nhân viên'].apply(normalize_name) + "_" + df_gsheet.get('Lý do nghỉ', df_gsheet.get('Loại nghỉ', '')).astype(str)
-        df_excel['Merge_Key'] = df_excel['Ngày'].astype(str) + "_" + df_excel['Tên nhân viên'].apply(normalize_name) + "_" + df_excel['Lý do nghỉ'].astype(str)
-        
-        new_rows_df = df_excel[~df_excel['Merge_Key'].isin(df_gsheet['Merge_Key'])].drop(columns=['Merge_Key'])
-        
-        if new_rows_df.empty:
-            return True, "Không có dữ liệu mới nào từ Excel để đồng bộ."
-
-        values_to_append = new_rows_df.values.tolist()
-        sheet_dp.append_rows(values_to_append, value_input_option='USER_ENTERED')
-        
+        _ensure_leave_sheet_header(sheet_dp)
+        # Chỉ xóa vùng dữ liệu A:J, không đụng header hàng 1 và không đụng các cột khác.
+        _gs_call_with_backoff(sheet_dp.batch_clear, ['A2:J'])
+        values = df_excel.iloc[:, :10].values.tolist() if not df_excel.empty else []
+        if values:
+            last_row = len(values) + 1
+            gspread_update_range(sheet_dp, f'A2:J{last_row}', values, value_input_option='USER_ENTERED')
         _clear_dynamic_data_caches()
-        return True, f"Đã thêm mới {len(values_to_append)} dòng dữ liệu từ Excel lên Sheet (không ghi đè)!"
+        return True, f"Phiên bản 1 hoàn tất: đã GHI ĐÈ vùng A2:J và paste {len(values)} dòng từ Excel vào Sheet1."
     except Exception as e:
-        return False, f"Lỗi đồng bộ: {e}"
+        return False, f"Lỗi đồng bộ Phiên bản 1: {e}"
+
+def admin_sync_excel_to_gsheet_append():
+    """Phiên bản 2: không sửa dòng hiện có; chỉ ghi các dòng mới vào đúng last row A:J."""
+    try:
+        client = get_gspread_client()
+        if not client:
+            return False, "Chưa cấu hình quyền kết nối Google Sheets."
+        df_excel, err = _load_excel_leave_rows_for_google_sync()
+        if err:
+            return False, err
+        sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        _ensure_leave_sheet_header(sheet_dp)
+
+        live = _live_sheet_to_leave_df(sheet_dp)
+        existing_keys = set()
+        if isinstance(live, pd.DataFrame) and not live.empty:
+            existing_keys = {_leave_sync_merge_key(r) for _, r in live.iterrows()}
+
+        rows = []
+        seen_new = set()
+        for _, r in df_excel.iterrows():
+            key = _leave_sync_merge_key(r)
+            if key in existing_keys or key in seen_new:
+                continue
+            if not key[0] or not key[1] or not key[2]:
+                continue
+            seen_new.add(key)
+            rows.append(r.iloc[:10].tolist())
+
+        if not rows:
+            return True, "Phiên bản 2: không có dòng mới; dữ liệu hiện tại trên Google Sheet được giữ nguyên."
+
+        target_row = _next_data_row_a_to_j(sheet_dp)
+        end_row = target_row + len(rows) - 1
+        # Ghi RANGE chính xác A:J tại last row; tuyệt đối không overwrite các dòng hiện hữu.
+        gspread_update_range(sheet_dp, f'A{target_row}:J{end_row}', rows, value_input_option='USER_ENTERED')
+        _clear_dynamic_data_caches()
+        return True, f"Phiên bản 2 hoàn tất: đã thêm {len(rows)} dòng mới vào đúng A{target_row}:J{end_row}; không ghi đè dữ liệu cũ."
+    except Exception as e:
+        return False, f"Lỗi đồng bộ Phiên bản 2: {e}"
+
+def admin_sync_excel_to_gsheet():
+    """Giữ tương thích code cũ: mặc định dùng Phiên bản 2 an toàn, không ghi đè."""
+    return admin_sync_excel_to_gsheet_append()
 
 # --- ĐỒNG BỘ GOOGLE SHEETS SANG EXCEL (TẠO FILE DOWNLOAD CHỈ THÊM MỚI) ---
 def admin_sync_gsheet_to_excel(df_gsheet, df_excel_goc):
-    df_gsheet['Merge_Key'] = df_gsheet['Ngày'].astype(str) + "_" + df_gsheet['Tên nhân viên'].apply(normalize_name) + "_" + df_gsheet.get('Lý do nghỉ', df_gsheet.get('Loại nghỉ', '')).astype(str)
-    df_excel_goc['Merge_Key'] = df_excel_goc.iloc[:, 0].astype(str) + "_" + df_excel_goc.iloc[:, 1].apply(normalize_name) + "_" + df_excel_goc.iloc[:, 2].astype(str)
+    df_gsheet['Merge_Key'] = df_gsheet.apply(lambda r: '|'.join(_leave_sync_merge_key(r)), axis=1)
+    df_excel_goc['Merge_Key'] = df_excel_goc.apply(lambda r: '|'.join((normalize_schedule_date(r.iloc[0]), normalize_employee_match_name(r.iloc[1]), normalize_leave_reason(r.iloc[2]))), axis=1)
     
     new_rows = df_gsheet[~df_gsheet['Merge_Key'].isin(df_excel_goc['Merge_Key'])].copy()
     
@@ -3489,6 +3690,297 @@ def build_leave_reason_catalog(source_df=None):
             'penalty': float(penalty),
         }
     return catalog
+
+
+# ==========================================================
+# V84 - AUTO UPDATE VI PHẠM: BẢNG TOUR + TIMESOFT
+# ==========================================================
+def _auto_penalty_catalog_item(reason_name, catalog=None):
+    catalog = catalog if catalog is not None else build_leave_reason_catalog(globals().get('df_loai_nghi', pd.DataFrame()))
+    exact = catalog.get(normalize_leave_reason(reason_name))
+    if exact:
+        return exact
+    wanted = normalize_login_name(reason_name)
+    for item in catalog.values():
+        if normalize_login_name(item.get('name', '')) == wanted:
+            return item
+    return None
+
+def _canonical_system_employee_name(raw_name):
+    """Đối chiếu tên nguồn ngoài với Tên nhân viên hệ thống; bỏ dấu * ở cuối khi so sánh."""
+    cleaned = clean_employee_match_name(raw_name)
+    if not cleaned:
+        return ""
+    creds = globals().get('df_credentials', pd.DataFrame())
+    if isinstance(creds, pd.DataFrame) and not creds.empty and 'Tên nhân viên' in creds.columns:
+        target = normalize_employee_match_name(cleaned)
+        for name in creds['Tên nhân viên'].dropna().astype(str).tolist():
+            if normalize_employee_match_name(name) == target:
+                # Luôn ghi tên chuẩn đang lưu trong hệ thống, không ghi dấu * từ Bảng tour.
+                return str(name).strip()
+        # Có danh sách nhân sự nhưng không khớp -> không tự tạo bản ghi phạt sai tên.
+        return ""
+    # Fallback chỉ dùng khi bảng hồ sơ chưa tải được.
+    return cleaned
+
+def _tour_late_minutes(value):
+    """Đọc cột Vào trễ thành số phút; hỗ trợ số phút, timedelta, time và chuỗi HH:MM[:SS]."""
+    try:
+        if value is None or pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, timedelta):
+        return max(0.0, value.total_seconds() / 60.0)
+    # pandas Timedelta
+    try:
+        if isinstance(value, pd.Timedelta):
+            return max(0.0, value.total_seconds() / 60.0)
+    except Exception:
+        pass
+    # datetime.time hoặc datetime/datetime-like.
+    if hasattr(value, 'hour') and hasattr(value, 'minute') and not isinstance(value, numbers.Number):
+        try:
+            return max(0.0, float(value.hour * 60 + value.minute + getattr(value, 'second', 0) / 60.0))
+        except Exception:
+            pass
+    text = str(value).strip()
+    if not text or text.casefold() in {'nan', 'none', 'nat', '<na>'}:
+        return None
+    # Nếu là số thuần thì Bảng tour đang lưu trực tiếp số phút.
+    try:
+        return max(0.0, float(text.replace(',', '.')))
+    except Exception:
+        pass
+    m = re.fullmatch(r'\s*(\d{1,3}):(\d{1,2})(?::(\d{1,2}))?\s*', text)
+    if m:
+        h, mi, sec = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+        return max(0.0, h * 60 + mi + sec / 60.0)
+    # Chuỗi dạng "5 phút", "10 min"...
+    m = re.search(r'(-?\d+(?:[\.,]\d+)?)', text)
+    if m:
+        try:
+            return max(0.0, float(m.group(1).replace(',', '.')))
+        except Exception:
+            pass
+    return None
+
+def _outside_late_reason_for_minutes(minutes, catalog=None):
+    """Chọn đúng bậc Ra ngoài vào muộn theo số phút và ưu tiên tên đang cấu hình trong LoaiNghi."""
+    try:
+        m = float(minutes)
+    except Exception:
+        return None
+    if m < AUTO_PENALTY_MINUTES:
+        return None
+    if m < 30:
+        candidates = ["Ra ngoài vào muộn dưới 30 phút"]
+    elif m < 60:
+        candidates = ["Ra ngoài vào muộn dưới 60 phút"]
+    elif m < 120:
+        candidates = ["Ra ngoài vào muộn dưới 120 phút"]
+    else:
+        # Nếu danh mục có bậc >=120 thì dùng đúng bậc đó; nếu chưa có, dùng bậc cao nhất hiện tại.
+        candidates = [
+            "Ra ngoài vào muộn từ 120 phút trở lên",
+            "Ra ngoài vào muộn trên 120 phút",
+            "Ra ngoài vào muộn dưới 120 phút",
+        ]
+    for reason in candidates:
+        item = _auto_penalty_catalog_item(reason, catalog)
+        if item:
+            return item.get('name', reason)
+    return None
+
+def _auto_result(source):
+    return {
+        "source": source, "added": 0, "skipped": 0, "errors": 0,
+        "eligible": 0, "messages": [], "paused": False, "unmatched": []
+    }
+
+def auto_update_outside_late_from_tour(df_tour, actor="AUTO UPDATE - BẢNG TOUR"):
+    """
+    Tự ghi vi phạm Ra ngoài vào muộn từ Bảng tour.
+    Chỉ xử lý khi cột `Vào trễ` >= 5 phút. `Cẩm Nhung *` được đối chiếu như `Cẩm Nhung`.
+    """
+    result = _auto_result("Bảng tour")
+    cfg = load_auto_penalty_config()
+    if cfg.get('paused'):
+        result['paused'] = True
+        result['messages'].append('Auto Update đang tạm dừng bởi Admin.')
+        return result
+    if not isinstance(df_tour, pd.DataFrame) or df_tour.empty:
+        return result
+
+    late_col = _find_tour_col(df_tour, "Vào trễ")
+    name_col = _find_tour_col(df_tour, "Tên nhân viên") or _find_tour_col(df_tour, "Tên Nhân Viên")
+    out_col = _find_tour_col(df_tour, "Giờ ra")
+    in_col = _find_tour_col(df_tour, "Giờ vào")
+    if late_col is None or name_col is None:
+        result['errors'] += 1
+        result['messages'].append("Bảng tour chưa có cột 'Vào trễ' hoặc 'Tên nhân viên'.")
+        return result
+
+    catalog = build_leave_reason_catalog(globals().get('df_loai_nghi', pd.DataFrame()))
+    threshold = max(AUTO_PENALTY_MINUTES, int(cfg.get('threshold_minutes', AUTO_PENALTY_MINUTES) or AUTO_PENALTY_MINUTES))
+    today = get_vn_today()
+    main_source = globals().get('df_lich', pd.DataFrame())
+
+    for _, row in df_tour.iterrows():
+        minutes = _tour_late_minutes(row.get(late_col, ""))
+        if minutes is None or float(minutes) < threshold:
+            continue
+        result['eligible'] += 1
+        raw_name = row.get(name_col, "")
+        employee = _canonical_system_employee_name(raw_name)
+        if not employee:
+            result['skipped'] += 1
+            result['unmatched'].append(str(raw_name or '(không có tên)'))
+            continue
+        reason = _outside_late_reason_for_minutes(minutes, catalog)
+        if not reason:
+            result['errors'] += 1
+            result['messages'].append(
+                f"{employee}: chưa tìm thấy loại 'Ra ngoài vào muộn' phù hợp trong sheet LoaiNghi."
+            )
+            continue
+        item = _auto_penalty_catalog_item(reason, catalog) or {}
+        base_penalty = float(item.get('penalty', 0) or 0)
+        days = float(item.get('days', 0) or 0)
+        details = [f"Auto Update Bảng tour · vào muộn {int(round(float(minutes)))} phút"]
+        if out_col is not None and str(row.get(out_col, '')).strip():
+            details.append(f"Giờ ra {str(row.get(out_col)).strip()}")
+        if in_col is not None and str(row.get(in_col, '')).strip():
+            details.append(f"Giờ vào {str(row.get(in_col)).strip()}")
+        ok, msg = save_lich_nghi_to_backup_sheet(
+            today.strftime('%d/%m/%Y'), employee, reason, " · ".join(details),
+            days, 0.0, base_penalty, actor, df_main_source=main_source
+        )
+        if ok:
+            result['added'] += 1
+        elif 'không được đăng ký trùng' in str(msg).lower() or 'đã có loại nghỉ' in str(msg).lower():
+            result['skipped'] += 1
+        else:
+            result['errors'] += 1
+            result['messages'].append(f"{employee}: {msg}")
+    return result
+
+def _timesoft_row_value(row, candidates):
+    for c in candidates:
+        if c in row.index:
+            val = row.get(c)
+            if val is not None and str(val).strip().casefold() not in {"", "nan", "none", "nat"}:
+                return val
+    return ""
+
+def _parse_minutes_late_from_timesoft_row(row):
+    direct = _timesoft_row_value(row, [
+        'TotalMinuteInGoLate', 'TotalMinuteGoLate', 'MinuteInGoLate', 'GoLateMinute', 'LateMinute'
+    ])
+    try:
+        if str(direct).strip() != "":
+            return max(0.0, float(str(direct).replace(',', '.').strip()))
+    except Exception:
+        pass
+
+    # Fallback: tự so giờ check-in với giờ bắt đầu ca nếu TimeSoft không trả cột phút trễ.
+    start = _timesoft_row_value(row, ['StartWorkTime', 'WorkTimeStart', 'ShiftStartTime'])
+    checkin = _timesoft_row_value(row, ['MachineTimeCheckInStr', 'CheckInTimeStr', 'CheckInTime'])
+    if not start or not checkin:
+        return None
+    def _time_minutes(v):
+        text = str(v).strip()
+        m = re.search(r'(\d{1,2}):(\d{2})(?::(\d{2}))?', text)
+        if not m:
+            return None
+        h, mi = int(m.group(1)), int(m.group(2))
+        return h * 60 + mi
+    sm = _time_minutes(start)
+    cm = _time_minutes(checkin)
+    if sm is None or cm is None:
+        return None
+    diff = cm - sm
+    if diff < -12 * 60:
+        diff += 24 * 60
+    return max(0.0, float(diff))
+
+def auto_update_checkin_late_from_timesoft(checkin_df, actor="AUTO UPDATE - TIMESOFT"):
+    """Tự ghi Đi trễ không phép khi check-in muộn hơn ca quy định từ 5 phút trở lên."""
+    result = _auto_result("TimeSoft")
+    cfg = load_auto_penalty_config()
+    if cfg.get('paused'):
+        result['paused'] = True
+        result['messages'].append('Auto Update đang tạm dừng bởi Admin.')
+        return result
+    if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
+        return result
+
+    catalog = build_leave_reason_catalog(globals().get('df_loai_nghi', pd.DataFrame()))
+    reason_item = _auto_penalty_catalog_item('Đi trễ không phép', catalog)
+    if not reason_item:
+        result['errors'] += 1
+        result['messages'].append("Sheet LoaiNghi chưa có 'Đi trễ không phép', nên hệ thống không tự ghi phạt.")
+        return result
+    reason = reason_item.get('name', 'Đi trễ không phép')
+    base_penalty = float(reason_item.get('penalty', 0) or 0)
+    days = float(reason_item.get('days', 0) or 0)
+    threshold = max(AUTO_PENALTY_MINUTES, int(cfg.get('threshold_minutes', AUTO_PENALTY_MINUTES) or AUTO_PENALTY_MINUTES))
+    main_source = globals().get('df_lich', pd.DataFrame())
+
+    for _, row in checkin_df.iterrows():
+        minutes = _parse_minutes_late_from_timesoft_row(row)
+        if minutes is None or float(minutes) < threshold:
+            continue
+        result['eligible'] += 1
+        raw_name = _timesoft_row_value(row, [
+            'employeeInfo.Name', 'EmployeeName', 'employeeName', 'Name', 'FullName'
+        ])
+        employee = _canonical_system_employee_name(raw_name)
+        if not employee:
+            result['skipped'] += 1
+            result['unmatched'].append(str(raw_name or '(không có tên)'))
+            continue
+        raw_date = _timesoft_row_value(row, ['WorkDateStr', 'WorkDate', 'CreateDateStr', 'CreateDate'])
+        parsed_date = _parse_vn_date(raw_date)
+        if not parsed_date:
+            try:
+                parsed_date = pd.to_datetime(raw_date, dayfirst=True, errors='coerce').date()
+            except Exception:
+                parsed_date = None
+        if not parsed_date or pd.isna(parsed_date):
+            result['skipped'] += 1
+            result['messages'].append(f"{employee}: không xác định được ngày chấm công.")
+            continue
+        shift_start = _timesoft_row_value(row, ['StartWorkTime', 'WorkTimeStart', 'ShiftStartTime'])
+        checkin_time = _timesoft_row_value(row, ['MachineTimeCheckInStr', 'CheckInTimeStr', 'CheckInTime'])
+        detail = f"Auto Update TimeSoft · check-in muộn {int(round(float(minutes)))} phút"
+        if shift_start:
+            detail += f" · Ca bắt đầu {shift_start}"
+        if checkin_time:
+            detail += f" · Check-in {checkin_time}"
+        ok, msg = save_lich_nghi_to_backup_sheet(
+            parsed_date.strftime('%d/%m/%Y'), employee, reason, detail,
+            days, 0.0, base_penalty, actor, df_main_source=main_source
+        )
+        if ok:
+            result['added'] += 1
+        elif 'không được đăng ký trùng' in str(msg).lower() or 'đã có loại nghỉ' in str(msg).lower():
+            result['skipped'] += 1
+        else:
+            result['errors'] += 1
+            result['messages'].append(f"{employee}: {msg}")
+    return result
+
+def run_auto_penalty_now(tour_df=None, checkin_df=None, actor="AUTO UPDATE"):
+    """Chạy cả 2 nguồn; dùng cho trang Admin và các lần đồng bộ thủ công."""
+    if tour_df is None:
+        try:
+            tour_df, _ = load_bang_tour_input()
+        except Exception:
+            tour_df = pd.DataFrame()
+    r_tour = auto_update_outside_late_from_tour(tour_df, actor=f"{actor} - BẢNG TOUR")
+    r_ts = auto_update_checkin_late_from_timesoft(checkin_df, actor=f"{actor} - TIMESOFT") if isinstance(checkin_df, pd.DataFrame) else _auto_result("TimeSoft")
+    return {"tour": r_tour, "timesoft": r_ts}
 
 
 def add_source_leave_type_column(df):
@@ -8647,6 +9139,7 @@ PAGE_SLUGS = {
     "✏️ Sửa / Xóa nhân viên": "sua-xoa-nhan-vien",
     "🔒 Khóa đăng nhập": "khoa-dang-nhap",
     "🔐 Khóa quyền đăng ký": "khoa-quyen-dang-ky",
+    "⏸️ Auto Update phạt": "auto-update-phat",
     "🔄 Đồng bộ dữ liệu": "dong-bo-du-lieu",
     "⚙️ Giao diện tùy chỉnh": "cau-hinh-cot",
     "🔐 Phân quyền chức năng": "phan-quyen-chuc-nang",
@@ -8668,6 +9161,7 @@ PAGE_FEATURE_KEYS = {
     "✏️ Sửa / Xóa nhân viên": "employee_edit",
     "🔒 Khóa đăng nhập": "account_lock",
     "🔐 Khóa quyền đăng ký": "registration_lock",
+    "⏸️ Auto Update phạt": "auto_penalty",
     "🔄 Đồng bộ dữ liệu": "sync",
     "⚙️ Giao diện tùy chỉnh": "column_config",
     "🔐 Phân quyền chức năng": "permission_admin",
@@ -8682,8 +9176,8 @@ PAGE_FEATURE_GROUPS = {
 }
 
 def has_page_access(page_name):
-    # Giao diện tùy chỉnh/lưu mặc định chỉ dành cho Admin, không cho phép override xuống vai trò khác.
-    if page_name == "⚙️ Giao diện tùy chỉnh" and st.session_state.get('current_role') != 'admin':
+    # Giao diện tùy chỉnh và điều khiển Auto Update phạt chỉ dành cho Admin.
+    if page_name in {"⚙️ Giao diện tùy chỉnh", "⏸️ Auto Update phạt"} and st.session_state.get('current_role') != 'admin':
         return False
     features = PAGE_FEATURE_GROUPS.get(page_name)
     if features:
@@ -9760,6 +10254,80 @@ elif selected_page == "🔐 Khóa quyền đăng ký" and has_feature_access("re
             system_status["lock_nv"] = True
             st.rerun()
 
+elif selected_page == "⏸️ Auto Update phạt" and st.session_state.current_role == "admin":
+    st.subheader("⏸️ Điều khiển Auto Update phạt")
+    cfg = load_auto_penalty_config()
+    paused = bool(cfg.get('paused'))
+    if paused:
+        st.warning(
+            f"🔴 Auto Update phạt đang TẠM DỪNG. Không tự ghi Đi trễ TimeSoft hoặc Ra ngoài vào muộn từ Bảng tour. "
+            f"Ngưỡng khi hoạt động: từ {AUTO_PENALTY_MINUTES} phút."
+        )
+    else:
+        st.success(
+            f"🟢 Auto Update phạt đang HOẠT ĐỘNG. Chỉ tự ghi khi vi phạm từ {AUTO_PENALTY_MINUTES} phút trở lên."
+        )
+    st.caption(
+        f"Cập nhật gần nhất: {cfg.get('updated_date','')} {cfg.get('updated_time','')} · "
+        f"{cfg.get('updated_by','') or 'Hệ thống'}"
+    )
+    if cfg.get('error'):
+        st.warning(f"Không đọc được cấu hình Auto Update đầy đủ: {cfg.get('error')}")
+
+    c_auto1, c_auto2 = st.columns(2)
+    with c_auto1:
+        if paused:
+            if st.button("▶️ Mở lại Auto Update phạt", use_container_width=True, type="primary", key="resume_auto_penalty_v84"):
+                ok, msg = set_auto_penalty_paused(False, st.session_state.current_user)
+                (st.success if ok else st.error)(msg)
+                if ok:
+                    st.rerun()
+        else:
+            if st.button("⏸️ Tạm dừng Auto Update phạt", use_container_width=True, type="primary", key="pause_auto_penalty_v84"):
+                ok, msg = set_auto_penalty_paused(True, st.session_state.current_user)
+                (st.success if ok else st.error)(msg)
+                if ok:
+                    st.rerun()
+    with c_auto2:
+        run_now = st.button(
+            "▶️ Chạy Auto Update ngay", use_container_width=True,
+            disabled=paused, key="run_auto_penalty_now_v84",
+            help="Đọc Bảng tour hiện tại và dữ liệu TimeSoft gần nhất đang có trong phiên/snapshot."
+        )
+
+    if run_now:
+        load_bang_tour_input.clear()
+        _tour_now, _tour_err = load_bang_tour_input()
+        _checkin_now = None
+        _direct = st.session_state.get('timesoft_direct_result_v81') or {}
+        if isinstance(_direct.get('employee_checkin_df'), pd.DataFrame):
+            _checkin_now = _direct.get('employee_checkin_df')
+        elif vpg is not None and vpg.is_enabled():
+            _snap = _timesoft_read_background_snapshot(get_vn_today())
+            if isinstance(_snap.get('employee_checkin'), pd.DataFrame):
+                _checkin_now = _snap.get('employee_checkin')
+        with st.spinner("Đang kiểm tra Bảng tour và TimeSoft theo ngưỡng 5 phút..."):
+            _auto_res = run_auto_penalty_now(
+                tour_df=_tour_now, checkin_df=_checkin_now, actor=f"AUTO UPDATE - {st.session_state.current_user}"
+            )
+        rt, rs = _auto_res['tour'], _auto_res['timesoft']
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Tour đủ điều kiện", rt.get('eligible',0))
+        m2.metric("Tour đã thêm", rt.get('added',0))
+        m3.metric("TimeSoft đủ điều kiện", rs.get('eligible',0))
+        m4.metric("TimeSoft đã thêm", rs.get('added',0))
+        all_msgs = (rt.get('messages') or []) + (rs.get('messages') or [])
+        if all_msgs:
+            st.caption(" | ".join(all_msgs[:8]))
+
+    st.markdown("#### Quy tắc V84")
+    st.write(
+        "• Ra ngoài vào muộn: chỉ Auto Update khi cột **Vào trễ >= 5 phút**. "
+        "Tên như **Cẩm Nhung *** được đối chiếu như **Cẩm Nhung**.  \n"
+        "• TimeSoft: chỉ Auto Update **Đi trễ không phép** khi check-in muộn hơn giờ bắt đầu ca **>= 5 phút**.  \n"
+        "• Tiền phạt và Số ngày tính lấy trực tiếp từ sheet **LoaiNghi**; dữ liệu phạt ghi vào Sheet1 A:J và không tạo trùng cùng Ngày + Nhân viên + Lý do."
+    )
+
 elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sync"):
     st.subheader("🔄 Đồng bộ dữ liệu")
     st.info("Các công cụ đồng bộ chỉ dành cho tài khoản Admin.")
@@ -9881,6 +10449,22 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
                 )
                 st.session_state["timesoft_direct_result_v81"] = result_direct
                 st.session_state["timesoft_direct_msg_v81"] = (ok_direct, msg_direct)
+                # V84: sau khi lấy chấm công TimeSoft thành công, tự ghi Đi trễ >= 5 phút nếu Admin chưa pause.
+                if ok_direct and isinstance(result_direct.get("employee_checkin_df"), pd.DataFrame):
+                    auto_ts_result = auto_update_checkin_late_from_timesoft(
+                        result_direct.get("employee_checkin_df"), actor="AUTO UPDATE - TIMESOFT"
+                    )
+                    st.session_state["timesoft_auto_penalty_result_v84"] = auto_ts_result
+
+        auto_ts_result = st.session_state.get("timesoft_auto_penalty_result_v84")
+        if auto_ts_result:
+            if auto_ts_result.get('paused'):
+                st.info("⏸️ Auto Update phạt đang tạm dừng nên dữ liệu TimeSoft chỉ được tải, không tự ghi vi phạm.")
+            elif auto_ts_result.get('added', 0) or auto_ts_result.get('errors', 0):
+                st.caption(
+                    f"Auto Update TimeSoft: đủ điều kiện {auto_ts_result.get('eligible',0)} · "
+                    f"đã thêm {auto_ts_result.get('added',0)} · bỏ qua {auto_ts_result.get('skipped',0)} · lỗi {auto_ts_result.get('errors',0)}"
+                )
 
         direct_msg = st.session_state.get("timesoft_direct_msg_v81")
         if direct_msg:
@@ -9993,10 +10577,35 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
         )
 
     with tab_gsheet:
-        if st.button("🔄 Đồng bộ Excel ➡️ Google Sheets", help="Chỉ thêm những dòng mới từ Excel vào Sheet", use_container_width=True):
-            with st.spinner("Đang kiểm tra và đồng bộ..."):
-                res, msg = admin_sync_excel_to_gsheet()
-                (st.success if res else st.error)(msg)
+        st.markdown("### ⬆️ Đồng bộ Excel → Google Sheet1 A:J")
+        st.caption(
+            f"Đích: Google Sheet {SHEET_DU_PHONG_ID} · Sheet1. "
+            "Tên nhân viên khi đối chiếu sẽ bỏ dấu * ở cuối: Cẩm Nhung * = Cẩm Nhung."
+        )
+        v1, v2 = st.columns(2)
+        with v1:
+            st.markdown("#### Phiên bản 1 · Ghi đè")
+            st.warning("Sẽ xóa dữ liệu hiện có trong A2:J rồi paste toàn bộ Excel bắt đầu từ A2. Header hàng 1 được giữ nguyên.")
+            confirm_v1 = st.checkbox("Tôi xác nhận cho phép ghi đè A2:J", key="confirm_excel_overwrite_v84")
+            if st.button(
+                "⚠️ V1 · Ghi đè Excel → Google", use_container_width=True,
+                disabled=not confirm_v1, key="sync_excel_google_overwrite_v84"
+            ):
+                with st.spinner("Đang ghi đè A2:J từ Excel..."):
+                    res, msg = admin_sync_excel_to_gsheet_overwrite()
+                    (st.success if res else st.error)(msg)
+        with v2:
+            st.markdown("#### Phiên bản 2 · Không ghi đè")
+            st.success("Giữ nguyên dữ liệu hiện có. Chỉ thêm dòng chưa tồn tại vào đúng last row và luôn ghi trong cột A:J.")
+            if st.button(
+                "✅ V2 · Thêm mới Excel → Google", use_container_width=True,
+                key="sync_excel_google_append_v84"
+            ):
+                with st.spinner("Đang tìm last row A:J và thêm dữ liệu mới..."):
+                    res, msg = admin_sync_excel_to_gsheet_append()
+                    (st.success if res else st.error)(msg)
+
+        st.markdown("---")
         if st.button("⬇️ Tạo Excel mới từ Google Sheets", help="Gộp dữ liệu mới từ Sheet vào file Excel gốc", use_container_width=True):
             with st.spinner("Đang tạo file..."):
                 df_merged, has_new = admin_sync_gsheet_to_excel(df_backup, df_lich)
@@ -11478,6 +12087,15 @@ elif selected_page == "🧭 Bảng tour":
     elif df_tour.empty:
         st.info("Không có dữ liệu trong sheet Input.")
     else:
+        # V84: mỗi lần Bảng tour được tải/làm mới, tự kiểm tra cột Vào trễ và ghi vi phạm từ 5 phút trở lên.
+        # Hàm tự chống trùng và tự dừng ngay khi Admin bật PAUSED.
+        _tour_auto_result = auto_update_outside_late_from_tour(df_tour, actor="AUTO UPDATE - BẢNG TOUR")
+        if st.session_state.current_role == "admin" and (_tour_auto_result.get('added', 0) or _tour_auto_result.get('errors', 0)):
+            st.caption(
+                f"Auto Update Bảng tour: đủ điều kiện {_tour_auto_result.get('eligible',0)} · "
+                f"đã thêm {_tour_auto_result.get('added',0)} · bỏ qua {_tour_auto_result.get('skipped',0)} · lỗi {_tour_auto_result.get('errors',0)}"
+            )
+
         # Chỉ Admin/Lễ tân/Quản lý được xem Thống kê Bảng tour.
         if str(st.session_state.current_role).strip().lower() in {"admin", "letan", "quanly"}:
             # Bảng thống kê dùng dữ liệu GỐC vừa đọc, trước khi làm trống thời gian <= -15.

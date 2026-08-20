@@ -1,4 +1,4 @@
-# V88.3 - Sửa quota ngày: T2-T6 5 Có phép + 2 Phát sinh; T7-CN 3 Có phép + 0 Phát sinh (2026-08-20)
+# V88.4 - Clear form nghỉ + Tổng nghỉ theo NV + Save button nổi bật + quyền sửa QL/LT + bỏ Div hover (2026-08-20)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1958,6 +1958,8 @@ FEATURE_DEFINITIONS = {
     "payroll_email": "📧 Gửi email bảng lương",
     "leave": "📅 Đăng ký nghỉ phép",
     "leave_manage": "✏️ Quản lý lịch nghỉ",
+    "leave_detail_edit": "✏️ Sửa trực tiếp Chi tiết danh sách · Đăng ký lịch nghỉ",
+    "leave_manage_edit": "✏️ Sửa trực tiếp Chi tiết danh sách · Quản lý lịch nghỉ",
     "shift": "⏰ Thiết lập ca làm việc",
     "staff_list": "👥 Danh sách nhân sự",
     "employee_add": "➕ Thêm nhân viên",
@@ -1975,8 +1977,8 @@ FEATURE_DEFINITIONS = {
 }
 DEFAULT_ROLE_FEATURES = {
     "admin": set(FEATURE_DEFINITIONS),
-    "quanly": {"tour", "leave", "leave_manage", "shift", "staff_list", "employee_add", "employee_edit", "employment_status", "employee_delete", "profile", "birthday"},
-    "letan": {"tour", "leave", "leave_manage", "shift", "staff_list", "employee_add", "employee_edit", "employment_status", "employee_delete", "profile", "birthday"},
+    "quanly": {"tour", "leave", "leave_manage", "leave_detail_edit", "leave_manage_edit", "shift", "staff_list", "employee_add", "employee_edit", "employment_status", "employee_delete", "profile", "birthday"},
+    "letan": {"tour", "leave", "leave_manage", "leave_detail_edit", "leave_manage_edit", "shift", "staff_list", "employee_add", "employee_edit", "employment_status", "employee_delete", "profile", "birthday"},
     "leader": {"tour", "leave", "leave_manage", "profile", "birthday"},
     "nhanvien": {"tour", "leave", "leave_manage", "profile", "birthday"},
     "locker": {"tour", "profile", "birthday"},
@@ -7099,7 +7101,8 @@ def _global_theme_rules_for_device(cfg, device):
     rules.append(f"{selectors['modal_dialog']}{{{style(item)}}}")
 
     # Hover states cho các element tương tác chính.
-    for key in ["button", "select", "tabs", "sidebar_menu", "card_box", "input"]:
+    # V88.4: không hover đổi màu Card/Box/Div cha; chỉ element tương tác trực tiếp.
+    for key in ["button", "select", "tabs", "sidebar_menu", "input"]:
         item = c[key]
         sel = selectors[key]
         hover.append(
@@ -12578,6 +12581,54 @@ table tbody tr:hover td {{
 </style>
 """, unsafe_allow_html=True)
 
+# V88.4 - Đánh dấu các nút Lưu/Save/Ghi bằng JS để có background riêng,
+# vì CSS thuần không chọn button theo nội dung text.
+st.markdown("""
+<style id="vera-save-action-style-v884">
+button.vera-save-action-v884 {
+    background:#DCEBFF !important;
+    color:#173A63 !important;
+    border:1px solid #8CB4E8 !important;
+    font-weight:700 !important;
+    box-shadow:0 1px 2px rgba(0,0,0,.06) !important;
+}
+button.vera-save-action-v884:hover {
+    background:#C7DEFF !important;
+    color:#102E50 !important;
+    border-color:#6C9FD8 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+components.html(r"""
+<script>
+(function(){
+  try {
+    const W = window.parent;
+    const D = W.document;
+    const rx = /(^|\s)(lưu|save|ghi đè|xác nhận ghi)(\s|$)/i;
+
+    function markSaveButtons(){
+      D.querySelectorAll('button').forEach(function(btn){
+        const txt = String(btn.innerText || btn.textContent || '').replace(/\s+/g,' ').trim();
+        if (rx.test(txt)) btn.classList.add('vera-save-action-v884');
+        else btn.classList.remove('vera-save-action-v884');
+      });
+    }
+
+    markSaveButtons();
+    if (!W.__veraSaveButtonObserverV884) {
+      const ob = new MutationObserver(function(){ setTimeout(markSaveButtons, 20); });
+      ob.observe(D.body, {childList:true, subtree:true, characterData:true});
+      W.__veraSaveButtonObserverV884 = ob;
+    }
+    setTimeout(markSaveButtons, 100);
+    setTimeout(markSaveButtons, 400);
+  } catch(e) {}
+})();
+</script>
+""", height=0, width=0)
+
 if df_lich.empty or df_nv_excel.empty:
     st.warning("Hệ thống chưa tìm thấy dữ liệu.")
     st.stop()
@@ -13853,12 +13904,18 @@ elif selected_page == "🔐 Phân quyền chức năng" and st.session_state.cur
 
     with st.expander("👥 Quyền mặc định theo loại tài khoản", expanded=True):
         role_choice = st.selectbox("Chọn vai trò", [r for r in ALL_ACCOUNT_ROLES if r != 'admin'], key="perm_role_choice")
+        _leave_edit_permission_keys = {"leave_detail_edit", "leave_manage_edit"}
+        _role_visible_feature_keys = [
+            k for k in feature_keys
+            if k not in _leave_edit_permission_keys or role_choice in {"quanly", "letan"}
+        ]
+        _role_visible_feature_labels = [FEATURE_DEFINITIONS[k] for k in _role_visible_feature_keys]
         current_role_allowed = [
-            FEATURE_DEFINITIONS[k] for k in feature_keys
+            FEATURE_DEFINITIONS[k] for k in _role_visible_feature_keys
             if has_feature_access(k, role=role_choice, username='')
         ]
         role_allowed_labels = st.multiselect(
-            "Các chức năng được phép", feature_labels, default=current_role_allowed,
+            "Các chức năng được phép", _role_visible_feature_labels, default=current_role_allowed,
             filter_mode="contains", key=f"perm_role_features_{role_choice}"
         )
         if st.button("💾 Lưu quyền cho vai trò", use_container_width=True, key=f"save_role_perm_{role_choice}"):
@@ -13876,13 +13933,24 @@ elif selected_page == "🔐 Phân quyền chức năng" and st.session_state.cur
             account_role = str(account_row.get('Phân quyền', 'nhanvien')).strip().lower() if account_row is not None else 'nhanvien'
             _role_cfg, _account_cfg = load_feature_permissions()
             has_account_override = any(k[0] == normalize_login_name(account_choice) for k in _account_cfg)
+            _account_visible_feature_keys = [
+                k for k in feature_keys
+                if k not in {"leave_detail_edit", "leave_manage_edit"} or account_role in {"quanly", "letan"}
+            ]
+            _account_visible_feature_labels = [FEATURE_DEFINITIONS[k] for k in _account_visible_feature_keys]
             if has_account_override:
-                current_account_allowed = [FEATURE_DEFINITIONS[k] for k in feature_keys if _account_cfg.get((normalize_login_name(account_choice), k), False)]
+                current_account_allowed = [
+                    FEATURE_DEFINITIONS[k] for k in _account_visible_feature_keys
+                    if _account_cfg.get((normalize_login_name(account_choice), k), False)
+                ]
             else:
-                current_account_allowed = [FEATURE_DEFINITIONS[k] for k in feature_keys if has_feature_access(k, role=account_role, username='')]
+                current_account_allowed = [
+                    FEATURE_DEFINITIONS[k] for k in _account_visible_feature_keys
+                    if has_feature_access(k, role=account_role, username='')
+                ]
             st.caption(f"Vai trò hiện tại: {account_role} · {'đang dùng quyền riêng' if has_account_override else 'đang kế thừa quyền theo vai trò'}")
             account_allowed_labels = st.multiselect(
-                "Các chức năng cho tài khoản này", feature_labels, default=current_account_allowed,
+                "Các chức năng cho tài khoản này", _account_visible_feature_labels, default=current_account_allowed,
                 filter_mode="contains", key=f"perm_account_features_{normalize_login_name(account_choice)}"
             )
             cpa, cpb = st.columns(2)
@@ -16195,12 +16263,33 @@ elif selected_page == "🧭 Bảng tour":
 
 elif selected_page == "📅 Đăng ký nghỉ phép":
     is_admin_leave_registration = str(st.session_state.get("current_role", "")).strip().lower() == "admin"
+
+    # V88.4: reset toàn bộ widget đăng ký về mặc định ở lượt chạy SAU khi lưu thành công.
+    _leave_reset_pending = bool(st.session_state.pop("_leave_registration_reset_pending_v884", False))
+    if _leave_reset_pending:
+        for _reset_key in [
+            "sb_chosen_date", "sb_chosen_nv", "sb_loai_nghi_live",
+            "leave_reg_detail_input_v884",
+        ]:
+            st.session_state.pop(_reset_key, None)
+        for _reset_key in list(st.session_state.keys()):
+            if str(_reset_key).startswith("num_songay_") or str(_reset_key).startswith("num_phat_"):
+                st.session_state.pop(_reset_key, None)
+
+    _leave_reopen_after_save = bool(st.session_state.pop("_leave_registration_reopen_after_save_v884", False))
     if is_admin_leave_registration:
-        leave_registration_area = st.expander("➕ Đăng ký lịch nghỉ", expanded=False)
+        leave_registration_area = st.expander("➕ Đăng ký lịch nghỉ", expanded=_leave_reopen_after_save)
     else:
         leave_registration_area = st.container()
 
     with leave_registration_area:
+        _leave_flash = st.session_state.pop("_leave_registration_flash_v884", "")
+        _leave_flash_notes = st.session_state.pop("_leave_registration_flash_notes_v884", [])
+        if _leave_flash:
+            st.success(_leave_flash)
+            for _note in (_leave_flash_notes if isinstance(_leave_flash_notes, list) else []):
+                if _note:
+                    st.info(str(_note))
         if not is_admin_leave_registration:
             st.subheader("➕ Đăng ký lịch nghỉ")
         all_users = get_leave_eligible_employee_names(df_credentials, df_nv_excel)
@@ -16392,7 +16481,10 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
 
             with st.form("form_nhap_lich_inner"):
                 txt_chitiet_label = "Chi tiết vi phạm / Ghi chú (🔴 **Bắt buộc**):" if (is_loi_vi_pham or is_nghi_ly_do_khac) else "Chi tiết vi phạm / Ghi chú (nếu có):"
-                input_chitiet = st.text_input(txt_chitiet_label).strip()
+                input_chitiet = st.text_input(
+                    txt_chitiet_label,
+                    key="leave_reg_detail_input_v884"
+                ).strip()
 
                 col_p1, col_p2 = st.columns(2)
                 with col_p1:
@@ -16433,21 +16525,18 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                         disabled=is_progressive_penalty_reason(chosen_loai)
                     )
 
+                # V88.4: không hiện cảnh báo khi nhân viên đã có một lịch KHÁC loại trong cùng ngày.
+                # Chỉ tiếp tục chặn đúng Lý do nghỉ bị trùng đối với non-admin.
                 confirm_multiple = True
-                if existing_today:
+                if existing_today and not is_admin_leave_registration:
                     normalized_existing = {normalize_leave_reason(x) for x in existing_today}
-                    if is_admin_leave_registration:
-                        st.info(
-                            f"🛡️ Admin toàn quyền: {chosen_nv} đã có lịch trong ngày "
-                            f"{start_date.strftime('%d/%m/%Y')}: {', '.join(existing_today)}. "
-                            "Admin vẫn được phép ghi thêm."
+                    if normalize_leave_reason(chosen_loai) in normalized_existing:
+                        st.error(
+                            f"❌ Nhân viên này đã có Lý do nghỉ: "
+                            f"'{clean_leave_reason_display(chosen_loai)}' vào ngày này rồi. "
+                            "KHÔNG THỂ trùng cùng 1 loại nghỉ!"
                         )
-                    elif normalize_leave_reason(chosen_loai) in normalized_existing:
-                        st.error(f"❌ Nhân viên này đã có Lý do nghỉ: '{clean_leave_reason_display(chosen_loai)}' vào ngày này rồi. KHÔNG THỂ trùng cùng 1 loại nghỉ!")
                         confirm_multiple = False
-                    else:
-                        st.warning(f"⚠️ CẢNH BÁO: Nhân viên '{chosen_nv}' đã có các lịch sau trong ngày {start_date.strftime('%d/%m/%Y')}: {', '.join(existing_today)}")
-                        confirm_multiple = st.checkbox("Tôi xác nhận đăng ký này là ĐÚNG và MỚI.")
 
                 submit_lich = st.form_submit_button("💾 Xác Nhận Ghi Lịch Nghỉ")
 
@@ -16654,11 +16743,19 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
 
                                     # CHỈ IN THÀNH CÔNG NẾU API THỰC SỰ TRẢ VỀ SUCCESS
                                     if all_saved:
-                                        st.success(f"✅ Đã ghi nhận lịch nghỉ thành công cho {num_days_selected} ngày!")
-                                        for note in save_success_notes:
-                                            if "Người Thứ" in note:
-                                                st.info(note)
+                                        _flash_notes = [
+                                            str(note) for note in save_success_notes
+                                            if note and "Người Thứ" in str(note)
+                                        ]
+                                        st.session_state["_leave_registration_flash_v884"] = (
+                                            f"✅ Đã ghi nhận lịch nghỉ thành công cho {num_days_selected} ngày!"
+                                        )
+                                        st.session_state["_leave_registration_flash_notes_v884"] = _flash_notes
+                                        st.session_state["_leave_registration_reset_pending_v884"] = True
+                                        if is_admin_leave_registration:
+                                            st.session_state["_leave_registration_reopen_after_save_v884"] = True
                                         _clear_dynamic_data_caches()
+                                        rerun_current_view()
 
     # V86.20: bỏ divider ở đây để tiết kiệm chiều cao hiển thị trên điện thoại.
     # Bộ lọc được đặt sát ngay dưới khối Đăng ký lịch nghỉ.
@@ -16926,6 +17023,12 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             .vera-daily-summary-total{
                 font-weight:700;
             }
+            .vera-daily-summary-grand-total td{
+                font-weight:700;
+                background:#f3f5f7 !important;
+                border-top:1px solid #d8dde3;
+                border-bottom:1px solid #d8dde3;
+            }
             @media (max-width: 768px){
                 /* V86.23: tối ưu riêng bảng 6 cột trên mobile để nhìn đủ thông tin. */
                 .vera-daily-summary-wrap{
@@ -17109,6 +17212,31 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
 
         _daily_summary_html = ["<div class='vera-daily-summary-wrap'><table class='vera-daily-summary-table'>"]
         _daily_summary_html.append("<thead><tr>" + "".join(f"<th>{_title}</th>" for _title in _titles) + "</tr></thead><tbody>")
+
+        # V88.4: khi bộ lọc đang chọn đúng 1 nhân viên, thêm một dòng tổng ngay dưới Header.
+        if selected_nv != "- Tất cả nhân viên -" and not daily_stats_df.empty:
+            _sum_total = int(pd.to_numeric(daily_stats_df.get("Tổng nghỉ", 0), errors="coerce").fillna(0).sum())
+            _sum_cp = int(pd.to_numeric(daily_stats_df.get("✅ CÓ phép", 0), errors="coerce").fillna(0).sum())
+            _sum_ps = int(pd.to_numeric(daily_stats_df.get("⚠️ PHÁT SINH", 0), errors="coerce").fillna(0).sum())
+            _sum_kp = int(pd.to_numeric(daily_stats_df.get("❌ KHÔNG phép", 0), errors="coerce").fillna(0).sum())
+
+            _sum_row = [
+                "<td><strong>Tổng nghỉ</strong></td>",
+                "<td></td>",
+                f"<td><strong>{_sum_total}</strong></td>",
+                f"<td><span class='vera-daily-summary-pill'>{_sum_cp}</span></td>",
+                f"<td><span class='vera-daily-summary-pill'>{_sum_ps}</span></td>",
+                f"<td><span class='vera-daily-summary-pill'>{_sum_kp}</span></td>",
+            ]
+            if st.session_state.current_role == "admin":
+                _sum_penalty = pd.to_numeric(
+                    daily_filtered_df.get("Phạt vi phạm", pd.Series(dtype=float)),
+                    errors="coerce"
+                ).fillna(0).sum()
+                _sum_row.append(f"<td><strong>{_sum_penalty:,.0f} đ</strong></td>".replace(",", "."))
+            _daily_summary_html.append(
+                "<tr class='vera-daily-summary-grand-total'>" + "".join(_sum_row) + "</tr>"
+            )
 
         _detail_daily_rows = []
 
@@ -17299,8 +17427,14 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
     with tab1:
         if export_df.empty:
             st.info("Trống.")
-        elif st.session_state.current_role in ["admin", "letan", "quanly"]:
-            # Admin/Lễ tân/Quản lý: checkbox chọn 1 hoặc nhiều dòng và sửa trực tiếp tại bảng.
+        elif (
+            st.session_state.current_role == "admin"
+            or (
+                st.session_state.current_role in {"letan", "quanly"}
+                and has_feature_access("leave_detail_edit")
+            )
+        ):
+            # Admin luôn sửa được. Lễ tân/Quản lý phụ thuộc quyền leave_detail_edit.
             raw_detail_full = filtered_df.copy().reset_index(drop=True)
             raw_detail = raw_detail_full.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore').copy()
             raw_detail = add_source_leave_type_column(raw_detail)
@@ -17472,7 +17606,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                             _clear_dynamic_data_caches()
                             rerun_current_view()
         else:
-            # Nhân viên: chỉ xem, không có checkbox sửa/xóa và không có Export Excel.
+            # Chỉ xem: Nhân viên/Leader hoặc Lễ tân/Quản lý đã bị tắt quyền sửa trực tiếp.
             export_view_df, _ = apply_table_layout_df(export_df.copy(), "leave_detail")
             st.dataframe(
                 export_view_df,
@@ -17656,10 +17790,26 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
         manage_derived = [c for c in ['Thứ ngày','Loại nghỉ','Số ngày tính','Số ngày phép cộng dồn','Phạt vi phạm','Ngày cập nhật','Giờ cập nhật','Người cập nhật'] if c in manage_visible.columns]
         if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and 'Tên nhân viên' in manage_visible.columns:
             manage_derived.append('Tên nhân viên')
-        manage_locked = st.session_state.current_role in EMPLOYEE_LIKE_ROLES and system_status['lock_nv']
-        if manage_locked:
+
+        _manage_role_permission_locked = (
+            st.session_state.current_role in {"letan", "quanly"}
+            and not has_feature_access("leave_manage_edit")
+        )
+        _manage_employee_system_locked = (
+            st.session_state.current_role in EMPLOYEE_LIKE_ROLES
+            and system_status['lock_nv']
+        )
+        manage_locked = _manage_role_permission_locked or _manage_employee_system_locked
+
+        if _manage_role_permission_locked:
+            st.info(
+                "🔒 Tài khoản hiện chỉ có quyền XEM bảng Chi tiết danh sách tại Quản lý lịch nghỉ. "
+                "Admin có thể mở quyền sửa tại Phân quyền chức năng."
+            )
+            manage_derived = list(manage_visible.columns)
+        elif _manage_employee_system_locked:
             st.error("🔒 Admin đang khóa quyền thay đổi lịch nghỉ của nhân viên. Bảng chỉ được xem cho đến khi mở khóa.")
-            manage_derived = [c for c in manage_visible.columns if c != 'Chọn']
+            manage_derived = list(manage_visible.columns)
 
         with st.form('leave_manage_batch_edit_form_v70', clear_on_submit=False):
             manage_editor = st.data_editor(
@@ -17693,7 +17843,9 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
         manage_selected = manage_editor.index[manage_editor.get('Chọn', False) == True].tolist() if 'Chọn' in manage_editor.columns else []
 
         if manage_submit_save:
-            if not manage_changed:
+            if _manage_role_permission_locked:
+                st.error("❌ Tài khoản này chưa được cấp quyền sửa trực tiếp bảng Quản lý lịch nghỉ.")
+            elif not manage_changed:
                 st.info('Không có thay đổi nào cần lưu.')
             else:
                 all_ok = True
@@ -17723,7 +17875,9 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
                     rerun_current_view()
 
         if manage_submit_delete:
-            if not manage_selected:
+            if _manage_role_permission_locked:
+                st.error("❌ Tài khoản này chưa được cấp quyền sửa trực tiếp bảng Quản lý lịch nghỉ.")
+            elif not manage_selected:
                 st.warning('Vui lòng tick ít nhất 1 dòng cần xóa.')
             else:
                 originals = [manage_raw_full.iloc[pos].copy() for pos in manage_selected if pos < len(manage_raw_full)]

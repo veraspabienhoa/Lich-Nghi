@@ -1,4 +1,4 @@
-# V92.6.8 - Fix bảng Phân ca hiển thị đầy đủ ca hiện đang gán cho từng nhân viên (2026-08-21)
+# V92.6.9 - Cho phép đổi ID ca + sửa xóa ca hiện tại ổn định (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -4185,6 +4185,7 @@ def save_shift_definition(
     department="Nhân viên + Leader",
     break_enabled=False,
     break_duration_minutes=60,
+    new_shift_id=None,
 ):
     name = str(name or "").strip()
     department = str(department or "").strip()
@@ -4198,6 +4199,37 @@ def save_shift_definition(
             return False, "Không mở được sheet cấu hình ca."
         defs = load_shift_definitions()
         shift_id = str(shift_id or "").strip()
+        requested_shift_id = str(
+            new_shift_id if new_shift_id is not None else shift_id
+        ).strip()
+
+        # Tạo mới mà chưa nhập ID -> hệ thống tự sinh.
+        if not shift_id and not requested_shift_id:
+            requested_shift_id = (
+                "SHIFT-" + datetime.now(VN_TZ).strftime("%Y%m%d%H%M%S%f")
+            )
+
+        # ID chỉ cho phép chữ, số, "-", "_", "." để tránh lỗi khi dùng làm key.
+        if not requested_shift_id:
+            return False, "ID ca không được để trống."
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", requested_shift_id):
+            return False, (
+                "ID ca chỉ được dùng chữ, số và các ký tự . _ - "
+                "(không dùng khoảng trắng/ký tự đặc biệt)."
+            )
+
+        # Không cho đổi/tạo thành ID đã tồn tại ở một ca khác, kể cả ca đã xóa.
+        if isinstance(defs, pd.DataFrame) and not defs.empty:
+            _id_hit = defs[
+                defs["ID"].astype(str).str.strip().eq(requested_shift_id)
+            ].copy()
+            if shift_id:
+                _id_hit = _id_hit[
+                    ~_id_hit["ID"].astype(str).str.strip().eq(shift_id)
+                ]
+            if not _id_hit.empty:
+                return False, f"ID ca '{requested_shift_id}' đã tồn tại."
+
         row_idx = None
         old_label = ""
         old_department = department
@@ -4216,9 +4248,6 @@ def save_shift_definition(
                 ):
                     old_label += " (Không đổi)"
 
-        if not shift_id:
-            shift_id = "SHIFT-" + datetime.now(VN_TZ).strftime("%Y%m%d%H%M%S%f")
-
         try:
             break_duration_minutes = max(
                 1, min(600, int(float(break_duration_minutes)))
@@ -4227,7 +4256,7 @@ def save_shift_definition(
             break_duration_minutes = 60
 
         row = [
-            shift_id, name, str(start_time or "").strip(), str(end_time or "").strip(),
+            requested_shift_id, name, str(start_time or "").strip(), str(end_time or "").strip(),
             str(note or "").strip(), str(int(order or 999)), "Đang dùng", department,
             "1" if bool(break_enabled) else "0",
             str(int(break_duration_minutes)),
@@ -4250,14 +4279,25 @@ def save_shift_definition(
             new_label += " (Không đổi)"
 
         # Chỉ đổi phân ca nhân viên nếu vẫn cùng bộ phận.
+        _id_change_note = ""
+        if shift_id and shift_id != requested_shift_id:
+            _id_change_note = f" Đã đổi ID {shift_id} → {requested_shift_id}."
+
         if old_label and old_label != new_label and old_department == department:
             ok_replace, msg_replace = _replace_shift_assignment(old_label, new_label)
             _clear_dynamic_data_caches()
-            return ok_replace, ("Đã sửa ca. " + msg_replace).strip()
+            if ok_replace:
+                return True, ("Đã sửa ca." + _id_change_note + " " + msg_replace).strip()
+            # Cấu hình ca đã lưu thành công; lỗi cập nhật phân ca chỉ là cảnh báo.
+            return True, (
+                "Đã sửa ca." + _id_change_note
+                + " ⚠️ Cấu hình đã lưu nhưng chưa cập nhật được một số phân ca: "
+                + str(msg_replace)
+            ).strip()
 
         _clear_dynamic_data_caches()
         return True, (
-            f"Đã lưu ca cho bộ phận {department} · "
+            f"Đã lưu ca cho bộ phận {department}." + _id_change_note + " · "
             + (
                 f"Nghỉ giữa ca {int(break_duration_minutes)} phút."
                 if break_enabled else "Không áp dụng nghỉ giữa ca."
@@ -4298,8 +4338,19 @@ def delete_shift_definition(shift_id, username):
             pass
         ok_replace, msg_replace = _replace_shift_assignment(old_label, "")
         _clear_dynamic_data_caches()
-        return ok_replace, (
-            f"Đã xóa ca của bộ phận {rr.get('Bộ phận','')}. " + msg_replace
+
+        # V92.6.9:
+        # Ca đã được đánh dấu "Đã xóa" ở trên, vì vậy thao tác xóa cấu hình
+        # phải được xem là thành công. Nếu gỡ ca khỏi nhân viên lỗi, chỉ báo cảnh báo.
+        if ok_replace:
+            return True, (
+                f"Đã xóa ca ID {rr.get('ID','')} của bộ phận "
+                f"{rr.get('Bộ phận','')}. {msg_replace}"
+            ).strip()
+        return True, (
+            f"Đã xóa ca ID {rr.get('ID','')} của bộ phận {rr.get('Bộ phận','')}. "
+            f"⚠️ Ca đã xóa khỏi danh mục nhưng chưa gỡ được khỏi một số hồ sơ nhân viên: "
+            f"{msg_replace}"
         ).strip()
     except Exception as e:
         return False, f"Lỗi xóa ca: {e}"
@@ -18793,7 +18844,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                         column_config={
                             "Chọn": st.column_config.CheckboxColumn(
                                 "Chọn",
-                                help="Tick ca cần Sửa hoặc Xóa.",
+                                help="Tick ca cần Sửa hoặc Xóa. Muốn đổi ID, tick 1 ca rồi chọn Sửa.",
                                 width="small",
                             ),
                             "ID": st.column_config.TextColumn(
@@ -18936,8 +18987,23 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                             else "#### ✏️ Sửa ca đã check"
                         )
 
-                        c1, c2, c3 = st.columns([1.5, 1, 1])
-                        with c1:
+                        _id_col, _name_col = st.columns([1, 2])
+                        with _id_col:
+                            _edit_shift_id = st.text_input(
+                                "ID ca",
+                                value=(
+                                    ""
+                                    if _is_new
+                                    else str(_selected.get("ID", "")).strip()
+                                ),
+                                key=f"shift_id_edit_{_safe_dep}_{_selected_id_key}_v9269",
+                                placeholder="VD: SHIFT001",
+                                help=(
+                                    "Có thể đổi ID của ca hiện tại. ID phải duy nhất; "
+                                    "chỉ dùng chữ, số, dấu chấm, gạch dưới hoặc gạch ngang."
+                                ),
+                            )
+                        with _name_col:
                             _name = st.text_input(
                                 "Tên ca",
                                 value=(
@@ -18945,10 +19011,12 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                                     if _is_new
                                     else str(_selected.get("Tên ca", ""))
                                 ),
-                                key=f"shift_name_{_safe_dep}_{_selected_id_key}_v9265",
+                                key=f"shift_name_{_safe_dep}_{_selected_id_key}_v9269",
                                 placeholder="VD: Ca 1",
                             )
-                        with c2:
+
+                        c1, c2 = st.columns(2)
+                        with c1:
                             _start = st.text_input(
                                 "Giờ bắt đầu",
                                 value=(
@@ -18956,10 +19024,10 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                                     if _is_new
                                     else str(_selected.get("Giờ bắt đầu", ""))
                                 ),
-                                key=f"shift_start_{_safe_dep}_{_selected_id_key}_v9265",
+                                key=f"shift_start_{_safe_dep}_{_selected_id_key}_v9269",
                                 placeholder="10:00",
                             )
-                        with c3:
+                        with c2:
                             _end = st.text_input(
                                 "Giờ kết thúc",
                                 value=(
@@ -18967,7 +19035,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                                     if _is_new
                                     else str(_selected.get("Giờ kết thúc", ""))
                                 ),
-                                key=f"shift_end_{_safe_dep}_{_selected_id_key}_v9265",
+                                key=f"shift_end_{_safe_dep}_{_selected_id_key}_v9269",
                                 placeholder="23:00",
                             )
 
@@ -18980,7 +19048,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                                     if _is_new
                                     else str(_selected.get("Ghi chú", ""))
                                 ),
-                                key=f"shift_note_{_safe_dep}_{_selected_id_key}_v9265",
+                                key=f"shift_note_{_safe_dep}_{_selected_id_key}_v9269",
                             )
                         with d2:
                             _default_order = (
@@ -18994,7 +19062,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                                 max_value=999,
                                 value=max(1, int(_default_order)),
                                 step=1,
-                                key=f"shift_order_{_safe_dep}_{_selected_id_key}_v9265",
+                                key=f"shift_order_{_safe_dep}_{_selected_id_key}_v9269",
                             )
 
                         # Nghỉ giữa ca riêng cho từng ca.
@@ -19035,7 +19103,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                             _break_enabled = st.toggle(
                                 "Áp dụng nghỉ giữa ca",
                                 value=_default_break_enabled,
-                                key=f"shift_break_enabled_{_safe_dep}_{_selected_id_key}_v9265",
+                                key=f"shift_break_enabled_{_safe_dep}_{_selected_id_key}_v9269",
                                 help=(
                                     "Bật: check-in lần 2 = bắt đầu nghỉ, "
                                     "check-in lần 3 = kết thúc nghỉ."
@@ -19049,7 +19117,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                                 value=int(_default_break_duration),
                                 step=5,
                                 disabled=not _break_enabled,
-                                key=f"shift_break_duration_{_safe_dep}_{_selected_id_key}_v9265",
+                                key=f"shift_break_duration_{_safe_dep}_{_selected_id_key}_v9269",
                                 help=(
                                     "Duration được tính từ check-in lần 2 "
                                     "đến lần 3 trên TimeSoft."
@@ -19072,7 +19140,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                             if _is_new
                             else "💾 Lưu thay đổi ca đã check",
                             use_container_width=True,
-                            key=f"save_shift_{_safe_dep}_{_selected_id_key}_v9265",
+                            key=f"save_shift_{_safe_dep}_{_selected_id_key}_v9269",
                         ):
                             ok, msg = save_shift_definition(
                                 ""
@@ -19087,6 +19155,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                                 department=dep,
                                 break_enabled=_break_enabled,
                                 break_duration_minutes=_break_duration,
+                                new_shift_id=_edit_shift_id,
                             )
                             (st.success if ok else st.error)(msg)
                             if ok:

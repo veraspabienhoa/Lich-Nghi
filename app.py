@@ -1,4 +1,4 @@
-# V90.9 - Fix CSS Login bị render thành chữ trên mobile (2026-08-20)
+# V91.0 - Fix triệt để CSS Login: inject vào parent document, không render Markdown (2026-08-20)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -13813,120 +13813,156 @@ if (
 if not st.session_state.logged_in:
     # V90.7: LOGIN là màn hình độc lập, không để CSS/JS nghiệp vụ trước đó làm cắt hoặc
     # giữ lại nút của trang Đăng ký lịch nghỉ trên mobile.
-    st.markdown("""<div id="vera-login-page-v909"></div>
-<style id="vera-login-mobile-v909">
+    # V91.0: chỉ render marker nhỏ; KHÔNG render CSS bằng Markdown.
+    st.markdown(
+        "<span id='vera-login-page-v910' style='display:none!important'></span>",
+        unsafe_allow_html=True,
+    )
+
+    components.html(r"""
+    <script>
+    (function(){
+      try {
+        const W = window.parent;
+        const D = W.document;
+        const STYLE_ID = 'vera-login-mobile-v910';
+
+        let style = D.getElementById(STYLE_ID);
+        if (!style) {
+          style = D.createElement('style');
+          style.id = STYLE_ID;
+          D.head.appendChild(style);
+        }
+
+        style.textContent = `
 [data-testid="stSidebar"]{
-display:none!important;
+  display:none!important;
 }
-
 .block-container{
-max-width:760px!important;
-margin-left:auto!important;
-margin-right:auto!important;
-padding-top:72px!important;
-padding-bottom:40px!important;
-padding-left:18px!important;
-padding-right:18px!important;
-overflow:visible!important;
+  max-width:760px!important;
+  margin-left:auto!important;
+  margin-right:auto!important;
+  padding-top:72px!important;
+  padding-bottom:40px!important;
+  padding-left:18px!important;
+  padding-right:18px!important;
+  overflow:visible!important;
 }
-
 [data-testid="stMarkdownContainer"] h1,
 .block-container h1{
-display:block!important;
-width:100%!important;
-max-width:100%!important;
-min-width:0!important;
-height:auto!important;
-min-height:0!important;
-max-height:none!important;
-margin:0 0 18px 0!important;
-padding:0!important;
-overflow:visible!important;
-white-space:normal!important;
-text-overflow:clip!important;
-font-size:34px!important;
-line-height:1.20!important;
-font-weight:700!important;
-text-align:left!important;
-border:0!important;
-box-shadow:none!important;
-background:transparent!important;
+  display:block!important;
+  width:100%!important;
+  max-width:100%!important;
+  min-width:0!important;
+  height:auto!important;
+  min-height:0!important;
+  max-height:none!important;
+  margin:0 0 18px 0!important;
+  padding:0!important;
+  overflow:visible!important;
+  white-space:normal!important;
+  text-overflow:clip!important;
+  font-size:34px!important;
+  line-height:1.20!important;
+  font-weight:700!important;
+  text-align:left!important;
+  border:0!important;
+  box-shadow:none!important;
+  background:transparent!important;
 }
-
 div[data-testid="stForm"]{
-width:100%!important;
-max-width:100%!important;
-min-width:0!important;
-height:auto!important;
-overflow:visible!important;
-box-sizing:border-box!important;
-margin:0!important;
-padding:0!important;
-border:0!important;
-box-shadow:none!important;
-background:transparent!important;
+  width:100%!important;
+  max-width:100%!important;
+  min-width:0!important;
+  height:auto!important;
+  overflow:visible!important;
+  box-sizing:border-box!important;
+  margin:0!important;
+  padding:0!important;
+  border:0!important;
+  box-shadow:none!important;
+  background:transparent!important;
 }
-
 [data-testid="stTextInput"]{
-width:100%!important;
-min-width:0!important;
-overflow:visible!important;
+  width:100%!important;
+  min-width:0!important;
+  overflow:visible!important;
 }
-
 [data-testid="stTextInput"]>div,
 [data-testid="stTextInput"] input{
-width:100%!important;
-min-width:0!important;
-box-sizing:border-box!important;
+  width:100%!important;
+  min-width:0!important;
+  box-sizing:border-box!important;
 }
-
 div[data-testid="stFormSubmitButton"]{
-display:block!important;
-width:100%!important;
-margin-top:8px!important;
+  display:block!important;
+  width:100%!important;
+  margin-top:8px!important;
 }
-
 div[data-testid="stFormSubmitButton"]>button{
-width:100%!important;
-max-width:100%!important;
-min-width:0!important;
-height:auto!important;
-min-height:48px!important;
-overflow:visible!important;
+  width:100%!important;
+  max-width:100%!important;
+  min-width:0!important;
+  height:auto!important;
+  min-height:48px!important;
+  overflow:visible!important;
 }
-
 @media(max-width:768px){
-.block-container{
-padding-top:calc(88px + env(safe-area-inset-top))!important;
-padding-left:14px!important;
-padding-right:14px!important;
-padding-bottom:calc(36px + env(safe-area-inset-bottom))!important;
-max-width:100%!important;
+  .block-container{
+    padding-top:calc(88px + env(safe-area-inset-top))!important;
+    padding-left:14px!important;
+    padding-right:14px!important;
+    padding-bottom:calc(36px + env(safe-area-inset-bottom))!important;
+    max-width:100%!important;
+  }
+  [data-testid="stMarkdownContainer"] h1,
+  .block-container h1{
+    font-size:29px!important;
+    line-height:1.20!important;
+    margin-bottom:16px!important;
+  }
+  [data-testid="stTextInput"] input{
+    min-height:48px!important;
+    font-size:16px!important;
+  }
+  [data-testid="stCaptionContainer"]{
+    line-height:1.4!important;
+    font-size:15px!important;
+  }
+  div[data-testid="stFormSubmitButton"]>button{
+    min-height:50px!important;
+    font-size:17px!important;
+  }
 }
+        `;
 
-[data-testid="stMarkdownContainer"] h1,
-.block-container h1{
-font-size:29px!important;
-line-height:1.20!important;
-margin-bottom:16px!important;
-}
+        // Xóa style login cũ nếu còn tồn tại.
+        ['vera-login-mobile-v907','vera-login-mobile-v909'].forEach(function(id){
+          const old = D.getElementById(id);
+          if (old) old.remove();
+        });
 
-[data-testid="stTextInput"] input{
-min-height:48px!important;
-font-size:16px!important;
-}
+        // Dừng observer nút Save cũ trong màn login.
+        try {
+          if (W.__veraSaveButtonObserverV89) {
+            W.__veraSaveButtonObserverV89.disconnect();
+            W.__veraSaveButtonObserverV89 = null;
+          }
+        } catch(e) {}
 
-[data-testid="stCaptionContainer"]{
-line-height:1.4!important;
-font-size:15px!important;
-}
+        // Xóa floating-save cũ nếu tab chưa reload hoàn toàn.
+        const oldFloat = D.getElementById('vera-global-floating-save-v72');
+        if (oldFloat) oldFloat.remove();
 
-div[data-testid="stFormSubmitButton"]>button{
-min-height:50px!important;
-font-size:17px!important;
-}
-}
-</style>""", unsafe_allow_html=True)
+        // Cuộn về đầu.
+        try { W.scrollTo({top:0,left:0,behavior:'instant'}); }
+        catch(e) { W.scrollTo(0,0); }
+
+      } catch(e) {}
+    })();
+    </script>
+    """, height=0, width=0)
+
 
     # Xóa các DOM element nghiệp vụ bị giữ lại bởi observer từ lượt render trước.
     components.html(r"""

@@ -1,4 +1,4 @@
-# V92.6.5 - Danh sách ca có checkbox để Sửa/Xóa theo bộ phận (2026-08-21)
+# V92.6.6 - Chi tiết danh sách: NV/Leader/Lễ tân/Quản lý tick dòng để xóa theo đúng quyền (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -8,7 +8,7 @@ import os
 import io
 import html
 import gspread
-from google.oauth2.service_account import Credentialsa
+from google.oauth2.service_account import Credentials
 import streamlit.components.v1 as components
 import time
 import smtplib
@@ -22628,8 +22628,27 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             else: start_date = end_date = today
 
     with col_name:
-        list_nv = ["- Tất cả nhân viên -"] + get_leave_eligible_employee_names(df_credentials, df_nv_excel)
-        selected_nv = st.selectbox("👤 Tìm kiếm nhân viên:", list_nv, filter_mode="contains")
+        # V92.6.6:
+        # Nhân viên/Leader chỉ xem các lịch liên quan chính mình.
+        # Lễ tân/Quản lý/Admin vẫn được lọc toàn bộ nhân sự.
+        if str(st.session_state.current_role).strip().lower() in {"nhanvien", "leader"}:
+            selected_nv = st.session_state.current_user
+            st.text_input(
+                "👤 Nhân viên:",
+                value=selected_nv,
+                disabled=True,
+                key="leave_detail_employee_locked_v9266",
+            )
+        else:
+            list_nv = ["- Tất cả nhân viên -"] + get_leave_eligible_employee_names(
+                df_credentials, df_nv_excel
+            )
+            selected_nv = st.selectbox(
+                "👤 Tìm kiếm nhân viên:",
+                list_nv,
+                filter_mode="contains",
+                key="leave_detail_employee_filter_v9266",
+            )
 
     with col_refresh:
         st.write("") 
@@ -23251,22 +23270,34 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
     with tab1:
         if export_df.empty:
             st.info("Trống.")
-        elif (
-            st.session_state.current_role == "admin"
-            or (
-                st.session_state.current_role in {"letan", "quanly"}
-                and (
-                    has_feature_access("leave_detail_edit")
-                    or has_feature_access("leave_today_khong_phep_edit_delete")
-                )
-            )
-        ):
-            # Admin luôn sửa được. Lễ tân/Quản lý dùng quyền sửa chung hoặc quyền KHÔNG PHÉP ngày hiện tại.
+        elif str(st.session_state.current_role).strip().lower() in {
+            "admin", "letan", "quanly", "leader", "nhanvien"
+        }:
+            # V92.6.6:
+            # Tất cả 5 vai trò trên đều được nhìn bảng dạng editor có checkbox.
+            # Quyền XÓA vẫn được kiểm tra từng dòng bằng validate_schedule_delete_permission().
+            # Dòng không được xóa vẫn hiển thị đầy đủ và được đánh dấu "🔒 Chỉ xem".
             raw_detail_full = filtered_df.copy().reset_index(drop=True)
             raw_detail = raw_detail_full.drop(columns=cols_to_hide + ['__source_sheet_id', '__source_row'], errors='ignore').copy()
             raw_detail = add_source_leave_type_column(raw_detail)
             if 'Lý do nghỉ' in raw_detail.columns:
                 raw_detail['Lý do nghỉ'] = raw_detail['Lý do nghỉ'].apply(clean_leave_reason_display)
+
+            # V92.6.6 - Hiển thị quyền xóa cho TỪNG DÒNG nhưng không ẩn dòng bị khóa.
+            _detail_delete_status = []
+            _detail_delete_reason = []
+            for _, _perm_row in raw_detail_full.iterrows():
+                _can_del, _why_del = validate_schedule_delete_permission(
+                    _perm_row,
+                    st.session_state.current_role,
+                    current_user=st.session_state.current_user,
+                    today=get_vn_today(),
+                )
+                _detail_delete_status.append("✅ Có thể xóa" if _can_del else "🔒 Chỉ xem")
+                _detail_delete_reason.append(str(_why_del or ""))
+
+            raw_detail.insert(0, "Quyền xóa", _detail_delete_status)
+            raw_detail.insert(1, "Lý do khóa", _detail_delete_reason)
 
             # Danh mục Lý do nghỉ dùng trực tiếp trong bảng sửa.
             reason_options = get_leave_reason_options(
@@ -23298,6 +23329,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             editor_df = prepare_leave_editor_types(editor_df)
 
             derived_cols = [
+                "Quyền xóa", "Lý do khóa",
                 "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
                 "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
             ]
@@ -23307,13 +23339,46 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and "Tên nhân viên" in editor_df.columns:
                 disabled_cols.append("Tên nhân viên")
 
+            # Chỉ Admin hoặc tài khoản có quyền sửa trực tiếp mới được sửa cell.
+            # Các tài khoản còn lại vẫn được tick "Chọn" để yêu cầu xóa theo quy định từng dòng.
+            _detail_role = str(st.session_state.current_role).strip().lower()
+            _detail_can_edit_cells = (
+                _detail_role == "admin"
+                or (
+                    _detail_role in {"letan", "quanly"}
+                    and has_feature_access("leave_detail_edit")
+                )
+                or (
+                    _detail_role in {"nhanvien", "leader"}
+                    and not bool(system_status.get("lock_nv", False))
+                )
+            )
+            if not _detail_can_edit_cells:
+                disabled_cols = [
+                    c for c in editor_df.columns
+                    if c != "Chọn"
+                ]
+
             editor_version = int(st.session_state.get('_detail_editor_version', 1))
             editor_key = f"detail_schedule_editor_batch_v{editor_version}"
             detail_col_config = table_layout_column_config("leave_detail", list(editor_df.columns))
             if "Chọn" in editor_df.columns:
                 detail_col_config["Chọn"] = st.column_config.CheckboxColumn(
-                    "Chọn", help="Chỉ cần tick khi muốn XÓA. Khi sửa, hệ thống tự nhận biết dòng đã thay đổi.",
-                    default=False, width=layout_width("leave_detail", "Chọn", "small")
+                    "Chọn",
+                    help=(
+                        "Tick dòng cần xóa. Nếu dòng đang là 🔒 Chỉ xem, hệ thống vẫn hiển thị "
+                        "nhưng sẽ không cho xóa."
+                    ),
+                    default=False,
+                    width=layout_width("leave_detail", "Chọn", "small")
+                )
+            if "Quyền xóa" in editor_df.columns:
+                detail_col_config["Quyền xóa"] = st.column_config.TextColumn(
+                    "Quyền xóa", disabled=True, width="small"
+                )
+            if "Lý do khóa" in editor_df.columns:
+                detail_col_config["Lý do khóa"] = st.column_config.TextColumn(
+                    "Lý do khóa", disabled=True, width="large"
                 )
             if "Ngày" in editor_df.columns:
                 detail_col_config["Ngày"] = st.column_config.DateColumn(
@@ -23366,12 +23431,30 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 )
                 _d_save, _d_delete = st.columns(2)
                 with _d_save:
-                    submit_detail_save = st.form_submit_button("💾 Lưu tất cả thay đổi", use_container_width=True)
+                    submit_detail_save = st.form_submit_button(
+                        "💾 Lưu tất cả thay đổi",
+                        use_container_width=True,
+                        disabled=not _detail_can_edit_cells,
+                    )
                 with _d_delete:
-                    submit_detail_delete = st.form_submit_button("🗑️ Xóa các dòng đã chọn", use_container_width=True)
+                    _detail_delete_locked = (
+                        _detail_role in {"nhanvien", "leader"}
+                        and bool(system_status.get("lock_nv", False))
+                    )
+                    submit_detail_delete = st.form_submit_button(
+                        "🗑️ Xóa các dòng đã chọn",
+                        use_container_width=True,
+                        disabled=_detail_delete_locked,
+                    )
 
-            detail_edit_only = detail_editor.drop(columns=['Chọn'], errors='ignore').copy()
-            original_compare = raw_detail.copy().reset_index(drop=True)
+            detail_edit_only = detail_editor.drop(
+                columns=['Chọn', 'Quyền xóa', 'Lý do khóa'],
+                errors='ignore'
+            ).copy()
+            original_compare = raw_detail.drop(
+                columns=['Quyền xóa', 'Lý do khóa'],
+                errors='ignore'
+            ).copy().reset_index(drop=True)
             detail_compare = detail_edit_only.copy().reset_index(drop=True)
             changed_positions = get_changed_schedule_positions(original_compare, detail_compare)
             selected_positions = detail_editor.index[detail_editor.get('Chọn', False) == True].tolist() if 'Chọn' in detail_editor.columns else []
@@ -23412,28 +23495,51 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 if not selected_positions:
                     st.warning("Vui lòng tick ít nhất 1 dòng cần xóa.")
                 else:
-                    originals = [raw_detail_full.iloc[pos].copy() for pos in selected_positions if pos < len(raw_detail_full)]
+                    originals = [
+                        raw_detail_full.iloc[pos].copy()
+                        for pos in selected_positions
+                        if pos < len(raw_detail_full)
+                    ]
                     today_del = get_vn_today()
-                    can_delete = True
+                    allowed_delete_rows = []
+                    denied_delete_rows = []
+
                     for r in originals:
                         permitted, perm_msg = validate_schedule_delete_permission(
-                            r, st.session_state.current_role,
-                            current_user=st.session_state.current_user, today=today_del
+                            r,
+                            st.session_state.current_role,
+                            current_user=st.session_state.current_user,
+                            today=today_del,
                         )
-                        if not permitted:
-                            st.error(f"❌ {r.get('Tên nhân viên','')}: {perm_msg}")
-                            can_delete = False
-                            break
-                    if can_delete:
-                        ok, msg = delete_schedule_records(originals, st.session_state.current_user)
+                        if permitted:
+                            allowed_delete_rows.append(r)
+                        else:
+                            denied_delete_rows.append((r, perm_msg))
+
+                    # Không ẩn dòng bị khóa; nếu user tick nhầm thì giải thích rõ.
+                    for _locked_row, _locked_msg in denied_delete_rows:
+                        st.warning(
+                            f"🔒 {_locked_row.get('Tên nhân viên','')} · "
+                            f"{_locked_row.get('Ngày','')} · "
+                            f"{clean_leave_reason_display(_locked_row.get('Lý do nghỉ',''))}: "
+                            f"{_locked_msg}"
+                        )
+
+                    if allowed_delete_rows:
+                        ok, msg = delete_schedule_records(
+                            allowed_delete_rows,
+                            st.session_state.current_user
+                        )
                         (st.success if ok else st.error)(msg)
                         if ok:
                             st.session_state.pop('_detail_editor_seed', None)
                             st.session_state.pop('_detail_editor_fingerprint', None)
                             _clear_leave_data_caches()
                             rerun_current_view()
+                    elif denied_delete_rows:
+                        st.error("Không có dòng nào trong các dòng đã tick đủ điều kiện để xóa.")
         else:
-            # Chỉ xem: Nhân viên/Leader hoặc Lễ tân/Quản lý đã bị tắt quyền sửa trực tiếp.
+            # Các vai trò ngoài nhóm được phép thao tác chỉ xem bảng.
             export_view_df, _ = apply_table_layout_df(export_df.copy(), "leave_detail")
             st.dataframe(
                 export_view_df,

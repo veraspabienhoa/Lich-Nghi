@@ -1,4 +1,4 @@
-# V92.7R1 - Fix KeyError font_size trong Giao diện tùy chỉnh bảng thống kê ngày (2026-08-20)
+# V92.6 - Excel phân ca: dropdown cột B tự lấy danh sách ca đúng theo bộ phận từng nhân viên (2026-08-20)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -9660,15 +9660,6 @@ def _normalize_daily_summary_ui_config(raw=None):
 
     for device in ["desktop", "mobile"]:
         incoming = raw_style.get(device, {}) if isinstance(raw_style.get(device, {}), dict) else {}
-
-        # Tương thích cấu hình lỗi/cũ từng lưu field font_size.
-        if "font_size" in incoming:
-            _legacy_font = incoming.get("font_size")
-            incoming = dict(incoming)
-            incoming.setdefault("header_font", _legacy_font)
-            incoming.setdefault("body_font", _legacy_font)
-            incoming.setdefault("pill_font", _legacy_font)
-
         limits = {
             "header_font": (6, 30),
             "body_font": (6, 30),
@@ -9818,39 +9809,19 @@ def render_daily_summary_ui_editor():
         preview = _daily_summary_apply_column_editor(current, col_edit)
 
         def _edit_style(device, prefix):
-            # Schema đúng của DAILY_SUMMARY_STYLE_DEFAULT:
-            # header_font / body_font / pill_font / padding_x / padding_y /
-            # pill_padding_y / pill_radius / row_gap.
-            # Không dùng field font_size vì bảng thống kê ngày không có field này.
-            defaults = DAILY_SUMMARY_STYLE_DEFAULT.get(device, {})
-            out = dict(preview.get("style", {}).get(device, {}) or {})
-
+            out = dict(preview["style"][device])
             settings = [
-                ("header_font", "Cỡ chữ Header", 6, 30),
-                ("body_font", "Cỡ chữ nội dung", 6, 30),
-                ("pill_font", "Cỡ chữ ô số", 6, 30),
+                ("font_size", "Cỡ chữ", 8, 30),
                 ("padding_x", "Padding ngang", 0, 30),
                 ("padding_y", "Padding dọc", 0, 30),
                 ("pill_padding_y", "Padding dọc ô số", 0, 30),
                 ("pill_radius", "Bo góc ô số", 0, 30),
                 ("row_gap", "Khoảng cách hàng", 0, 30),
             ]
-
             for field, label, lo, hi in settings:
-                fallback = defaults.get(field, lo)
-                try:
-                    current_value = int(float(out.get(field, fallback)))
-                except Exception:
-                    current_value = int(fallback)
-
-                current_value = max(lo, min(hi, current_value))
                 out[field] = st.number_input(
-                    label,
-                    min_value=lo,
-                    max_value=hi,
-                    value=current_value,
-                    step=1,
-                    key=f"{prefix}_{field}",
+                    label, min_value=lo, max_value=hi, value=int(out[field]),
+                    step=1, key=f"{prefix}_{field}",
                 )
             return out
 
@@ -21496,11 +21467,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
         else:
             if is_admin_letan:
                 list_nv_input = ["-- Chọn nhân viên --"] + all_users
-                chosen_dates = st.date_input(
-                    "Chọn ngày nghỉ (Khoảng thời gian nếu là Phép năm):",
-                    value=(get_vn_today(), get_vn_today()),
-                    key="sb_chosen_date"
-                )
+                chosen_dates = st.date_input("Chọn ngày nghỉ (Khoảng thời gian nếu là Phép năm):", value=(get_vn_today(), get_vn_today()), key="sb_chosen_date")
             else:
                 list_nv_input = [st.session_state.current_user]
                 emp_min_date, emp_max_date = employee_registration_window()

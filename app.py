@@ -1,4 +1,4 @@
-# V92.1 - Giao diện tùy chỉnh Web/Mobile song song cho toàn bộ UI + bảng + menu (2026-08-20)
+# V92.2 - Ca theo bộ phận + cấu hình nghỉ giữa ca duration + logic check-in lần 2/3 TimeSoft (2026-08-20)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -3819,8 +3819,31 @@ SHIFT_CYCLE_OPTIONS = [
 ]
 
 SHIFT_CONFIG_WORKSHEET = "CauHinhCaLamViec"
-SHIFT_CONFIG_HEADERS = ["ID", "Tên ca", "Giờ bắt đầu", "Giờ kết thúc", "Ghi chú", "Thứ tự", "Trạng thái"]
+# V92.2 thêm cột Bộ phận; tương thích sheet cũ 7 cột.
+SHIFT_CONFIG_HEADERS = [
+    "ID", "Tên ca", "Giờ bắt đầu", "Giờ kết thúc",
+    "Ghi chú", "Thứ tự", "Trạng thái", "Bộ phận"
+]
+SHIFT_BREAK_CONFIG_WORKSHEET = "CauHinhNghiGiuaCa"
+SHIFT_BREAK_CONFIG_HEADERS = [
+    "Bộ phận", "Áp dụng nghỉ giữa ca", "Duration phút",
+    "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
+]
 SHIFT_DEPARTMENT_ORDER = ["Nhân viên + Leader", "Lễ tân", "Quản lý", "Locker", "Tạp vụ"]
+SHIFT_DEPARTMENT_ROLE_KEYS = {
+    "Nhân viên + Leader": {"nhanvien", "leader"},
+    "Lễ tân": {"letan"},
+    "Quản lý": {"quanly"},
+    "Locker": {"locker"},
+    "Tạp vụ": {"tapvu"},
+}
+SHIFT_BREAK_DEFAULTS = {
+    "Nhân viên + Leader": {"enabled": True, "duration_minutes": 90},
+    "Lễ tân": {"enabled": False, "duration_minutes": 60},
+    "Quản lý": {"enabled": False, "duration_minutes": 60},
+    "Locker": {"enabled": False, "duration_minutes": 60},
+    "Tạp vụ": {"enabled": False, "duration_minutes": 60},
+}
 
 def _shift_department_label(role):
     role = str(role or "").strip().lower()
@@ -3849,21 +3872,42 @@ def _get_shift_config_worksheet():
         return None
     ss = client.open_by_key(SHEET_MAT_KHAU_ID)
     ws = _get_or_create_worksheet(
-        ss, SHIFT_CONFIG_WORKSHEET, rows=300, cols=len(SHIFT_CONFIG_HEADERS)
+        ss, SHIFT_CONFIG_WORKSHEET, rows=500, cols=max(10, len(SHIFT_CONFIG_HEADERS))
     )
+    if int(getattr(ws, "col_count", 0) or 0) < len(SHIFT_CONFIG_HEADERS):
+        try:
+            _gs_call_with_backoff(ws.resize, cols=max(10, len(SHIFT_CONFIG_HEADERS)))
+        except Exception:
+            pass
+
     vals = _gs_call_with_backoff(ws.get_all_values)
     if not vals:
-        gspread_update_range(ws, "A1:G1", [SHIFT_CONFIG_HEADERS])
+        gspread_update_range(ws, "A1:H1", [SHIFT_CONFIG_HEADERS])
         defaults = [
-            ["SHIFT001", "Ca 1", "10:00", "23:00", "", "1", "Đang dùng"],
-            ["SHIFT002", "Ca 2", "13:00", "00:00", "", "2", "Đang dùng"],
-            ["SHIFT003", "Cố định Ca 1", "", "", "Không đổi", "3", "Đang dùng"],
-            ["SHIFT004", "Cố định Ca 2", "", "", "Không đổi", "4", "Đang dùng"],
+            ["SHIFT001", "Ca 1", "10:00", "23:00", "", "1", "Đang dùng", "Nhân viên + Leader"],
+            ["SHIFT002", "Ca 2", "13:00", "00:00", "", "2", "Đang dùng", "Nhân viên + Leader"],
+            ["SHIFT003", "Cố định Ca 1", "", "", "Không đổi", "3", "Đang dùng", "Nhân viên + Leader"],
+            ["SHIFT004", "Cố định Ca 2", "", "", "Không đổi", "4", "Đang dùng", "Nhân viên + Leader"],
         ]
         for row in defaults:
             _gs_call_with_backoff(ws.append_row, row, value_input_option="USER_ENTERED")
-    elif vals[0][:len(SHIFT_CONFIG_HEADERS)] != SHIFT_CONFIG_HEADERS:
-        gspread_update_range(ws, "A1:G1", [SHIFT_CONFIG_HEADERS])
+    else:
+        # Nâng sheet cũ: giữ dữ liệu hiện tại, thêm header Bộ phận ở H.
+        header = list(vals[0])
+        if header[:len(SHIFT_CONFIG_HEADERS)] != SHIFT_CONFIG_HEADERS:
+            gspread_update_range(ws, "A1:H1", [SHIFT_CONFIG_HEADERS])
+
+        # Các ca cũ chưa có Bộ phận -> mặc định thuộc Nhân viên + Leader.
+        if len(vals) > 1:
+            updates = []
+            for ridx, row in enumerate(vals[1:], start=2):
+                if not row or not str(row[1] if len(row) > 1 else "").strip():
+                    continue
+                dept = str(row[7]).strip() if len(row) > 7 else ""
+                if not dept:
+                    updates.append((ridx, "Nhân viên + Leader"))
+            for ridx, dept in updates:
+                gspread_update_range(ws, f"H{ridx}:H{ridx}", [[dept]])
     return ws
 
 
@@ -3876,13 +3920,16 @@ def load_shift_definitions():
             raise RuntimeError("Không mở được sheet cấu hình ca.")
         vals = _gs_call_with_backoff(ws.get_all_values)
         for ridx, row in enumerate(vals[1:], start=2):
-            rr = list(row[:7]) + [""] * max(0, 7-len(row))
+            rr = list(row[:8]) + [""] * max(0, 8-len(row))
             if not str(rr[1]).strip():
                 continue
             try:
                 order = int(float(rr[5])) if str(rr[5]).strip() else 999
             except Exception:
                 order = 999
+            dept = str(rr[7]).strip() or "Nhân viên + Leader"
+            if dept not in SHIFT_DEPARTMENT_ORDER:
+                dept = "Nhân viên + Leader"
             rows.append({
                 "ID": str(rr[0]).strip(),
                 "Tên ca": str(rr[1]).strip(),
@@ -3891,32 +3938,63 @@ def load_shift_definitions():
                 "Ghi chú": str(rr[4]).strip(),
                 "Thứ tự": order,
                 "Trạng thái": str(rr[6]).strip() or "Đang dùng",
+                "Bộ phận": dept,
                 "__row": ridx,
             })
     except Exception:
         rows = []
+
     if not rows:
         rows = [
-            {"ID":"SHIFT001","Tên ca":"Ca 1","Giờ bắt đầu":"10:00","Giờ kết thúc":"23:00","Ghi chú":"","Thứ tự":1,"Trạng thái":"Đang dùng"},
-            {"ID":"SHIFT002","Tên ca":"Ca 2","Giờ bắt đầu":"13:00","Giờ kết thúc":"00:00","Ghi chú":"","Thứ tự":2,"Trạng thái":"Đang dùng"},
-            {"ID":"SHIFT003","Tên ca":"Cố định Ca 1","Giờ bắt đầu":"","Giờ kết thúc":"","Ghi chú":"Không đổi","Thứ tự":3,"Trạng thái":"Đang dùng"},
-            {"ID":"SHIFT004","Tên ca":"Cố định Ca 2","Giờ bắt đầu":"","Giờ kết thúc":"","Ghi chú":"Không đổi","Thứ tự":4,"Trạng thái":"Đang dùng"},
+            {"ID":"SHIFT001","Tên ca":"Ca 1","Giờ bắt đầu":"10:00","Giờ kết thúc":"23:00","Ghi chú":"","Thứ tự":1,"Trạng thái":"Đang dùng","Bộ phận":"Nhân viên + Leader"},
+            {"ID":"SHIFT002","Tên ca":"Ca 2","Giờ bắt đầu":"13:00","Giờ kết thúc":"00:00","Ghi chú":"","Thứ tự":2,"Trạng thái":"Đang dùng","Bộ phận":"Nhân viên + Leader"},
+            {"ID":"SHIFT003","Tên ca":"Cố định Ca 1","Giờ bắt đầu":"","Giờ kết thúc":"","Ghi chú":"Không đổi","Thứ tự":3,"Trạng thái":"Đang dùng","Bộ phận":"Nhân viên + Leader"},
+            {"ID":"SHIFT004","Tên ca":"Cố định Ca 2","Giờ bắt đầu":"","Giờ kết thúc":"","Ghi chú":"Không đổi","Thứ tự":4,"Trạng thái":"Đang dùng","Bộ phận":"Nhân viên + Leader"},
         ]
-    return pd.DataFrame(rows).sort_values(["Thứ tự", "Tên ca"], kind="stable").reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values(
+        ["Bộ phận", "Thứ tự", "Tên ca"], kind="stable"
+    ).reset_index(drop=True)
 
 
-def get_shift_options():
+def get_shift_options(department=None):
+    """Danh mục ca riêng từng bộ phận."""
     d = load_shift_definitions()
     opts = []
     if isinstance(d, pd.DataFrame) and not d.empty:
-        active = d[d["Trạng thái"].astype(str).str.strip().str.lower().ne("đã xóa")]
+        active = d[d["Trạng thái"].astype(str).str.strip().str.lower().ne("đã xóa")].copy()
+        if department:
+            active = active[active["Bộ phận"].astype(str).eq(str(department))].copy()
         for _, r in active.iterrows():
-            label = _shift_display_label(r.get("Tên ca",""), r.get("Giờ bắt đầu",""), r.get("Giờ kết thúc",""))
-            if str(r.get("Ghi chú","")).strip().lower() == "không đổi" and "không đổi" not in label.lower():
+            label = _shift_display_label(
+                r.get("Tên ca",""), r.get("Giờ bắt đầu",""), r.get("Giờ kết thúc","")
+            )
+            if (
+                str(r.get("Ghi chú","")).strip().lower() == "không đổi"
+                and "không đổi" not in label.lower()
+            ):
                 label = f"{label} (Không đổi)"
             if label and label not in opts:
                 opts.append(label)
-    return opts or list(SHIFT_OPTIONS)
+
+    # Tương thích dữ liệu cũ: nhóm Nhân viên + Leader vẫn có fallback 4 ca mặc định.
+    if not opts and (department in {None, "", "Nhân viên + Leader"}):
+        return list(SHIFT_OPTIONS)
+    return opts
+
+
+def get_shift_options_for_role(role):
+    return get_shift_options(_shift_department_label(role))
+
+
+def get_shift_options_all():
+    """Union danh mục ca cho Export/template cũ."""
+    out = []
+    for dep in SHIFT_DEPARTMENT_ORDER:
+        for item in get_shift_options(dep):
+            if item not in out:
+                out.append(item)
+    return out or list(SHIFT_OPTIONS)
+
 
 
 def _replace_shift_assignment(old_label, new_label):
@@ -3944,8 +4022,14 @@ def _replace_shift_assignment(old_label, new_label):
         return False, f"Lỗi cập nhật phân ca hiện tại: {e}"
 
 
-def save_shift_definition(shift_id, name, start_time, end_time, note, order, username):
+def save_shift_definition(
+    shift_id, name, start_time, end_time, note, order, username,
+    department="Nhân viên + Leader"
+):
     name = str(name or "").strip()
+    department = str(department or "").strip()
+    if department not in SHIFT_DEPARTMENT_ORDER:
+        return False, "Bộ phận không hợp lệ."
     if not name:
         return False, "Tên ca không được để trống."
     try:
@@ -3956,35 +4040,54 @@ def save_shift_definition(shift_id, name, start_time, end_time, note, order, use
         shift_id = str(shift_id or "").strip()
         row_idx = None
         old_label = ""
+        old_department = department
         if shift_id and isinstance(defs, pd.DataFrame) and not defs.empty:
             hit = defs[defs["ID"].astype(str).eq(shift_id)]
             if not hit.empty:
                 rr = hit.iloc[0]
                 row_idx = int(rr.get("__row", 0) or 0)
-                old_label = _shift_display_label(rr["Tên ca"], rr["Giờ bắt đầu"], rr["Giờ kết thúc"])
-                if str(rr.get("Ghi chú","")).strip().lower() == "không đổi" and "không đổi" not in old_label.lower():
+                old_department = str(rr.get("Bộ phận", department))
+                old_label = _shift_display_label(
+                    rr["Tên ca"], rr["Giờ bắt đầu"], rr["Giờ kết thúc"]
+                )
+                if (
+                    str(rr.get("Ghi chú","")).strip().lower() == "không đổi"
+                    and "không đổi" not in old_label.lower()
+                ):
                     old_label += " (Không đổi)"
+
         if not shift_id:
-            shift_id = "SHIFT-" + datetime.now(VN_TZ).strftime("%Y%m%d%H%M%S")
+            shift_id = "SHIFT-" + datetime.now(VN_TZ).strftime("%Y%m%d%H%M%S%f")
+
         row = [
             shift_id, name, str(start_time or "").strip(), str(end_time or "").strip(),
-            str(note or "").strip(), str(int(order or 999)), "Đang dùng"
+            str(note or "").strip(), str(int(order or 999)), "Đang dùng", department
         ]
         if row_idx:
-            gspread_update_range(ws, f"A{row_idx}:G{row_idx}", [row])
+            gspread_update_range(ws, f"A{row_idx}:H{row_idx}", [row])
         else:
             _gs_call_with_backoff(ws.append_row, row, value_input_option="USER_ENTERED")
-        try: load_shift_definitions.clear()
-        except Exception: pass
+
+        try:
+            load_shift_definitions.clear()
+        except Exception:
+            pass
+
         new_label = _shift_display_label(name, start_time, end_time)
-        if str(note or "").strip().lower() == "không đổi" and "không đổi" not in new_label.lower():
+        if (
+            str(note or "").strip().lower() == "không đổi"
+            and "không đổi" not in new_label.lower()
+        ):
             new_label += " (Không đổi)"
-        if old_label and old_label != new_label:
+
+        # Chỉ đổi phân ca nhân viên nếu vẫn cùng bộ phận.
+        if old_label and old_label != new_label and old_department == department:
             ok_replace, msg_replace = _replace_shift_assignment(old_label, new_label)
             _clear_dynamic_data_caches()
             return ok_replace, ("Đã sửa ca. " + msg_replace).strip()
+
         _clear_dynamic_data_caches()
-        return True, "Đã lưu ca làm việc."
+        return True, f"Đã lưu ca cho bộ phận {department}."
     except Exception as e:
         return False, f"Lỗi lưu ca: {e}"
 
@@ -3996,23 +4099,311 @@ def delete_shift_definition(shift_id, username):
         if hit.empty:
             return False, "Không tìm thấy ca."
         rr = hit.iloc[0]
-        old_label = _shift_display_label(rr["Tên ca"], rr["Giờ bắt đầu"], rr["Giờ kết thúc"])
-        if str(rr.get("Ghi chú","")).strip().lower() == "không đổi" and "không đổi" not in old_label.lower():
+        old_label = _shift_display_label(
+            rr["Tên ca"], rr["Giờ bắt đầu"], rr["Giờ kết thúc"]
+        )
+        if (
+            str(rr.get("Ghi chú","")).strip().lower() == "không đổi"
+            and "không đổi" not in old_label.lower()
+        ):
             old_label += " (Không đổi)"
         ws = _get_shift_config_worksheet()
         row_idx = int(rr.get("__row", 0) or 0)
         row = [
             rr["ID"], rr["Tên ca"], rr["Giờ bắt đầu"], rr["Giờ kết thúc"],
-            rr["Ghi chú"], str(rr["Thứ tự"]), "Đã xóa"
+            rr["Ghi chú"], str(rr["Thứ tự"]), "Đã xóa", rr.get("Bộ phận","Nhân viên + Leader")
         ]
-        gspread_update_range(ws, f"A{row_idx}:G{row_idx}", [row])
-        try: load_shift_definitions.clear()
-        except Exception: pass
+        gspread_update_range(ws, f"A{row_idx}:H{row_idx}", [row])
+        try:
+            load_shift_definitions.clear()
+        except Exception:
+            pass
         ok_replace, msg_replace = _replace_shift_assignment(old_label, "")
         _clear_dynamic_data_caches()
-        return ok_replace, ("Đã xóa ca. " + msg_replace).strip()
+        return ok_replace, (
+            f"Đã xóa ca của bộ phận {rr.get('Bộ phận','')}. " + msg_replace
+        ).strip()
     except Exception as e:
         return False, f"Lỗi xóa ca: {e}"
+
+
+@st.cache_resource(show_spinner=False)
+def _get_shift_break_config_worksheet():
+    try:
+        client = get_gspread_client()
+        if not client:
+            return None
+        ss = client.open_by_key(SHEET_MAT_KHAU_ID)
+        ws = _get_or_create_worksheet(
+            ss, SHIFT_BREAK_CONFIG_WORKSHEET, rows=100, cols=8
+        )
+        header = _gs_call_with_backoff(ws.row_values, 1)
+        if header[:len(SHIFT_BREAK_CONFIG_HEADERS)] != SHIFT_BREAK_CONFIG_HEADERS:
+            gspread_update_range(ws, "A1:F1", [SHIFT_BREAK_CONFIG_HEADERS])
+
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        existing = {
+            str(r[0]).strip()
+            for r in vals[1:]
+            if r and str(r[0]).strip()
+        }
+        for dep in SHIFT_DEPARTMENT_ORDER:
+            if dep not in existing:
+                d = SHIFT_BREAK_DEFAULTS[dep]
+                _gs_call_with_backoff(
+                    ws.append_row,
+                    [
+                        dep,
+                        "1" if d["enabled"] else "0",
+                        str(int(d["duration_minutes"])),
+                        "", "", "Hệ thống"
+                    ],
+                    value_input_option="USER_ENTERED",
+                )
+        return ws
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_shift_break_config():
+    result = {
+        dep: dict(SHIFT_BREAK_DEFAULTS[dep])
+        for dep in SHIFT_DEPARTMENT_ORDER
+    }
+    try:
+        ws = _get_shift_break_config_worksheet()
+        if ws is None:
+            return result
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        for row in vals[1:]:
+            if not row:
+                continue
+            dep = str(row[0]).strip()
+            if dep not in result:
+                continue
+            enabled_raw = str(row[1] if len(row) > 1 else "").strip().lower()
+            enabled = enabled_raw in {"1","true","yes","on","có","co","bật","bat"}
+            try:
+                duration = int(float(row[2])) if len(row) > 2 and str(row[2]).strip() else result[dep]["duration_minutes"]
+            except Exception:
+                duration = result[dep]["duration_minutes"]
+            result[dep] = {
+                "enabled": bool(enabled),
+                "duration_minutes": max(1, min(600, int(duration))),
+            }
+    except Exception:
+        pass
+    return result
+
+
+def save_shift_break_config(department, enabled, duration_minutes, username):
+    department = str(department or "").strip()
+    if department not in SHIFT_DEPARTMENT_ORDER:
+        return False, "Bộ phận không hợp lệ."
+    try:
+        duration = max(1, min(600, int(float(duration_minutes))))
+        ws = _get_shift_break_config_worksheet()
+        if ws is None:
+            return False, "Không mở được sheet cấu hình nghỉ giữa ca."
+
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        row_idx = None
+        for idx, row in enumerate(vals[1:], start=2):
+            if row and str(row[0]).strip() == department:
+                row_idx = idx
+                break
+
+        now = datetime.now(VN_TZ)
+        row = [
+            department,
+            "1" if enabled else "0",
+            str(duration),
+            now.strftime("%d/%m/%Y"),
+            now.strftime("%H:%M:%S"),
+            str(username or ""),
+        ]
+        if row_idx:
+            gspread_update_range(ws, f"A{row_idx}:F{row_idx}", [row])
+        else:
+            _gs_call_with_backoff(ws.append_row, row, value_input_option="USER_ENTERED")
+        try:
+            load_shift_break_config.clear()
+        except Exception:
+            pass
+        return True, (
+            f"Đã {'bật' if enabled else 'tắt'} nghỉ giữa ca cho {department}"
+            + (f" · duration {duration} phút." if enabled else ".")
+        )
+    except Exception as e:
+        return False, f"Lỗi lưu cấu hình nghỉ giữa ca: {e}"
+
+
+def get_shift_break_config_for_role(role):
+    dep = _shift_department_label(role)
+    return load_shift_break_config().get(
+        dep, {"enabled": False, "duration_minutes": 60}
+    )
+
+
+def _extract_timesoft_punch_times_from_row(row):
+    """
+    Cố gắng lấy chuỗi các lần chấm công trong một row TimeSoft.
+    Hỗ trợ field dạng list/array/string có nhiều timestamp.
+    Nếu API chỉ trả check-in đầu/check-out cuối thì không suy diễn lần 2/3.
+    """
+    values = []
+    candidate_cols = [
+        c for c in row.index
+        if any(token in str(c).casefold() for token in [
+            "checkin", "checkout", "machine", "punch", "time"
+        ])
+    ]
+
+    def add_from_value(v):
+        if v is None:
+            return
+        if isinstance(v, (list, tuple, set)):
+            for x in v:
+                add_from_value(x)
+            return
+        if isinstance(v, dict):
+            for x in v.values():
+                add_from_value(x)
+            return
+        s = str(v).strip()
+        if not s or s.casefold() in {"nan","none","nat","0"}:
+            return
+
+        # Tìm datetime đầy đủ hoặc giờ HH:MM(:SS).
+        full = re.findall(
+            r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\s+\d{1,2}:\d{2}(?::\d{2})?)',
+            s
+        )
+        if full:
+            values.extend(full)
+            return
+        times = re.findall(r'(?<!\d)(\d{1,2}:\d{2}(?::\d{2})?)(?!\d)', s)
+        values.extend(times)
+
+    for c in candidate_cols:
+        add_from_value(row.get(c))
+
+    parsed = []
+    seen = set()
+    base_date = get_vn_today()
+    date_raw = _timesoft_row_value(row, ["WorkDateStr","WorkDate","Date"])
+    try:
+        d = pd.to_datetime(date_raw, dayfirst=True, errors="coerce")
+        if not pd.isna(d):
+            base_date = d.date()
+    except Exception:
+        pass
+
+    for item in values:
+        item = str(item).strip()
+        dt = None
+        for fmt in (
+            "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M",
+            "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M",
+        ):
+            try:
+                dt = datetime.strptime(item, fmt).replace(tzinfo=VN_TZ)
+                break
+            except Exception:
+                pass
+        if dt is None:
+            m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", item)
+            if m:
+                dt = datetime(
+                    base_date.year, base_date.month, base_date.day,
+                    int(m.group(1)), int(m.group(2)), int(m.group(3) or 0),
+                    tzinfo=VN_TZ
+                )
+        if dt is not None:
+            key = dt.isoformat()
+            if key not in seen:
+                seen.add(key)
+                parsed.append(dt)
+
+    parsed.sort()
+    return parsed
+
+
+def calculate_midshift_break_from_timesoft(checkin_df, credentials_df=None):
+    """
+    Quy ước Vera:
+      punch #1 = vào làm
+      punch #2 = bắt đầu nghỉ giữa ca
+      punch #3 = kết thúc nghỉ giữa ca
+      thực tế = punch3 - punch2
+    Chỉ tính khi bộ phận được bật nghỉ giữa ca.
+    """
+    cols = [
+        "Ngày", "Tên nhân viên", "Bộ phận",
+        "Check-in 1", "Check-in 2 · bắt đầu nghỉ", "Check-in 3 · kết thúc nghỉ",
+        "Duration quy định", "Duration thực tế", "Chênh lệch", "Trạng thái"
+    ]
+    if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    cred_role = {}
+    if isinstance(credentials_df, pd.DataFrame) and not credentials_df.empty:
+        if "Tên nhân viên" in credentials_df.columns and "Phân quyền" in credentials_df.columns:
+            for _, r in credentials_df.iterrows():
+                cred_role[normalize_login_name(r.get("Tên nhân viên",""))] = str(r.get("Phân quyền",""))
+
+    config = load_shift_break_config()
+    out = []
+    for _, row in checkin_df.iterrows():
+        name = _timesoft_row_value(
+            row,
+            ["employeeInfo.Name","EmployeeName","Tên nhân viên","Nhân viên","Name"]
+        )
+        if not str(name).strip():
+            continue
+        role = cred_role.get(normalize_login_name(name), "")
+        dep = _shift_department_label(role)
+        cfg = config.get(dep, {"enabled": False, "duration_minutes": 60})
+        if not cfg.get("enabled", False):
+            continue
+
+        punches = _extract_timesoft_punch_times_from_row(row)
+        work_date = _timesoft_row_value(row, ["WorkDateStr","WorkDate","Date"])
+        if len(punches) < 3:
+            out.append({
+                "Ngày": str(work_date or ""),
+                "Tên nhân viên": str(name).strip(),
+                "Bộ phận": dep,
+                "Check-in 1": punches[0].strftime("%H:%M:%S") if len(punches) >= 1 else "",
+                "Check-in 2 · bắt đầu nghỉ": punches[1].strftime("%H:%M:%S") if len(punches) >= 2 else "",
+                "Check-in 3 · kết thúc nghỉ": "",
+                "Duration quy định": int(cfg["duration_minutes"]),
+                "Duration thực tế": "",
+                "Chênh lệch": "",
+                "Trạng thái": "Chưa đủ 3 lần chấm công",
+            })
+            continue
+
+        p1, p2, p3 = punches[0], punches[1], punches[2]
+        if p3 < p2:
+            p3 += timedelta(days=1)
+        actual = max(0, int(round((p3-p2).total_seconds()/60.0)))
+        allowed = int(cfg["duration_minutes"])
+        diff = actual - allowed
+        out.append({
+            "Ngày": str(work_date or p1.strftime("%d/%m/%Y")),
+            "Tên nhân viên": str(name).strip(),
+            "Bộ phận": dep,
+            "Check-in 1": p1.strftime("%H:%M:%S"),
+            "Check-in 2 · bắt đầu nghỉ": p2.strftime("%H:%M:%S"),
+            "Check-in 3 · kết thúc nghỉ": p3.strftime("%H:%M:%S"),
+            "Duration quy định": allowed,
+            "Duration thực tế": actual,
+            "Chênh lệch": diff,
+            "Trạng thái": "Đúng thời lượng" if diff <= 0 else f"Quá {diff} phút",
+        })
+    return pd.DataFrame(out, columns=cols)
 
 
 def get_shift_dataframe(credentials_df):
@@ -4079,7 +4470,7 @@ def build_shift_template_excel_bytes(credentials_df):
 
     dm = wb.create_sheet('DanhMuc')
     dm['A1'] = 'Ca làm việc'; dm['B1'] = 'Chu kỳ luân phiên'
-    _shift_options = get_shift_options()
+    _shift_options = get_shift_options_all()
     for i, v in enumerate(_shift_options, start=2): dm.cell(i, 1, v)
     for i, v in enumerate(SHIFT_CYCLE_OPTIONS, start=2): dm.cell(i, 2, v)
     dm.sheet_state = 'hidden'
@@ -4110,7 +4501,7 @@ def read_shift_template_excel(uploaded_file, credentials_df):
     allowed_keys = {normalize_login_name(x) for x in allowed['Tên nhân viên'].astype(str).tolist()}
     raw = raw[required].copy()
     raw = raw[raw['Tên nhân viên'].astype(str).apply(normalize_login_name).isin(allowed_keys)].copy()
-    _shift_options = get_shift_options()
+    _shift_options = get_shift_options_all()
     raw['Ca làm việc'] = raw['Ca làm việc'].astype(str).where(raw['Ca làm việc'].astype(str).isin(_shift_options), '')
     raw['Chu kỳ'] = raw['Chu kỳ'].astype(str).where(raw['Chu kỳ'].astype(str).isin(SHIFT_CYCLE_OPTIONS), '')
     raw['_sort'] = raw['Tên nhân viên'].astype(str).apply(normalize_login_name)
@@ -17395,35 +17786,49 @@ elif selected_page == "👤 Hồ sơ cá nhân":
 elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access("shift"):
     st.subheader("⏰ Thiết lập ca làm việc")
 
-    _shift_options_live = get_shift_options()
     shift_base = get_shift_dataframe(df_credentials)
+    _break_cfg = load_shift_break_config()
 
     # ======================================================
-    # TỔNG HỢP SỐ LƯỢNG NHÂN VIÊN THEO CA
+    # 1. TỔNG HỢP THEO BỘ PHẬN / CA
     # ======================================================
     st.markdown("### 📊 Tổng hợp nhân viên theo ca")
     if shift_base.empty:
         st.info("Chưa có nhân viên để tổng hợp.")
     else:
         _summary_rows = []
-        _summary_shift_values = list(_shift_options_live)
-        _assigned_values = [
-            x for x in shift_base["Ca làm việc"].astype(str).str.strip().unique().tolist()
-            if x and x not in _summary_shift_values
-        ]
-        _summary_shift_values += _assigned_values
-        for _shift_name in _summary_shift_values:
-            _part = shift_base[shift_base["Ca làm việc"].astype(str).str.strip().eq(_shift_name)]
-            row = {"Ca làm việc": _shift_name, "Tổng nhân viên": int(len(_part))}
-            for dep in SHIFT_DEPARTMENT_ORDER:
-                row[dep] = int((_part["Bộ phận"] == dep).sum())
-            _summary_rows.append(row)
-        _unassigned = shift_base[shift_base["Ca làm việc"].astype(str).str.strip().eq("")]
-        if not _unassigned.empty:
-            row = {"Ca làm việc": "Chưa phân ca", "Tổng nhân viên": int(len(_unassigned))}
-            for dep in SHIFT_DEPARTMENT_ORDER:
-                row[dep] = int((_unassigned["Bộ phận"] == dep).sum())
-            _summary_rows.append(row)
+        for dep in SHIFT_DEPARTMENT_ORDER:
+            dep_df = shift_base[shift_base["Bộ phận"].eq(dep)].copy()
+            dep_options = get_shift_options(dep)
+            assigned = [
+                x for x in dep_df["Ca làm việc"].astype(str).str.strip().unique().tolist()
+                if x
+            ]
+            all_shift_names = list(dep_options)
+            for x in assigned:
+                if x not in all_shift_names:
+                    all_shift_names.append(x)
+
+            for shift_name in all_shift_names:
+                count = int(
+                    dep_df["Ca làm việc"].astype(str).str.strip().eq(shift_name).sum()
+                )
+                _summary_rows.append({
+                    "Bộ phận": dep,
+                    "Ca làm việc": shift_name,
+                    "Số nhân viên": count,
+                })
+
+            unassigned = int(
+                dep_df["Ca làm việc"].astype(str).str.strip().eq("").sum()
+            )
+            if unassigned:
+                _summary_rows.append({
+                    "Bộ phận": dep,
+                    "Ca làm việc": "Chưa phân ca",
+                    "Số nhân viên": unassigned,
+                })
+
         st.dataframe(
             pd.DataFrame(_summary_rows),
             hide_index=True,
@@ -17432,129 +17837,222 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
         )
 
     # ======================================================
-    # QUẢN LÝ DANH MỤC CA - ADMIN
+    # 2. CẤU HÌNH NGHỈ GIỮA CA THEO BỘ PHẬN
     # ======================================================
     if st.session_state.current_role == "admin":
-        with st.expander("🛠️ Tạo / Sửa / Xóa ca làm việc", expanded=False):
-            _defs = load_shift_definitions()
-            _def_labels = ["➕ Tạo ca mới"]
-            _def_lookup = {}
-            if isinstance(_defs, pd.DataFrame) and not _defs.empty:
-                for _, rr in _defs[_defs["Trạng thái"].astype(str).str.lower().ne("đã xóa")].iterrows():
-                    lbl = _shift_display_label(rr["Tên ca"], rr["Giờ bắt đầu"], rr["Giờ kết thúc"])
-                    if str(rr.get("Ghi chú","")).strip().lower() == "không đổi" and "không đổi" not in lbl.lower():
-                        lbl += " (Không đổi)"
-                    full = f"{rr['ID']} · {lbl}"
-                    _def_labels.append(full)
-                    _def_lookup[full] = rr.to_dict()
-
-            _def_pick = st.selectbox(
-                "Chọn ca cần sửa hoặc tạo mới",
-                _def_labels,
-                key="shift_definition_pick_v912",
+        with st.expander("☕ Nghỉ giữa ca · cấu hình theo bộ phận", expanded=True):
+            st.info(
+                "Không đặt giờ ra/vào cố định. Khi bật: **lần chấm công #2** trên TimeSoft "
+                "= bắt đầu nghỉ; **lần #3** = kết thúc nghỉ. Duration thực tế = lần #3 − lần #2."
             )
-            _selected_def = _def_lookup.get(_def_pick, {})
-            _is_new_shift = _def_pick == "➕ Tạo ca mới"
 
-            sc1, sc2, sc3 = st.columns([1.6, 1, 1])
-            with sc1:
-                _shift_name_input = st.text_input(
-                    "Tên ca",
-                    value="" if _is_new_shift else str(_selected_def.get("Tên ca","")),
-                    key=f"shift_def_name_{_def_pick}",
-                    placeholder="VD: Ca 3",
-                )
-            with sc2:
-                _shift_start_input = st.text_input(
-                    "Giờ bắt đầu",
-                    value="" if _is_new_shift else str(_selected_def.get("Giờ bắt đầu","")),
-                    key=f"shift_def_start_{_def_pick}",
-                    placeholder="14:00",
-                )
-            with sc3:
-                _shift_end_input = st.text_input(
-                    "Giờ kết thúc",
-                    value="" if _is_new_shift else str(_selected_def.get("Giờ kết thúc","")),
-                    key=f"shift_def_end_{_def_pick}",
-                    placeholder="00:00",
-                )
-            sd1, sd2 = st.columns([2,1])
-            with sd1:
-                _shift_note_input = st.text_input(
-                    "Ghi chú",
-                    value="" if _is_new_shift else str(_selected_def.get("Ghi chú","")),
-                    key=f"shift_def_note_{_def_pick}",
-                    placeholder="VD: Không đổi",
-                )
-            with sd2:
-                _shift_order_input = st.number_input(
-                    "Thứ tự",
-                    min_value=1,
-                    max_value=999,
-                    value=(
-                        int(_selected_def.get("Thứ tự", len(_def_labels)))
-                        if not _is_new_shift else len(_def_labels)
+            _break_edit_rows = []
+            for dep in SHIFT_DEPARTMENT_ORDER:
+                cfg = _break_cfg.get(dep, SHIFT_BREAK_DEFAULTS[dep])
+                _break_edit_rows.append({
+                    "Bộ phận": dep,
+                    "Áp dụng nghỉ giữa ca": bool(cfg.get("enabled", False)),
+                    "Duration (phút)": int(cfg.get("duration_minutes", 60)),
+                })
+
+            _break_editor = st.data_editor(
+                pd.DataFrame(_break_edit_rows),
+                hide_index=True,
+                num_rows="fixed",
+                width="stretch",
+                height="content",
+                disabled=["Bộ phận"],
+                key="shift_break_config_editor_v922",
+                column_config={
+                    "Bộ phận": st.column_config.TextColumn("Bộ phận", disabled=True, width="medium"),
+                    "Áp dụng nghỉ giữa ca": st.column_config.CheckboxColumn(
+                        "Bật / Tắt nghỉ giữa ca", width="medium"
                     ),
-                    step=1,
-                    key=f"shift_def_order_{_def_pick}",
+                    "Duration (phút)": st.column_config.NumberColumn(
+                        "Duration (phút)", min_value=1, max_value=600, step=5, format="%d"
+                    ),
+                },
+            )
+
+            if st.button(
+                "💾 Lưu cấu hình nghỉ giữa ca",
+                use_container_width=True,
+                key="save_shift_break_config_all_v922",
+            ):
+                _msgs = []
+                _all_ok = True
+                for _, rr in _break_editor.iterrows():
+                    ok, msg = save_shift_break_config(
+                        rr["Bộ phận"],
+                        bool(rr["Áp dụng nghỉ giữa ca"]),
+                        int(rr["Duration (phút)"]),
+                        st.session_state.current_user,
+                    )
+                    _all_ok = _all_ok and ok
+                    if not ok:
+                        _msgs.append(msg)
+                if _all_ok:
+                    st.success("Đã lưu cấu hình nghỉ giữa ca cho tất cả bộ phận.")
+                    rerun_current_view()
+                else:
+                    st.error(" | ".join(_msgs))
+
+    # ======================================================
+    # 3. TẠO / SỬA / XÓA CA THEO TỪNG BỘ PHẬN
+    # ======================================================
+    if st.session_state.current_role == "admin":
+        st.markdown("### 🛠️ Tạo / Sửa / Xóa ca theo bộ phận")
+        _dept_tabs = st.tabs([
+            "👥 NV + Leader", "🧑‍💼 Quản lý", "🛎️ Lễ tân", "🔐 Locker", "🧹 Tạp vụ"
+        ])
+        _dept_tab_map = [
+            ("Nhân viên + Leader", _dept_tabs[0]),
+            ("Quản lý", _dept_tabs[1]),
+            ("Lễ tân", _dept_tabs[2]),
+            ("Locker", _dept_tabs[3]),
+            ("Tạp vụ", _dept_tabs[4]),
+        ]
+
+        _defs_all = load_shift_definitions()
+
+        for dep, tab in _dept_tab_map:
+            with tab:
+                _defs = (
+                    _defs_all[
+                        _defs_all["Bộ phận"].astype(str).eq(dep)
+                        & _defs_all["Trạng thái"].astype(str).str.lower().ne("đã xóa")
+                    ].copy()
+                    if isinstance(_defs_all, pd.DataFrame) and not _defs_all.empty
+                    else pd.DataFrame()
                 )
 
-            sb1, sb2 = st.columns(2)
-            with sb1:
-                if st.button(
-                    "💾 Lưu ca làm việc",
-                    use_container_width=True,
-                    key="save_shift_definition_v912",
-                ):
-                    ok, msg = save_shift_definition(
-                        "" if _is_new_shift else _selected_def.get("ID",""),
-                        _shift_name_input,
-                        _shift_start_input,
-                        _shift_end_input,
-                        _shift_note_input,
-                        _shift_order_input,
-                        st.session_state.current_user,
-                    )
-                    (st.success if ok else st.error)(msg)
-                    if ok:
-                        st.session_state.pop("shift_schedule_working_df", None)
-                        st.session_state.pop("shift_schedule_seed_signature", None)
-                        rerun_current_view()
-            with sb2:
-                _delete_confirm = st.checkbox(
-                    "Xác nhận xóa ca",
-                    disabled=_is_new_shift,
-                    key=f"confirm_delete_shift_{_def_pick}",
+                _labels = ["➕ Tạo ca mới"]
+                _lookup = {}
+                if not _defs.empty:
+                    for _, rr in _defs.iterrows():
+                        lbl = _shift_display_label(
+                            rr["Tên ca"], rr["Giờ bắt đầu"], rr["Giờ kết thúc"]
+                        )
+                        if (
+                            str(rr.get("Ghi chú","")).strip().lower() == "không đổi"
+                            and "không đổi" not in lbl.lower()
+                        ):
+                            lbl += " (Không đổi)"
+                        full = f"{rr['ID']} · {lbl}"
+                        _labels.append(full)
+                        _lookup[full] = rr.to_dict()
+
+                _pick = st.selectbox(
+                    f"Chọn ca · {dep}",
+                    _labels,
+                    key=f"shift_def_pick_{normalize_login_name(dep)}_v922",
                 )
-                if st.button(
-                    "🗑️ Xóa ca làm việc",
-                    use_container_width=True,
-                    disabled=_is_new_shift or not _delete_confirm,
-                    key="delete_shift_definition_v912",
-                ):
-                    ok, msg = delete_shift_definition(
-                        _selected_def.get("ID",""),
-                        st.session_state.current_user,
+                _selected = _lookup.get(_pick, {})
+                _is_new = _pick == "➕ Tạo ca mới"
+                _safe_dep = re.sub(r"[^A-Za-z0-9]+", "_", normalize_login_name(dep))
+
+                c1,c2,c3 = st.columns([1.5,1,1])
+                with c1:
+                    _name = st.text_input(
+                        "Tên ca",
+                        value="" if _is_new else str(_selected.get("Tên ca","")),
+                        key=f"shift_name_{_safe_dep}_{_pick}",
+                        placeholder="VD: Ca 1",
                     )
-                    (st.success if ok else st.error)(msg)
-                    if ok:
-                        st.session_state.pop("shift_schedule_working_df", None)
-                        st.session_state.pop("shift_schedule_seed_signature", None)
-                        rerun_current_view()
+                with c2:
+                    _start = st.text_input(
+                        "Giờ bắt đầu",
+                        value="" if _is_new else str(_selected.get("Giờ bắt đầu","")),
+                        key=f"shift_start_{_safe_dep}_{_pick}",
+                        placeholder="10:00",
+                    )
+                with c3:
+                    _end = st.text_input(
+                        "Giờ kết thúc",
+                        value="" if _is_new else str(_selected.get("Giờ kết thúc","")),
+                        key=f"shift_end_{_safe_dep}_{_pick}",
+                        placeholder="23:00",
+                    )
+
+                d1,d2 = st.columns([2,1])
+                with d1:
+                    _note = st.text_input(
+                        "Ghi chú",
+                        value="" if _is_new else str(_selected.get("Ghi chú","")),
+                        key=f"shift_note_{_safe_dep}_{_pick}",
+                    )
+                with d2:
+                    _order = st.number_input(
+                        "Thứ tự",
+                        min_value=1, max_value=999,
+                        value=(
+                            int(_selected.get("Thứ tự", len(_labels)))
+                            if not _is_new else len(_labels)
+                        ),
+                        step=1,
+                        key=f"shift_order_{_safe_dep}_{_pick}",
+                    )
+
+                b1,b2 = st.columns(2)
+                with b1:
+                    if st.button(
+                        "💾 Lưu ca",
+                        use_container_width=True,
+                        key=f"save_shift_{_safe_dep}_v922",
+                    ):
+                        ok,msg = save_shift_definition(
+                            "" if _is_new else _selected.get("ID",""),
+                            _name,_start,_end,_note,_order,
+                            st.session_state.current_user,
+                            department=dep,
+                        )
+                        (st.success if ok else st.error)(msg)
+                        if ok:
+                            st.session_state.pop("shift_schedule_working_df", None)
+                            st.session_state.pop("shift_schedule_seed_signature", None)
+                            rerun_current_view()
+
+                with b2:
+                    _confirm = st.checkbox(
+                        "Xác nhận xóa ca",
+                        disabled=_is_new,
+                        key=f"confirm_delete_{_safe_dep}_{_pick}_v922",
+                    )
+                    if st.button(
+                        "🗑️ Xóa ca",
+                        use_container_width=True,
+                        disabled=_is_new or not _confirm,
+                        key=f"delete_shift_{_safe_dep}_v922",
+                    ):
+                        ok,msg = delete_shift_definition(
+                            _selected.get("ID",""),
+                            st.session_state.current_user,
+                        )
+                        (st.success if ok else st.error)(msg)
+                        if ok:
+                            st.session_state.pop("shift_schedule_working_df", None)
+                            st.session_state.pop("shift_schedule_seed_signature", None)
+                            rerun_current_view()
 
     st.info(
-        "Bộ phận **Nhân viên + Leader** được hiển thị chung. "
-        "Các bộ phận **Lễ tân, Quản lý, Locker, Tạp vụ** được tách riêng. "
-        "Thay đổi trong bảng chỉ ghi Google Sheet khi bấm **Lưu Toàn Bộ Cấu Hình Ca**."
+        "**Nhân viên + Leader** dùng chung danh mục ca. "
+        "**Quản lý, Lễ tân, Locker, Tạp vụ** có danh mục ca riêng. "
+        "Nghỉ giữa ca cũng cấu hình riêng từng bộ phận."
     )
 
+    # ======================================================
+    # 4. PHÂN CA NHÂN VIÊN - TÁCH THEO BỘ PHẬN
+    # ======================================================
     shift_seed_key = "shift_schedule_working_df"
     shift_seed_signature_key = "shift_schedule_seed_signature"
     shift_signature = "|".join(
         f"{normalize_login_name(r.get('Tên nhân viên',''))}:{r.get('Phân quyền','')}:{r.get('Ca làm việc','')}:{r.get('Ngày bắt đầu ca','')}:{r.get('Chu kỳ','')}"
         for _, r in shift_base.iterrows()
     )
-    if shift_seed_key not in st.session_state or st.session_state.get(shift_seed_signature_key) != shift_signature:
+    if (
+        shift_seed_key not in st.session_state
+        or st.session_state.get(shift_seed_signature_key) != shift_signature
+    ):
         st.session_state[shift_seed_key] = shift_base.copy()
         st.session_state[shift_seed_signature_key] = shift_signature
 
@@ -17566,125 +18064,160 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
             file_name=f"Vera-Spa_Template_Ca_{get_vn_today().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
-            help="Template dùng danh mục ca hiện tại của hệ thống."
         )
     with c_import_shift:
         uploaded_shift = st.file_uploader(
             "📤 Import Excel template",
-            type=["xlsx", "xlsm"],
-            key="shift_template_upload",
-            help="Dùng đúng template Export từ hệ thống."
+            type=["xlsx","xlsm"],
+            key="shift_template_upload_v922",
         )
 
     if uploaded_shift is not None:
-        imported_shift, import_err = read_shift_template_excel(uploaded_shift, df_credentials)
+        imported_shift, import_err = read_shift_template_excel(
+            uploaded_shift, df_credentials
+        )
         if import_err:
             st.error(import_err)
         elif not imported_shift.empty:
-            if st.button("✅ Nạp dữ liệu Import vào bảng chỉnh sửa", use_container_width=True, key="apply_shift_import"):
+            if st.button(
+                "✅ Nạp dữ liệu Import vào bảng chỉnh sửa",
+                use_container_width=True,
+                key="apply_shift_import_v922",
+            ):
                 base = get_shift_dataframe(df_credentials).copy()
-                imp_map = {normalize_login_name(r['Tên nhân viên']): r for _, r in imported_shift.iterrows()}
-                for idx, rr in base.iterrows():
-                    key = normalize_login_name(rr.get('Tên nhân viên',''))
-                    if key in imp_map:
-                        ir = imp_map[key]
-                        base.at[idx, 'Ca làm việc'] = str(ir.get('Ca làm việc','')).strip()
-                        base.at[idx, 'Ngày bắt đầu ca'] = str(ir.get('Ngày bắt đầu ca','')).strip()
-                        base.at[idx, 'Chu kỳ'] = str(ir.get('Chu kỳ','')).strip()
+                imp_map = {
+                    normalize_login_name(r["Tên nhân viên"]): r
+                    for _,r in imported_shift.iterrows()
+                }
+                for idx,rr in base.iterrows():
+                    k = normalize_login_name(rr.get("Tên nhân viên",""))
+                    if k in imp_map:
+                        ir = imp_map[k]
+                        base.at[idx,"Ca làm việc"] = str(ir.get("Ca làm việc","")).strip()
+                        base.at[idx,"Ngày bắt đầu ca"] = str(ir.get("Ngày bắt đầu ca","")).strip()
+                        base.at[idx,"Chu kỳ"] = str(ir.get("Chu kỳ","")).strip()
                 st.session_state[shift_seed_key] = base
-                st.success(f"Đã nạp {len(imported_shift)} dòng từ file. Kiểm tra lại rồi bấm Lưu.")
+                st.success(f"Đã nạp {len(imported_shift)} dòng.")
                 rerun_current_view()
 
     working_shift = st.session_state.get(shift_seed_key, shift_base).copy()
 
-    st.markdown("#### 🔎 Bộ lọc")
-    f1, f2, f3, f4 = st.columns([2.1, 1.45, 1.45, 1.45])
-    with f1:
-        filter_shift_name = st.text_input(
-            "Tìm theo tên nhân viên",
-            key="shift_filter_name",
-            placeholder="Gõ tên để lọc..."
-        )
-    with f2:
-        department_filter = st.selectbox(
-            "Lọc theo bộ phận",
-            ["- Tất cả bộ phận -"] + SHIFT_DEPARTMENT_ORDER,
-            key="shift_filter_department_v912",
-        )
-    with f3:
-        shift_filter_value = st.selectbox(
-            "Lọc theo ca",
-            ["- Tất cả ca -"] + _shift_options_live,
-            key="shift_filter_shift"
-        )
-    with f4:
-        cycle_filter_value = st.selectbox(
-            "Lọc theo luân phiên",
-            ["- Tất cả luân phiên -"] + SHIFT_CYCLE_OPTIONS,
-            key="shift_filter_cycle"
-        )
+    st.markdown("### 👥 Phân ca theo từng bộ phận")
+    _assign_tabs = st.tabs([
+        "👥 NV + Leader", "🧑‍💼 Quản lý", "🛎️ Lễ tân", "🔐 Locker", "🧹 Tạp vụ"
+    ])
+    _assign_map = [
+        ("Nhân viên + Leader", _assign_tabs[0]),
+        ("Quản lý", _assign_tabs[1]),
+        ("Lễ tân", _assign_tabs[2]),
+        ("Locker", _assign_tabs[3]),
+        ("Tạp vụ", _assign_tabs[4]),
+    ]
 
-    filtered_shift = working_shift.copy()
-    if str(filter_shift_name).strip():
-        keyq = normalize_login_name(filter_shift_name)
-        filtered_shift = filtered_shift[
-            filtered_shift['Tên nhân viên'].astype(str)
-            .apply(normalize_login_name).str.contains(keyq, regex=False)
-        ]
-    if department_filter != "- Tất cả bộ phận -":
-        filtered_shift = filtered_shift[filtered_shift["Bộ phận"].eq(department_filter)]
-    if shift_filter_value != "- Tất cả ca -":
-        filtered_shift = filtered_shift[filtered_shift['Ca làm việc'].astype(str).eq(shift_filter_value)]
-    if cycle_filter_value != "- Tất cả luân phiên -":
-        filtered_shift = filtered_shift[filtered_shift['Chu kỳ'].astype(str).eq(cycle_filter_value)]
+    _edited_parts = []
+    for dep,tab in _assign_map:
+        with tab:
+            part = working_shift[working_shift["Bộ phận"].eq(dep)].copy()
+            opts = get_shift_options(dep)
+            cfg = _break_cfg.get(dep, SHIFT_BREAK_DEFAULTS[dep])
 
-    st.caption(f"Đang hiển thị {len(filtered_shift)}/{len(working_shift)} nhân viên.")
-    if filtered_shift.empty:
-        st.info("Không có nhân viên phù hợp bộ lọc.")
-    else:
-        with st.form("shift_schedule_batch_form", clear_on_submit=False):
-            edited_df = st.data_editor(
-                filtered_shift,
-                height=min(900, max(160, (len(filtered_shift) * 36) + 42)),
+            st.caption(
+                f"Nghỉ giữa ca: {'✅ Bật' if cfg.get('enabled') else '⛔ Tắt'}"
+                + (
+                    f" · Duration {int(cfg.get('duration_minutes',60))} phút"
+                    if cfg.get("enabled") else ""
+                )
+            )
+
+            if part.empty:
+                st.info("Bộ phận này chưa có nhân viên.")
+                continue
+
+            _safe = re.sub(r"[^A-Za-z0-9]+", "_", normalize_login_name(dep))
+            edited = st.data_editor(
+                part,
+                hide_index=True,
+                width="stretch",
+                height=min(700, max(160, len(part)*36+42)),
+                key=f"shift_assign_{_safe}_v922",
                 column_config={
                     "Tên nhân viên": st.column_config.TextColumn("Tên nhân viên", disabled=True),
                     "Bộ phận": st.column_config.TextColumn("Bộ phận", disabled=True),
                     "Phân quyền": st.column_config.TextColumn("Role", disabled=True),
                     "Ca làm việc": st.column_config.SelectboxColumn(
-                        "Ca làm việc", options=_shift_options_live, width="large"
+                        "Ca làm việc",
+                        options=opts,
+                        width="large",
                     ),
-                    "Ngày bắt đầu ca": st.column_config.TextColumn("Ngày bắt đầu (DD/MM/YYYY)"),
+                    "Ngày bắt đầu ca": st.column_config.TextColumn(
+                        "Ngày bắt đầu (DD/MM/YYYY)"
+                    ),
                     "Chu kỳ": st.column_config.SelectboxColumn(
-                        "Chu kỳ luân phiên", options=SHIFT_CYCLE_OPTIONS, width="medium"
-                    )
+                        "Chu kỳ", options=SHIFT_CYCLE_OPTIONS, width="medium"
+                    ),
                 },
-                disabled=["Tên nhân viên", "Bộ phận", "Phân quyền"],
-                hide_index=True,
-                use_container_width=True,
-                key="shift_schedule_editor_form"
+                disabled=["Tên nhân viên","Bộ phận","Phân quyền"],
             )
-            submit_shift = st.form_submit_button(
-                "💾 Lưu Toàn Bộ Cấu Hình Ca",
-                use_container_width=True
-            )
+            _edited_parts.append(edited)
 
-        if submit_shift:
-            updated_all = working_shift.copy()
-            edit_map = {normalize_login_name(r['Tên nhân viên']): r for _, r in edited_df.iterrows()}
-            for idx, rr in updated_all.iterrows():
-                k = normalize_login_name(rr.get('Tên nhân viên',''))
-                if k in edit_map:
-                    er = edit_map[k]
-                    updated_all.at[idx, 'Ca làm việc'] = str(er.get('Ca làm việc','')).strip()
-                    updated_all.at[idx, 'Ngày bắt đầu ca'] = str(er.get('Ngày bắt đầu ca','')).strip()
-                    updated_all.at[idx, 'Chu kỳ'] = str(er.get('Chu kỳ','')).strip()
-            with st.spinner("Đang lưu đồng loạt vào hệ thống..."):
-                res, msg = batch_update_shift_schedule(updated_all)
+    if st.button(
+        "💾 Lưu toàn bộ phân ca các bộ phận",
+        use_container_width=True,
+        key="save_all_department_shifts_v922",
+    ):
+        if _edited_parts:
+            updated = pd.concat(_edited_parts, ignore_index=True)
+            # Bổ sung các dòng không có editor nếu có.
+            edited_names = set(
+                updated["Tên nhân viên"].astype(str).apply(normalize_login_name)
+            )
+            missing = working_shift[
+                ~working_shift["Tên nhân viên"].astype(str)
+                .apply(normalize_login_name).isin(edited_names)
+            ]
+            if not missing.empty:
+                updated = pd.concat([updated, missing], ignore_index=True)
+
+            with st.spinner("Đang lưu cấu hình ca..."):
+                res,msg = batch_update_shift_schedule(updated)
             (st.success if res else st.error)(msg)
             if res:
                 st.session_state.pop(shift_seed_key, None)
                 st.session_state.pop(shift_seed_signature_key, None)
                 rerun_current_view()
+
+    # ======================================================
+    # 5. KIỂM TRA NGHỈ GIỮA CA TỪ SNAPSHOT TIMESOFT (NẾU CÓ)
+    # ======================================================
+    if st.session_state.current_role == "admin":
+        with st.expander("🕒 Kiểm tra nghỉ giữa ca từ TimeSoft", expanded=False):
+            st.caption(
+                "Hệ thống chỉ tính khi dữ liệu TimeSoft có đủ ít nhất 3 mốc chấm công. "
+                "Lần 2 = bắt đầu nghỉ, lần 3 = kết thúc nghỉ."
+            )
+            _bg = _timesoft_read_background_snapshot(get_vn_today())
+            _chk = _bg.get("employee_checkin") if isinstance(_bg, dict) else None
+            if isinstance(_chk, pd.DataFrame) and not _chk.empty:
+                _break_status = calculate_midshift_break_from_timesoft(
+                    _chk, df_credentials
+                )
+                if not _break_status.empty:
+                    st.dataframe(
+                        _break_status,
+                        hide_index=True,
+                        width="stretch",
+                        height="content",
+                    )
+                else:
+                    st.info(
+                        "Có dữ liệu chấm công nhưng chưa tìm thấy đủ chuỗi check-in "
+                        "để tính nghỉ giữa ca."
+                    )
+            else:
+                st.info(
+                    "Chưa có snapshot chấm công TimeSoft hôm nay. "
+                    "Phần cấu hình nghỉ giữa ca vẫn được lưu và sẽ áp dụng khi có dữ liệu."
+                )
 
 elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff_list"):
     st.subheader("👥 Danh sách nhân sự")

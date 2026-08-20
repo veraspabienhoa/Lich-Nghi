@@ -1,4 +1,4 @@
-# V92.3 - Mỗi ca có Bật/Tắt nghỉ giữa ca + Duration riêng ngay trong Tạo/Sửa/Xóa ca (2026-08-20)
+# V92.6 - Excel phân ca: dropdown cột B tự lấy danh sách ca đúng theo bộ phận từng nhân viên (2026-08-20)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1582,14 +1582,17 @@ components.html("""
             const tokenInUrl = url.searchParams.get('remember_token');
             const savedToken = parentWin.localStorage.getItem(STORAGE_KEY);
 
-            // Token mới sau khi đăng nhập -> lưu trong localStorage (không lưu mật khẩu).
+            // V92.5:
+            // Token mới sau khi đăng nhập -> lưu localStorage và GIỮ trên URL.
+            // Nhờ vậy khi F5/Refresh, server nhận token ngay trong request đầu tiên
+            // và không render lại màn hình Login.
             if (tokenInUrl) {
-                parentWin.localStorage.setItem(STORAGE_KEY, tokenInUrl);
-                // Không để bearer token nằm lâu trên thanh địa chỉ sau khi đã lưu cục bộ.
-                url.searchParams.delete('remember_token');
-                parentWin.history.replaceState({}, '', url.toString());
+                if (savedToken !== tokenInUrl) {
+                    parentWin.localStorage.setItem(STORAGE_KEY, tokenInUrl);
+                }
             } else if (savedToken) {
-                // Lần mở app sau: đưa token trở lại URL để server xác thực.
+                // Trường hợp mở app bằng URL sạch trên cùng thiết bị:
+                // khôi phục token một lần rồi từ đó URL tiếp tục giữ token.
                 url.searchParams.set('remember_token', savedToken);
                 parentWin.location.replace(url.toString());
                 return;
@@ -2648,6 +2651,18 @@ DEFAULT_LEAVE_PAGE_SLUG = "dang-ky-thong-ke-nghi-phep"
 # phải quay lại đúng trang MENU đang mở, không rơi về trang mặc định.
 # ==========================================================
 def rerun_current_view():
+    # V92.5: mọi rerun nội bộ phải giữ remember_token để Refresh/F5 không mất phiên.
+    try:
+        _remember = str(st.session_state.get("vera_remember_token", "") or "").strip()
+        if (
+            st.session_state.get("logged_in")
+            and _remember
+            and str(st.query_params.get("remember_token", "") or "").strip() != _remember
+        ):
+            st.query_params["remember_token"] = _remember
+    except Exception:
+        pass
+
     try:
         _current_page = str(st.session_state.get("app_page", "") or "")
         _page_slugs = globals().get("PAGE_SLUGS", {}) or {}
@@ -4544,81 +4559,241 @@ def get_nhanvien_shift_dataframe(credentials_df):
     return get_shift_dataframe(credentials_df)
 
 def build_shift_template_excel_bytes(credentials_df):
-    """Tạo template Excel phân ca có dropdown ở Ca làm việc và Chu kỳ luân phiên."""
+    """
+    V92.6 - Export template phân ca:
+    - Cột B = Ca làm việc.
+    - Dropdown cột B của từng nhân viên chỉ hiện ca thuộc đúng bộ phận.
+    - leader + nhanvien dùng chung Nhân viên + Leader.
+    - quanly / letan / locker / tapvu dùng danh mục riêng.
+    """
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.worksheet.datavalidation import DataValidation
     from openpyxl.utils import get_column_letter
 
-    d = get_nhanvien_shift_dataframe(credentials_df)
+    d = get_nhanvien_shift_dataframe(credentials_df).copy()
+
     wb = Workbook()
     ws = wb.active
-    ws.title = 'ThietLapCa'
-    headers = ['Tên nhân viên', 'Ca làm việc', 'Ngày bắt đầu ca', 'Chu kỳ luân phiên']
+    ws.title = "ThietLapCa"
+
+    headers = [
+        "Tên nhân viên",
+        "Ca làm việc",
+        "Ngày bắt đầu ca",
+        "Chu kỳ luân phiên",
+        "Bộ phận",
+    ]
     ws.append(headers)
+
     for _, r in d.iterrows():
         ws.append([
-            str(r.get('Tên nhân viên','')).strip(),
-            str(r.get('Ca làm việc','')).strip(),
-            str(r.get('Ngày bắt đầu ca','')).strip(),
-            str(r.get('Chu kỳ','')).strip(),
+            str(r.get("Tên nhân viên","")).strip(),
+            str(r.get("Ca làm việc","")).strip(),
+            str(r.get("Ngày bắt đầu ca","")).strip(),
+            str(r.get("Chu kỳ","")).strip(),
+            str(r.get("Bộ phận","")).strip(),
         ])
 
-    fill = PatternFill('solid', fgColor='A1948C')
-    thin = Side(style='thin', color='D9D9D9')
+    # Style.
+    fill = PatternFill("solid", fgColor="A1948C")
+    thin = Side(style="thin", color="D9D9D9")
     for cell in ws[1]:
         cell.fill = fill
-        cell.font = Font(bold=True, color='000000')
-        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    for row in ws.iter_rows(min_row=1, max_row=max(2, ws.max_row), min_col=1, max_col=4):
+        cell.font = Font(bold=True, color="000000")
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
+        )
+
+    for row in ws.iter_rows(
+        min_row=1,
+        max_row=max(2, ws.max_row),
+        min_col=1,
+        max_col=5,
+    ):
         for cell in row:
-            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-            cell.alignment = Alignment(vertical='center', wrap_text=False)
-    widths = [24, 30, 22, 24]
+            cell.border = Border(
+                left=thin, right=thin, top=thin, bottom=thin
+            )
+            cell.alignment = Alignment(vertical="center", wrap_text=False)
+
+    widths = [24, 32, 22, 24, 24]
     for i, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
-    ws.freeze_panes = 'A2'
-    ws.auto_filter.ref = f'A1:D{max(2, ws.max_row)}'
 
-    dm = wb.create_sheet('DanhMuc')
-    dm['A1'] = 'Ca làm việc'; dm['B1'] = 'Chu kỳ luân phiên'
-    _shift_options = get_shift_options_all()
-    for i, v in enumerate(_shift_options, start=2): dm.cell(i, 1, v)
-    for i, v in enumerate(SHIFT_CYCLE_OPTIONS, start=2): dm.cell(i, 2, v)
-    dm.sheet_state = 'hidden'
+    # Cột E chỉ dùng để xác định bộ phận cho dropdown, ẩn khỏi người dùng.
+    ws.column_dimensions["E"].hidden = True
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:D{max(2, ws.max_row)}"
+
+    # ------------------------------------------------------
+    # DANH MỤC CA RIÊNG THEO BỘ PHẬN
+    # ------------------------------------------------------
+    dm = wb.create_sheet("DanhMuc")
+    dm["A1"] = "Chu kỳ luân phiên"
+
+    for i, v in enumerate(SHIFT_CYCLE_OPTIONS, start=2):
+        dm.cell(i, 1, v)
+
+    # Mỗi bộ phận = 1 cột riêng trong sheet ẩn.
+    dept_col_map = {}
+    for col_idx, dep in enumerate(SHIFT_DEPARTMENT_ORDER, start=2):
+        dept_col_map[dep] = col_idx
+        dm.cell(1, col_idx, dep)
+
+        options = get_shift_options(dep)
+        for row_idx, value in enumerate(options, start=2):
+            dm.cell(row_idx, col_idx, value)
+
+    dm.sheet_state = "hidden"
+
+    # ------------------------------------------------------
+    # DROPDOWN CỘT B THEO ĐÚNG BỘ PHẬN TỪNG NHÂN VIÊN
+    # ------------------------------------------------------
+    dept_validations = {}
+
+    for dep in SHIFT_DEPARTMENT_ORDER:
+        col_idx = dept_col_map[dep]
+        col_letter = get_column_letter(col_idx)
+        options = get_shift_options(dep)
+
+        if not options:
+            continue
+
+        dv = DataValidation(
+            type="list",
+            formula1=f"=DanhMuc!${col_letter}$2:${col_letter}${len(options)+1}",
+            allow_blank=True,
+        )
+        dv.error = f"Chỉ được chọn ca thuộc bộ phận {dep}."
+        dv.errorTitle = "Ca làm việc không hợp lệ"
+        dv.prompt = f"Chọn ca của bộ phận {dep}."
+        dv.promptTitle = "Danh sách ca"
+        dv.showErrorMessage = True
+        dv.showInputMessage = True
+        ws.add_data_validation(dv)
+        dept_validations[dep] = dv
+
+    # Gán dropdown B cho đúng dòng nhân viên.
+    for excel_row in range(2, ws.max_row + 1):
+        dep = str(ws.cell(excel_row, 5).value or "").strip()
+        dv = dept_validations.get(dep)
+        if dv is not None:
+            dv.add(ws[f"B{excel_row}"])
+
+    # Chu kỳ vẫn dùng chung.
+    dv_cycle = DataValidation(
+        type="list",
+        formula1=f"=DanhMuc!$A$2:$A${len(SHIFT_CYCLE_OPTIONS)+1}",
+        allow_blank=True,
+    )
+    ws.add_data_validation(dv_cycle)
 
     max_target_row = max(300, ws.max_row + 100)
-    dv_shift = DataValidation(type='list', formula1=f"=DanhMuc!$A$2:$A${len(_shift_options)+1}", allow_blank=True)
-    dv_cycle = DataValidation(type='list', formula1=f"=DanhMuc!$B$2:$B${len(SHIFT_CYCLE_OPTIONS)+1}", allow_blank=True)
-    ws.add_data_validation(dv_shift); ws.add_data_validation(dv_cycle)
-    dv_shift.add(f'B2:B{max_target_row}')
-    dv_cycle.add(f'D2:D{max_target_row}')
+    dv_cycle.add(f"D2:D{max_target_row}")
 
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
 
+
 def read_shift_template_excel(uploaded_file, credentials_df):
-    """Đọc template đã nhập và chỉ nhận tên thuộc role nhanvien hiện tại."""
+    """
+    V92.6:
+    Đọc template và chỉ chấp nhận ca thuộc đúng bộ phận của từng nhân viên.
+    """
     try:
-        raw = pd.read_excel(uploaded_file, sheet_name='ThietLapCa', dtype=str, engine='openpyxl').fillna('')
+        raw = pd.read_excel(
+            uploaded_file,
+            sheet_name="ThietLapCa",
+            dtype=str,
+            engine="openpyxl",
+        ).fillna("")
     except Exception as e:
-        return pd.DataFrame(), f'Không đọc được file template: {e}'
-    raw = raw.rename(columns={'Chu kỳ luân phiên': 'Chu kỳ'})
-    required = ['Tên nhân viên', 'Ca làm việc', 'Ngày bắt đầu ca', 'Chu kỳ']
+        return pd.DataFrame(), f"Không đọc được file template: {e}"
+
+    raw = raw.rename(columns={"Chu kỳ luân phiên": "Chu kỳ"})
+    required = [
+        "Tên nhân viên",
+        "Ca làm việc",
+        "Ngày bắt đầu ca",
+        "Chu kỳ",
+    ]
     missing = [c for c in required if c not in raw.columns]
     if missing:
-        return pd.DataFrame(), 'Thiếu cột: ' + ', '.join(missing)
-    allowed = get_nhanvien_shift_dataframe(credentials_df)
-    allowed_keys = {normalize_login_name(x) for x in allowed['Tên nhân viên'].astype(str).tolist()}
+        return pd.DataFrame(), "Thiếu cột: " + ", ".join(missing)
+
+    allowed = get_nhanvien_shift_dataframe(credentials_df).copy()
+    if allowed.empty:
+        return pd.DataFrame(columns=required), ""
+
+    employee_meta = {}
+    for _, r in allowed.iterrows():
+        key = normalize_login_name(r.get("Tên nhân viên", ""))
+        if not key:
+            continue
+        employee_meta[key] = {
+            "department": str(r.get("Bộ phận", "")).strip(),
+        }
+
     raw = raw[required].copy()
-    raw = raw[raw['Tên nhân viên'].astype(str).apply(normalize_login_name).isin(allowed_keys)].copy()
-    _shift_options = get_shift_options_all()
-    raw['Ca làm việc'] = raw['Ca làm việc'].astype(str).where(raw['Ca làm việc'].astype(str).isin(_shift_options), '')
-    raw['Chu kỳ'] = raw['Chu kỳ'].astype(str).where(raw['Chu kỳ'].astype(str).isin(SHIFT_CYCLE_OPTIONS), '')
-    raw['_sort'] = raw['Tên nhân viên'].astype(str).apply(normalize_login_name)
-    raw = raw.sort_values('_sort', kind='stable').drop(columns=['_sort']).reset_index(drop=True)
-    return raw, ''
+    raw["_employee_key"] = (
+        raw["Tên nhân viên"].astype(str).apply(normalize_login_name)
+    )
+    raw = raw[
+        raw["_employee_key"].isin(set(employee_meta.keys()))
+    ].copy()
+
+    invalid_rows = []
+    validated_shift = []
+
+    for idx, row in raw.iterrows():
+        emp_key = row["_employee_key"]
+        dep = employee_meta.get(emp_key, {}).get("department", "")
+        shift_value = str(row.get("Ca làm việc", "")).strip()
+        valid_options = get_shift_options(dep)
+
+        if shift_value and shift_value not in valid_options:
+            invalid_rows.append(
+                f"{row.get('Tên nhân viên','')} → {shift_value} ({dep})"
+            )
+            validated_shift.append("")
+        else:
+            validated_shift.append(shift_value)
+
+    raw["Ca làm việc"] = validated_shift
+    raw["Chu kỳ"] = (
+        raw["Chu kỳ"].astype(str)
+        .where(
+            raw["Chu kỳ"].astype(str).isin(SHIFT_CYCLE_OPTIONS),
+            "",
+        )
+    )
+
+    raw = raw.drop(columns=["_employee_key"])
+    raw["_sort"] = (
+        raw["Tên nhân viên"].astype(str).apply(normalize_login_name)
+    )
+    raw = (
+        raw.sort_values("_sort", kind="stable")
+        .drop(columns=["_sort"])
+        .reset_index(drop=True)
+    )
+
+    if invalid_rows:
+        preview = "; ".join(invalid_rows[:8])
+        extra = (
+            f" và {len(invalid_rows)-8} dòng khác"
+            if len(invalid_rows) > 8
+            else ""
+        )
+        return raw, (
+            "Có ca không thuộc đúng bộ phận nên hệ thống đã làm trống ô Ca làm việc: "
+            + preview + extra
+        )
+
+    return raw, ""
+
 
 # --- GHI NHẬN HÀNG LOẠT CA LÀM VIỆC TỪ DATAFRAME ---
 def batch_update_shift_schedule(edited_df):
@@ -8663,7 +8838,7 @@ UI_THEME_KEY = "global"
 
 UI_THEME_GROUP_ORDER = [
     "brand_header", "main_title", "sub_title", "small_title", "label_content",
-    "table", "button", "input", "select", "expander",
+    "table", "button", "input", "select", "choice_control", "expander",
     "metric", "tabs", "sidebar_menu", "card_box",
     "tooltip_popover", "scrollbar", "modal_dialog", "page_layout",
 ]
@@ -8676,7 +8851,8 @@ UI_THEME_GROUP_LABELS = {
     "table": "Tất cả bảng",
     "button": "Tất cả nút bấm",
     "input": "Ô nhập liệu / Date / Number / TextArea",
-    "select": "Selectbox / Multiselect",
+    "select": "Dropdown / Selectbox / Multiselect",
+    "choice_control": "Checkbox / Radio / Toggle / Upload",
     "expander": "Expander / Khối mở rộng",
     "metric": "Metric / Chỉ số",
     "tabs": "Tabs",
@@ -8758,12 +8934,34 @@ UI_THEME_DEFAULT = {
         "mobile":  _ui_device_defaults(16, 40, 8, 5, 8, "#222222", "#FFFFFF"),
     },
     "input": {
-        "desktop": _ui_device_defaults(16, 40, 10, 6, 7, "#333333", "#FFFFFF"),
-        "mobile":  _ui_device_defaults(16, 40, 7, 5, 7, "#333333", "#FFFFFF"),
+        "desktop": _ui_device_defaults(
+            16, 42, 10, 6, 7, "#222222", "#FFFFFF",
+            border_width=2, border_color="#2F80ED", box_shadow="Nhẹ"
+        ),
+        "mobile":  _ui_device_defaults(
+            16, 44, 7, 5, 7, "#222222", "#FFFFFF",
+            border_width=2, border_color="#2F80ED", box_shadow="Nhẹ"
+        ),
     },
     "select": {
-        "desktop": _ui_device_defaults(16, 40, 10, 6, 7, "#333333", "#F5F6FA"),
-        "mobile":  _ui_device_defaults(16, 40, 7, 5, 7, "#333333", "#F5F6FA"),
+        "desktop": _ui_device_defaults(
+            16, 42, 10, 6, 7, "#222222", "#FFFFFF",
+            border_width=2, border_color="#2F80ED", box_shadow="Nhẹ"
+        ),
+        "mobile":  _ui_device_defaults(
+            16, 44, 7, 5, 7, "#222222", "#FFFFFF",
+            border_width=2, border_color="#2F80ED", box_shadow="Nhẹ"
+        ),
+    },
+    "choice_control": {
+        "desktop": _ui_device_defaults(
+            16, 40, 8, 5, 7, "#222222", "#FFFFFF",
+            border_width=2, border_color="#2F80ED", box_shadow="Không"
+        ),
+        "mobile": _ui_device_defaults(
+            16, 42, 6, 4, 7, "#222222", "#FFFFFF",
+            border_width=2, border_color="#2F80ED", box_shadow="Không"
+        ),
     },
     "expander": {
         "desktop": _ui_device_defaults(18, 0, 10, 7, 8, "#222222", "#D9D9D9"),
@@ -8888,6 +9086,14 @@ def _normalized_theme_config(raw=None):
             "desktop": _normalize_device_theme(incoming_group.get("desktop"), base_group["desktop"]),
             "mobile": _normalize_device_theme(incoming_group.get("mobile"), base_group["mobile"]),
         }
+
+        # V92.4: mọi control nhập/chọn luôn phải có viền rõ, không được trùng màu nền.
+        if key in {"input", "select", "choice_control"}:
+            for device in ("desktop", "mobile"):
+                item = result[key][device]
+                item["border_width"] = max(2, int(item.get("border_width", 2) or 2))
+                if str(item.get("border_color", "")).strip().upper() == str(item.get("bg_color", "")).strip().upper():
+                    item["border_color"] = "#2F80ED"
     return result
 
 
@@ -9028,8 +9234,24 @@ def _global_theme_rules_for_device(cfg, device):
         "label_content": "p,.stText,[data-testid='stMarkdownContainer'],[data-testid='stWidgetLabel'],[data-testid='stCaptionContainer']",
         "table": "table,table th,table td,[data-testid='stDataFrame'],[data-testid='stDataEditor'],[data-testid='stTable']",
         "button": "div.stButton>button,div[data-testid='stDownloadButton']>button,div[data-testid='stFormSubmitButton']>button,button[kind]",
-        "input": "input,textarea,[data-testid='stTextInput'] input,[data-testid='stNumberInput'] input,[data-testid='stDateInput'] input",
-        "select": "[data-baseweb='select']>div,[data-testid='stSelectbox'] [data-baseweb='select']>div,[data-testid='stMultiSelect'] [data-baseweb='select']>div",
+        "input": (
+            "[data-testid='stTextInput'] [data-baseweb='input'],"
+            "[data-testid='stNumberInput'] [data-baseweb='input'],"
+            "[data-testid='stDateInput'] [data-baseweb='input'],"
+            "[data-testid='stTimeInput'] [data-baseweb='input'],"
+            "[data-testid='stTextArea'] [data-baseweb='textarea'],"
+            "[data-testid='stTextArea'] textarea"
+        ),
+        "select": (
+            "[data-testid='stSelectbox'] [data-baseweb='select']>div,"
+            "[data-testid='stMultiSelect'] [data-baseweb='select']>div"
+        ),
+        "choice_control": (
+            "[data-testid='stCheckbox'],"
+            "[data-testid='stRadio'] > div,"
+            "[data-testid='stToggle'],"
+            "[data-testid='stFileUploaderDropzone']"
+        ),
         "expander": "[data-testid='stExpander'] details,[data-testid='stExpander'] details summary",
         "metric": "[data-testid='stMetric'],[data-testid='stMetricLabel'],[data-testid='stMetricValue']",
         "tabs": "[data-testid='stTabs'] button,[data-testid='stTabs'] [role='tab']",
@@ -9090,7 +9312,7 @@ def _global_theme_rules_for_device(cfg, device):
     )
 
     # controls
-    for key in ["button", "input", "select", "tabs", "sidebar_menu"]:
+    for key in ["button", "input", "select", "choice_control", "tabs", "sidebar_menu"]:
         item = c[key]
         rules.append(f"{selectors[key]}{{{style(item, height=True)}}}")
         if item["effect"] == "Hover nâng":
@@ -9126,12 +9348,22 @@ def _global_theme_rules_for_device(cfg, device):
 
     # Hover states cho các element tương tác chính.
     # V88.4: không hover đổi màu Card/Box/Div cha; chỉ element tương tác trực tiếp.
-    for key in ["button", "select", "tabs", "sidebar_menu", "input"]:
+    for key in ["button", "select", "choice_control", "tabs", "sidebar_menu", "input"]:
         item = c[key]
         sel = selectors[key]
         hover.append(
             f"{sel}:hover{{background:{item.get('hover_bg','#F2F2F2')}!important;"
             f"color:{item.get('hover_text','#222222')}!important;}}"
+        )
+
+    # V92.4 - Focus của ô nhập/chọn phải nổi bật hơn nữa.
+    for key in ["input", "select", "choice_control"]:
+        item = c[key]
+        sel = selectors[key]
+        focus_color = item.get("border_color", "#2F80ED")
+        rules.append(
+            f"{sel}:focus-within{{border-color:{focus_color}!important;"
+            f"box-shadow:0 0 0 2px {focus_color}33!important;}}"
         )
 
     # Disabled state.
@@ -9193,6 +9425,71 @@ def render_global_ui_theme_css(config=None):
 {mobile_css}
 }}
 {_dt_css}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+    # V92.4 safety net: BaseWeb đôi khi vẽ viền ở inner div.
+    _ctl_d = cfg["input"]["desktop"]
+    _sel_d = cfg["select"]["desktop"]
+    _choice_d = cfg["choice_control"]["desktop"]
+    _ctl_m = cfg["input"]["mobile"]
+    _sel_m = cfg["select"]["mobile"]
+    _choice_m = cfg["choice_control"]["mobile"]
+    st.markdown(
+        f"""
+<style id="vera-strong-control-border-v924">
+[data-testid='stTextInput'] [data-baseweb='input'],
+[data-testid='stNumberInput'] [data-baseweb='input'],
+[data-testid='stDateInput'] [data-baseweb='input'],
+[data-testid='stTimeInput'] [data-baseweb='input'],
+[data-testid='stTextArea'] [data-baseweb='textarea'] {{
+    border:{max(2,int(_ctl_d.get('border_width',2)))}px solid {_ctl_d.get('border_color','#2F80ED')}!important;
+    background:{_ctl_d.get('bg_color','#FFFFFF')}!important;
+    border-radius:{int(_ctl_d.get('radius',7))}px!important;
+}}
+[data-testid='stSelectbox'] [data-baseweb='select']>div,
+[data-testid='stMultiSelect'] [data-baseweb='select']>div {{
+    border:{max(2,int(_sel_d.get('border_width',2)))}px solid {_sel_d.get('border_color','#2F80ED')}!important;
+    background:{_sel_d.get('bg_color','#FFFFFF')}!important;
+    border-radius:{int(_sel_d.get('radius',7))}px!important;
+}}
+[data-testid='stCheckbox'],
+[data-testid='stRadio'] > div,
+[data-testid='stToggle'],
+[data-testid='stFileUploaderDropzone'] {{
+    border:{max(2,int(_choice_d.get('border_width',2)))}px solid {_choice_d.get('border_color','#2F80ED')}!important;
+    background:{_choice_d.get('bg_color','#FFFFFF')}!important;
+    border-radius:{int(_choice_d.get('radius',7))}px!important;
+    padding:{int(_choice_d.get('padding_y',5))}px {int(_choice_d.get('padding_x',8))}px!important;
+}}
+@media (max-width:768px) {{
+    [data-testid='stTextInput'] [data-baseweb='input'],
+    [data-testid='stNumberInput'] [data-baseweb='input'],
+    [data-testid='stDateInput'] [data-baseweb='input'],
+    [data-testid='stTimeInput'] [data-baseweb='input'],
+    [data-testid='stTextArea'] [data-baseweb='textarea'] {{
+        border:{max(2,int(_ctl_m.get('border_width',2)))}px solid {_ctl_m.get('border_color','#2F80ED')}!important;
+        background:{_ctl_m.get('bg_color','#FFFFFF')}!important;
+        border-radius:{int(_ctl_m.get('radius',7))}px!important;
+    }}
+    [data-testid='stSelectbox'] [data-baseweb='select']>div,
+    [data-testid='stMultiSelect'] [data-baseweb='select']>div {{
+        border:{max(2,int(_sel_m.get('border_width',2)))}px solid {_sel_m.get('border_color','#2F80ED')}!important;
+        background:{_sel_m.get('bg_color','#FFFFFF')}!important;
+        border-radius:{int(_sel_m.get('radius',7))}px!important;
+    }}
+    [data-testid='stCheckbox'],
+    [data-testid='stRadio'] > div,
+    [data-testid='stToggle'],
+    [data-testid='stFileUploaderDropzone'] {{
+        border:{max(2,int(_choice_m.get('border_width',2)))}px solid {_choice_m.get('border_color','#2F80ED')}!important;
+        background:{_choice_m.get('bg_color','#FFFFFF')}!important;
+        border-radius:{int(_choice_m.get('radius',7))}px!important;
+        padding:{int(_choice_m.get('padding_y',4))}px {int(_choice_m.get('padding_x',6))}px!important;
+    }}
+}}
 </style>
 """,
         unsafe_allow_html=True,
@@ -10219,6 +10516,14 @@ def render_admin_theme_config_panel():
         )
         if err:
             st.warning(err)
+
+        st.info(
+            "🎯 Để chỉnh viền ô nhập/chọn, tìm 3 dòng: "
+            "**Ô nhập liệu / Date / Number / TextArea**, "
+            "**Dropdown / Selectbox / Multiselect**, "
+            "**Checkbox / Radio / Toggle / Upload**. "
+            "Chỉnh **Viền px** và **Màu viền** riêng cho Web và Mobile."
+        )
 
         web_col, mobile_col = st.columns(2)
         with web_col:
@@ -15270,12 +15575,15 @@ if "logged_in" not in st.session_state:
     st.session_state.current_role = ""
 if "birthday_login_event" not in st.session_state:
     st.session_state.birthday_login_event = False
+if "vera_remember_token" not in st.session_state:
+    st.session_state.vera_remember_token = ""
 
 # Tự đăng nhập bằng token đã nhớ (không lưu mật khẩu ở localStorage).
 if not st.session_state.logged_in:
     try:
         remembered_token = st.query_params.get('remember_token', '')
         if _is_valid_fallback_admin_token(remembered_token):
+            st.session_state.vera_remember_token = str(remembered_token)
             st.session_state.logged_in = True
             st.session_state.current_user = "Quản Trị Viên"
             st.session_state.current_role = "admin"
@@ -15283,13 +15591,15 @@ if not st.session_state.logged_in:
         else:
             remembered_row = validate_remember_token(remembered_token, df_credentials) if remembered_token else None
             if remembered_row is not None:
+                st.session_state.vera_remember_token = str(remembered_token)
                 st.session_state.logged_in = True
                 st.session_state.current_user = str(remembered_row['Tên nhân viên']).strip()
                 st.session_state.current_role = str(remembered_row.get('Phân quyền', 'nhanvien')).strip().lower()
                 st.session_state.birthday_login_event = True
                 _set_default_page_after_login(st.session_state.current_role)
             elif remembered_token:
-                # Token bị khóa/sai/đã thu hồi -> xóa khỏi trình duyệt.
+                # Token bị khóa/sai/đã thu hồi -> xóa khỏi trình duyệt và session.
+                st.session_state.vera_remember_token = ""
                 st.query_params['forget_login'] = '1'
                 try: del st.query_params['remember_token']
                 except Exception: pass
@@ -15520,7 +15830,7 @@ div[data-testid="stFormSubmitButton"]>button{
     with st.form("login_form"):
         username_input = st.text_input("Tên đăng nhập", autocomplete="username").strip()
         password_input = st.text_input("Mật khẩu", type="password", autocomplete="current-password")
-        st.caption("🔐 Thiết bị này sẽ duy trì đăng nhập cho tới khi bạn bấm Đăng xuất.")
+        st.caption("🔐 Thiết bị này sẽ giữ đăng nhập kể cả khi Refresh/F5, cho tới khi bạn bấm Đăng xuất.")
 
         # V90.5: 2 nút xếp dọc/full-width để mobile không bị cắt hoặc ép hẹp.
         save_credentials_submit = st.form_submit_button(
@@ -15542,7 +15852,9 @@ div[data-testid="stFormSubmitButton"]>button{
                 st.session_state.current_role = "admin"
                 st.session_state.birthday_login_event = True
                 # Admin dự phòng cũng được duy trì đăng nhập cho tới khi bấm Đăng xuất.
-                st.query_params['remember_token'] = _fallback_admin_remember_token()
+                _admin_token = _fallback_admin_remember_token()
+                st.session_state.vera_remember_token = _admin_token
+                st.query_params['remember_token'] = _admin_token
                 rerun_current_view()
             else:
                 user_found = False
@@ -15583,6 +15895,7 @@ div[data-testid="stFormSubmitButton"]>button{
                 elif user_found:
                     token = create_remember_token(st.session_state.current_user)
                     if token:
+                        st.session_state.vera_remember_token = str(token)
                         st.query_params['remember_token'] = token
                     rerun_current_view()
                 elif (
@@ -16744,6 +17057,7 @@ with col_logout:
         st.session_state.current_user = ""
         st.session_state.current_role = ""
         st.session_state.birthday_login_event = False
+        st.session_state.vera_remember_token = ""
         st.session_state.pop("birthday_notice_count_today", None)
         st.session_state.pop("birthday_notice_muted_today", None)
         st.session_state.pop("app_page", None)

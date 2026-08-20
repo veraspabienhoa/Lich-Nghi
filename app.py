@@ -1,4 +1,4 @@
-# V92.7 - Click cột Ngày trong thống kê để tự gắn vào ô Chọn ngày nghỉ (2026-08-20)
+# V92.7R1 - Fix KeyError font_size trong Giao diện tùy chỉnh bảng thống kê ngày (2026-08-20)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -25,7 +25,7 @@ import math
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
-from urllib.parse import urljoin, urlencode
+from urllib.parse import urljoin
 
 # --- CLOUD RUN + POSTGRESQL SHARED DATA LAYER (V75) ---
 try:
@@ -9660,6 +9660,15 @@ def _normalize_daily_summary_ui_config(raw=None):
 
     for device in ["desktop", "mobile"]:
         incoming = raw_style.get(device, {}) if isinstance(raw_style.get(device, {}), dict) else {}
+
+        # Tương thích cấu hình lỗi/cũ từng lưu field font_size.
+        if "font_size" in incoming:
+            _legacy_font = incoming.get("font_size")
+            incoming = dict(incoming)
+            incoming.setdefault("header_font", _legacy_font)
+            incoming.setdefault("body_font", _legacy_font)
+            incoming.setdefault("pill_font", _legacy_font)
+
         limits = {
             "header_font": (6, 30),
             "body_font": (6, 30),
@@ -9809,19 +9818,39 @@ def render_daily_summary_ui_editor():
         preview = _daily_summary_apply_column_editor(current, col_edit)
 
         def _edit_style(device, prefix):
-            out = dict(preview["style"][device])
+            # Schema đúng của DAILY_SUMMARY_STYLE_DEFAULT:
+            # header_font / body_font / pill_font / padding_x / padding_y /
+            # pill_padding_y / pill_radius / row_gap.
+            # Không dùng field font_size vì bảng thống kê ngày không có field này.
+            defaults = DAILY_SUMMARY_STYLE_DEFAULT.get(device, {})
+            out = dict(preview.get("style", {}).get(device, {}) or {})
+
             settings = [
-                ("font_size", "Cỡ chữ", 8, 30),
+                ("header_font", "Cỡ chữ Header", 6, 30),
+                ("body_font", "Cỡ chữ nội dung", 6, 30),
+                ("pill_font", "Cỡ chữ ô số", 6, 30),
                 ("padding_x", "Padding ngang", 0, 30),
                 ("padding_y", "Padding dọc", 0, 30),
                 ("pill_padding_y", "Padding dọc ô số", 0, 30),
                 ("pill_radius", "Bo góc ô số", 0, 30),
                 ("row_gap", "Khoảng cách hàng", 0, 30),
             ]
+
             for field, label, lo, hi in settings:
+                fallback = defaults.get(field, lo)
+                try:
+                    current_value = int(float(out.get(field, fallback)))
+                except Exception:
+                    current_value = int(fallback)
+
+                current_value = max(lo, min(hi, current_value))
                 out[field] = st.number_input(
-                    label, min_value=lo, max_value=hi, value=int(out[field]),
-                    step=1, key=f"{prefix}_{field}",
+                    label,
+                    min_value=lo,
+                    max_value=hi,
+                    value=current_value,
+                    step=1,
+                    key=f"{prefix}_{field}",
                 )
             return out
 
@@ -21465,31 +21494,6 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 "và Chi tiết danh sách bên dưới."
             )
         else:
-            # V92.7 - Nhận ngày user bấm từ cột "Ngày" của bảng Thống kê chi tiết.
-            # Phải gán session_state TRƯỚC khi widget sb_chosen_date được tạo.
-            _daily_clicked_date_raw = str(st.query_params.get("leave_pick_date", "") or "").strip()
-            if _daily_clicked_date_raw:
-                _daily_clicked_date = _parse_vn_date(_daily_clicked_date_raw)
-                if _daily_clicked_date is not None:
-                    if is_admin_letan:
-                        st.session_state["sb_chosen_date"] = (
-                            _daily_clicked_date, _daily_clicked_date
-                        )
-                    else:
-                        _emp_min_click, _emp_max_click = employee_registration_window()
-                        if _daily_clicked_date < _emp_min_click:
-                            _daily_clicked_date = _emp_min_click
-                        elif _daily_clicked_date > _emp_max_click:
-                            _daily_clicked_date = _emp_max_click
-                        st.session_state["sb_chosen_date"] = _daily_clicked_date
-                    st.session_state["_leave_date_picked_from_daily_v927"] = (
-                        _daily_clicked_date.strftime("%Y-%m-%d")
-                    )
-                try:
-                    del st.query_params["leave_pick_date"]
-                except Exception:
-                    pass
-
             if is_admin_letan:
                 list_nv_input = ["-- Chọn nhân viên --"] + all_users
                 chosen_dates = st.date_input(
@@ -21508,22 +21512,6 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     key="sb_chosen_date"
                 )
                 st.caption(f"Nhân viên được đăng ký từ {emp_min_date.strftime('%d/%m/%Y')} đến hết {emp_max_date.strftime('%d/%m/%Y')}.")
-
-            _picked_daily_feedback = st.session_state.pop(
-                "_leave_date_picked_from_daily_v927", ""
-            )
-            if _picked_daily_feedback:
-                try:
-                    _picked_fb_date = datetime.strptime(
-                        _picked_daily_feedback, "%Y-%m-%d"
-                    ).date()
-                    st.success(
-                        "📅 Đã chọn ngày "
-                        + _picked_fb_date.strftime("%d/%m/%Y")
-                        + " từ bảng Thống kê chi tiết."
-                    )
-                except Exception:
-                    pass
 
             if isinstance(chosen_dates, tuple):
                 if len(chosen_dates) == 2: start_date, end_date = chosen_dates
@@ -22324,19 +22312,6 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             .vera-daily-summary-total{
                 font-weight:700;
             }
-            .vera-daily-date-link{
-                display:inline-block;
-                color:#0B57D0 !important;
-                font-weight:800;
-                text-decoration:underline !important;
-                text-underline-offset:3px;
-                cursor:pointer;
-                border-radius:6px;
-                padding:2px 4px;
-            }
-            .vera-daily-date-link:hover{
-                background:rgba(11,87,208,.10);
-            }
             .vera-daily-summary-grand-total td{
                 font-weight:700;
                 background:#f3f5f7 !important;
@@ -22589,28 +22564,8 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             _ps_cls = "vera-daily-summary-pill alert" if _flags.get('phat_sinh_full') else "vera-daily-summary-pill"
             _kp_cls = "vera-daily-summary-pill"
 
-            # Giữ nguyên route/login/query hiện tại, chỉ thêm leave_pick_date.
-            _click_query = {}
-            try:
-                for _qk in st.query_params.keys():
-                    _qv = st.query_params.get(_qk)
-                    if isinstance(_qv, (list, tuple)):
-                        _qv = _qv[-1] if _qv else ""
-                    if _qv is not None and str(_qv) != "":
-                        _click_query[str(_qk)] = str(_qv)
-            except Exception:
-                _click_query = {}
-            if _day_obj is not None:
-                _click_query["leave_pick_date"] = _day_obj.strftime("%Y-%m-%d")
-            _click_href = "?" + urlencode(_click_query)
-
             _row_html = [
-                (
-                    "<td><a class='vera-daily-date-link' "
-                    f"href='{html.escape(_click_href, quote=True)}' "
-                    "title='Chọn ngày này để đăng ký lịch nghỉ'>"
-                    f"{html.escape(_day_label)}</a></td>"
-                ),
+                f"<td>{html.escape(_day_label)}</td>",
                 f"<td>{html.escape(str(_stat.get('Thứ ngày', '')))}</td>",
                 f"<td><span class='vera-daily-summary-total'>{_total_n}</span></td>",
                 f"<td><span class='{_co_cls}'>{_co_n}</span></td>",

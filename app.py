@@ -1,4 +1,4 @@
-# V92.6 - Excel phân ca: dropdown cột B tự lấy danh sách ca đúng theo bộ phận từng nhân viên (2026-08-20)
+# V92.8 - Click ngày giữ nguyên tuyệt đối bộ lọc thời gian/nhân viên khi tiếp tục đăng ký (2026-08-20)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -25,7 +25,7 @@ import math
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlencode
 
 # --- CLOUD RUN + POSTGRESQL SHARED DATA LAYER (V75) ---
 try:
@@ -21465,9 +21465,38 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 "và Chi tiết danh sách bên dưới."
             )
         else:
+            # V92.7 - Nhận ngày user bấm từ cột "Ngày" của bảng Thống kê chi tiết.
+            # Phải gán session_state TRƯỚC khi widget sb_chosen_date được tạo.
+            _daily_clicked_date_raw = str(st.query_params.get("leave_pick_date", "") or "").strip()
+            if _daily_clicked_date_raw:
+                _daily_clicked_date = _parse_vn_date(_daily_clicked_date_raw)
+                if _daily_clicked_date is not None:
+                    if is_admin_letan:
+                        st.session_state["sb_chosen_date"] = (
+                            _daily_clicked_date, _daily_clicked_date
+                        )
+                    else:
+                        _emp_min_click, _emp_max_click = employee_registration_window()
+                        if _daily_clicked_date < _emp_min_click:
+                            _daily_clicked_date = _emp_min_click
+                        elif _daily_clicked_date > _emp_max_click:
+                            _daily_clicked_date = _emp_max_click
+                        st.session_state["sb_chosen_date"] = _daily_clicked_date
+                    st.session_state["_leave_date_picked_from_daily_v927"] = (
+                        _daily_clicked_date.strftime("%Y-%m-%d")
+                    )
+                try:
+                    del st.query_params["leave_pick_date"]
+                except Exception:
+                    pass
+
             if is_admin_letan:
                 list_nv_input = ["-- Chọn nhân viên --"] + all_users
-                chosen_dates = st.date_input("Chọn ngày nghỉ (Khoảng thời gian nếu là Phép năm):", value=(get_vn_today(), get_vn_today()), key="sb_chosen_date")
+                chosen_dates = st.date_input(
+                    "Chọn ngày nghỉ (Khoảng thời gian nếu là Phép năm):",
+                    value=(get_vn_today(), get_vn_today()),
+                    key="sb_chosen_date"
+                )
             else:
                 list_nv_input = [st.session_state.current_user]
                 emp_min_date, emp_max_date = employee_registration_window()
@@ -21479,6 +21508,22 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     key="sb_chosen_date"
                 )
                 st.caption(f"Nhân viên được đăng ký từ {emp_min_date.strftime('%d/%m/%Y')} đến hết {emp_max_date.strftime('%d/%m/%Y')}.")
+
+            _picked_daily_feedback = st.session_state.pop(
+                "_leave_date_picked_from_daily_v927", ""
+            )
+            if _picked_daily_feedback:
+                try:
+                    _picked_fb_date = datetime.strptime(
+                        _picked_daily_feedback, "%Y-%m-%d"
+                    ).date()
+                    st.success(
+                        "📅 Đã chọn ngày "
+                        + _picked_fb_date.strftime("%d/%m/%Y")
+                        + " từ bảng Thống kê chi tiết."
+                    )
+                except Exception:
+                    pass
 
             if isinstance(chosen_dates, tuple):
                 if len(chosen_dates) == 2: start_date, end_date = chosen_dates
@@ -22018,22 +22063,58 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
     # V86.21: từ đây trở xuống KHÔNG phụ thuộc _registration_locked.
     # User bị khóa đăng ký vẫn được xem Thống kê chi tiết theo từng ngày và Chi tiết danh sách.
     # Bộ lọc thời gian & nhân viên
+    # V92.8: các giá trị này được phục hồi từ URL khi user bấm ngày trong bảng,
+    # nên click ngày không làm reset bộ lọc.
+    _leave_filter_options = [
+        "Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian",
+        "Tuần này", "Tuần trước", "Tuần sau",
+        "Tháng này", "Tháng trước", "Tháng sau"
+    ]
+    try:
+        _url_filter_type = str(st.query_params.get("leave_filter_type", "") or "").strip()
+        if _url_filter_type in _leave_filter_options:
+            st.session_state["leave_stats_time_filter"] = _url_filter_type
+
+        _url_filter_start = _parse_vn_date(
+            str(st.query_params.get("leave_filter_start", "") or "").strip()
+        )
+        _url_filter_end = _parse_vn_date(
+            str(st.query_params.get("leave_filter_end", "") or "").strip()
+        )
+        if _url_filter_start is not None:
+            st.session_state["leave_stats_single_date_v928"] = _url_filter_start
+        if _url_filter_start is not None and _url_filter_end is not None:
+            st.session_state["leave_stats_range_v928"] = (
+                _url_filter_start, _url_filter_end
+            )
+
+        _url_filter_nv = str(st.query_params.get("leave_filter_nv", "") or "").strip()
+        if _url_filter_nv:
+            st.session_state["leave_stats_employee_filter_v928"] = _url_filter_nv
+    except Exception:
+        pass
+
     col_date, col_name, col_refresh = st.columns([5, 4, 2])
 
     with col_date:
         render_leave_filter_label_css()
-        today = get_vn_today() 
+        today = get_vn_today()
         col_d1, col_d2 = st.columns(2)
         with col_d1:
             filter_type = st.selectbox(
-                "Lọc thời gian:", 
-                ["Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian", "Tuần này", "Tuần trước", "Tuần sau", "Tháng này", "Tháng trước", "Tháng sau"],
-                index=0, filter_mode="contains", key="leave_stats_time_filter"
+                "Lọc thời gian:",
+                _leave_filter_options,
+                index=0,
+                filter_mode="contains",
+                key="leave_stats_time_filter"
             )
         with col_d2:
-            if filter_type == "Hôm nay": start_date = end_date = today
-            elif filter_type == "Hôm qua": start_date = end_date = today - timedelta(days=1)
-            elif filter_type == "Ngày mai": start_date = end_date = today + timedelta(days=1)
+            if filter_type == "Hôm nay":
+                start_date = end_date = today
+            elif filter_type == "Hôm qua":
+                start_date = end_date = today - timedelta(days=1)
+            elif filter_type == "Ngày mai":
+                start_date = end_date = today + timedelta(days=1)
             elif filter_type == "Tuần này":
                 start_date = today - timedelta(days=today.weekday())
                 end_date = start_date + timedelta(days=6)
@@ -22045,26 +22126,72 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 end_date = start_date + timedelta(days=6)
             elif filter_type == "Tháng này":
                 start_date = today.replace(day=1)
-                end_date = today.replace(day=calendar.monthrange(today.year, today.month)[1])
+                end_date = today.replace(
+                    day=calendar.monthrange(today.year, today.month)[1]
+                )
             elif filter_type == "Tháng trước":
                 end_date = today.replace(day=1) - timedelta(days=1)
                 start_date = end_date.replace(day=1)
             elif filter_type == "Tháng sau":
-                start_date = today.replace(year=today.year + 1, month=1, day=1) if today.month == 12 else today.replace(month=today.month + 1, day=1)
-                end_date = start_date.replace(day=calendar.monthrange(start_date.year, start_date.month)[1])
+                start_date = (
+                    today.replace(year=today.year + 1, month=1, day=1)
+                    if today.month == 12
+                    else today.replace(month=today.month + 1, day=1)
+                )
+                end_date = start_date.replace(
+                    day=calendar.monthrange(start_date.year, start_date.month)[1]
+                )
             elif filter_type == "Chọn ngày":
-                start_date = end_date = st.date_input("Chọn ngày:", today)
+                start_date = end_date = st.date_input(
+                    "Chọn ngày:",
+                    value=today,
+                    key="leave_stats_single_date_v928",
+                )
             elif filter_type == "Khoảng thời gian":
-                date_range = st.date_input("Chọn khoảng thời gian:", [today, today])
-                start_date, end_date = (date_range[0], date_range[1]) if len(date_range) == 2 else (date_range[0], date_range[0])
-            else: start_date = end_date = today
+                date_range = st.date_input(
+                    "Chọn khoảng thời gian:",
+                    value=(today, today),
+                    key="leave_stats_range_v928",
+                )
+                start_date, end_date = (
+                    (date_range[0], date_range[1])
+                    if len(date_range) == 2
+                    else (date_range[0], date_range[0])
+                )
+            else:
+                start_date = end_date = today
 
     with col_name:
-        list_nv = ["- Tất cả nhân viên -"] + get_leave_eligible_employee_names(df_credentials, df_nv_excel)
-        selected_nv = st.selectbox("👤 Tìm kiếm nhân viên:", list_nv, filter_mode="contains")
+        list_nv = ["- Tất cả nhân viên -"] + get_leave_eligible_employee_names(
+            df_credentials, df_nv_excel
+        )
+        _saved_filter_nv = str(
+            st.session_state.get(
+                "leave_stats_employee_filter_v928",
+                "- Tất cả nhân viên -"
+            ) or "- Tất cả nhân viên -"
+        )
+        if _saved_filter_nv not in list_nv:
+            st.session_state["leave_stats_employee_filter_v928"] = "- Tất cả nhân viên -"
+
+        selected_nv = st.selectbox(
+            "👤 Tìm kiếm nhân viên:",
+            list_nv,
+            filter_mode="contains",
+            key="leave_stats_employee_filter_v928",
+        )
+
+    # Đồng bộ filter hiện tại vào URL để Refresh/F5 và các rerun khác không làm mất.
+    try:
+        st.query_params["leave_filter_type"] = str(filter_type)
+        st.query_params["leave_filter_start"] = start_date.strftime("%Y-%m-%d")
+        st.query_params["leave_filter_end"] = end_date.strftime("%Y-%m-%d")
+        st.query_params["leave_filter_nv"] = str(selected_nv)
+    except Exception:
+        pass
 
     with col_refresh:
-        st.write("") 
+        st.write("")
         if st.button("🔄 Cập Nhật Dữ Liệu", use_container_width=True):
             _clear_leave_data_caches()
             rerun_current_view()
@@ -22278,6 +22405,19 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             }
             .vera-daily-summary-total{
                 font-weight:700;
+            }
+            .vera-daily-date-link{
+                display:inline-block;
+                color:#0B57D0 !important;
+                font-weight:800;
+                text-decoration:underline !important;
+                text-underline-offset:3px;
+                cursor:pointer;
+                border-radius:6px;
+                padding:2px 4px;
+            }
+            .vera-daily-date-link:hover{
+                background:rgba(11,87,208,.10);
             }
             .vera-daily-summary-grand-total td{
                 font-weight:700;
@@ -22531,8 +22671,35 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             _ps_cls = "vera-daily-summary-pill alert" if _flags.get('phat_sinh_full') else "vera-daily-summary-pill"
             _kp_cls = "vera-daily-summary-pill"
 
+            # Giữ nguyên route/login/query hiện tại, chỉ thêm leave_pick_date.
+            _click_query = {}
+            try:
+                for _qk in st.query_params.keys():
+                    _qv = st.query_params.get(_qk)
+                    if isinstance(_qv, (list, tuple)):
+                        _qv = _qv[-1] if _qv else ""
+                    if _qv is not None and str(_qv) != "":
+                        _click_query[str(_qk)] = str(_qv)
+            except Exception:
+                _click_query = {}
+            if _day_obj is not None:
+                _click_query["leave_pick_date"] = _day_obj.strftime("%Y-%m-%d")
+
+            # V92.8 - đóng gói trạng thái bộ lọc hiện tại vào chính link ngày.
+            # Kể cả browser tạo session Streamlit mới, filter vẫn khôi phục đúng.
+            _click_query["leave_filter_type"] = str(filter_type)
+            _click_query["leave_filter_start"] = start_date.strftime("%Y-%m-%d")
+            _click_query["leave_filter_end"] = end_date.strftime("%Y-%m-%d")
+            _click_query["leave_filter_nv"] = str(selected_nv)
+            _click_href = "?" + urlencode(_click_query)
+
             _row_html = [
-                f"<td>{html.escape(_day_label)}</td>",
+                (
+                    "<td><a class='vera-daily-date-link' "
+                    f"href='{html.escape(_click_href, quote=True)}' "
+                    "title='Chọn ngày này để đăng ký lịch nghỉ'>"
+                    f"{html.escape(_day_label)}</a></td>"
+                ),
                 f"<td>{html.escape(str(_stat.get('Thứ ngày', '')))}</td>",
                 f"<td><span class='vera-daily-summary-total'>{_total_n}</span></td>",
                 f"<td><span class='{_co_cls}'>{_co_n}</span></td>",

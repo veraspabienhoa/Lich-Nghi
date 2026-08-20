@@ -1,4 +1,4 @@
-# V92.6.7 - Fix import Google service account Credentials (2026-08-21)
+# V92.6.8 - Fix bảng Phân ca hiển thị đầy đủ ca hiện đang gán cho từng nhân viên (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -4658,6 +4658,19 @@ def get_shift_dataframe(credentials_df):
     d = d[d['Phân quyền'].astype(str).str.strip().str.lower().isin(roles)].copy()
     d['Bộ phận'] = d['Phân quyền'].apply(_shift_department_label)
     d = d[cols].copy()
+
+    # V92.6.8 - chuẩn hóa dữ liệu ca từ hồ sơ.
+    # Không để None/nan làm SelectboxColumn hiểu thành giá trị không hợp lệ.
+    for _shift_col in ["Ca làm việc", "Ngày bắt đầu ca", "Chu kỳ"]:
+        if _shift_col in d.columns:
+            d[_shift_col] = (
+                d[_shift_col]
+                .fillna("")
+                .astype(str)
+                .replace({"None": "", "none": "", "nan": "", "NaN": "", "<NA>": ""})
+                .str.strip()
+            )
+
     if not d.empty:
         dept_rank = {v:i for i,v in enumerate(SHIFT_DEPARTMENT_ORDER)}
         d['_dept'] = d['Bộ phận'].map(dept_rank).fillna(999)
@@ -4979,9 +4992,18 @@ def batch_update_shift_schedule(edited_df):
             if not nv_name:
                 continue
             shift_map[nv_name] = {
-                'ca': str(r.get('Ca làm việc', '')).replace("nan", "").strip(),
-                'ngay': str(r.get('Ngày bắt đầu ca', '')).replace("nan", "").strip(),
-                'chuky': str(r.get('Chu kỳ', '')).replace("nan", "").strip()
+                'ca': (
+                    "" if str(r.get('Ca làm việc', '')).strip().lower() in {"", "none", "nan", "<na>"}
+                    else str(r.get('Ca làm việc', '')).strip()
+                ),
+                'ngay': (
+                    "" if str(r.get('Ngày bắt đầu ca', '')).strip().lower() in {"", "none", "nan", "<na>"}
+                    else str(r.get('Ngày bắt đầu ca', '')).strip()
+                ),
+                'chuky': (
+                    "" if str(r.get('Chu kỳ', '')).strip().lower() in {"", "none", "nan", "<na>"}
+                    else str(r.get('Chu kỳ', '')).strip()
+                )
             }
 
         out = []
@@ -19154,11 +19176,49 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
     for dep,tab in _assign_map:
         with tab:
             part = working_shift[working_shift["Bộ phận"].eq(dep)].copy()
-            opts = get_shift_options(dep)
+
+            # V92.6.8:
+            # Dropdown phải chứa cả danh mục ca HIỆN TẠI và mọi ca ĐANG ĐƯỢC GÁN
+            # trong hồ sơ. Nếu ca cũ/legacy không còn trong CauHinhCaLamViec,
+            # Streamlit vẫn phải hiển thị giá trị đó thay vì làm trắng ô.
+            opts = list(get_shift_options(dep))
+            _assigned_existing = []
+            if not part.empty and "Ca làm việc" in part.columns:
+                part["Ca làm việc"] = (
+                    part["Ca làm việc"]
+                    .fillna("")
+                    .astype(str)
+                    .replace({"None": "", "none": "", "nan": "", "NaN": "", "<NA>": ""})
+                    .str.strip()
+                )
+                _assigned_existing = [
+                    x for x in part["Ca làm việc"].tolist()
+                    if x
+                ]
+
+            for _existing_shift in _assigned_existing:
+                if _existing_shift not in opts:
+                    opts.append(_existing_shift)
+
+            # Cho phép để trống/Chưa phân ca mà không biến thành chữ "None".
+            if "" not in opts:
+                opts = [""] + opts
+
             st.caption(
                 "☕ Nghỉ giữa ca hiện được cấu hình **riêng trong từng ca làm việc**. "
                 "Khi phân ca cho nhân viên, hệ thống dùng đúng Bật/Tắt + Duration của ca đó."
             )
+            _configured_only = set(get_shift_options(dep))
+            _legacy_assigned = [
+                x for x in _assigned_existing
+                if x and x not in _configured_only
+            ]
+            if _legacy_assigned:
+                st.info(
+                    "ℹ️ Có ca đang được nhân viên sử dụng nhưng chưa còn trong danh mục ca hiện tại: "
+                    + ", ".join(dict.fromkeys(_legacy_assigned))
+                    + ". Hệ thống vẫn hiển thị để không mất dữ liệu; bạn có thể đổi sang ca mới rồi Lưu."
+                )
 
             if part.empty:
                 st.info("Bộ phận này chưa có nhân viên.")

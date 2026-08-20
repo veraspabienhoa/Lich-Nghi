@@ -1,4 +1,4 @@
-# V92.6 - Excel phân ca: dropdown cột B tự lấy danh sách ca đúng theo bộ phận từng nhân viên (2026-08-20)
+# V92.6.2 - Tô màu dropdown Lý do nghỉ: CÓ phép xanh, KHÔNG phép đỏ, còn lại vàng (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -4697,6 +4697,61 @@ def build_shift_template_excel_bytes(credentials_df):
     return out.getvalue()
 
 
+def render_shift_template_download_button(credentials_df):
+    """
+    V92.6.1 - Tải Excel template trực tiếp bằng data URI.
+    Không dùng MediaFileManager/link file tạm của st.download_button,
+    tránh lỗi "file không tồn tại" sau rerun hoặc khi Cloud Run đổi instance.
+    """
+    try:
+        payload = build_shift_template_excel_bytes(credentials_df)
+        if not payload:
+            st.error("Không tạo được dữ liệu Excel template phân ca.")
+            return
+
+        filename = f"Vera-Spa_Template_Ca_{get_vn_today().strftime('%Y%m%d')}.xlsx"
+        b64 = base64.b64encode(payload).decode("ascii")
+        safe_filename = html.escape(filename, quote=True)
+
+        st.markdown(
+            f"""
+            <a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}"
+               download="{safe_filename}"
+               class="vera-shift-template-download-v9261">
+               📥 Export Excel template phân ca
+            </a>
+            <style>
+            .vera-shift-template-download-v9261{{
+                display:flex;
+                width:100%;
+                min-height:40px;
+                box-sizing:border-box;
+                align-items:center;
+                justify-content:center;
+                padding:0.45rem 0.75rem;
+                border:1px solid rgba(49,51,63,.2);
+                border-radius:0.5rem;
+                background:#FFFFFF;
+                color:#222222 !important;
+                font-weight:600;
+                text-decoration:none !important;
+                cursor:pointer;
+            }}
+            .vera-shift-template-download-v9261:hover{{
+                border-color:rgba(49,51,63,.45);
+                background:#F5F6FA;
+            }}
+            @media(max-width:768px){{
+                .vera-shift-template-download-v9261{{min-height:44px;}}
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    except Exception as e:
+        st.error(f"Không tạo được Excel template phân ca: {e}")
+
+
 def read_shift_template_excel(uploaded_file, credentials_df):
     """
     V92.6:
@@ -5331,6 +5386,55 @@ def _daily_leave_group(reason, reason_type_map=None):
     ):
         return "co_phep"
     return ""
+
+
+def render_leave_reason_selectbox_color(selected_reason, reason_type_map=None, marker_id="vera-leave-reason-selectbox"):
+    """
+    Tô màu ô selectbox 'Lý do nghỉ' theo nhóm:
+    - CÓ phép     -> xanh
+    - KHÔNG phép  -> đỏ
+    - còn lại     -> vàng
+    Chỉ áp dụng cho phần hiển thị giá trị đang chọn của selectbox.
+    """
+    selected_text = str(selected_reason or "").strip()
+    if not selected_text or selected_text == "-- Chọn lý do nghỉ --":
+        group = "other"
+    else:
+        raw_group = _daily_leave_group(selected_text, reason_type_map=reason_type_map)
+        if raw_group == "co_phep":
+            group = "co_phep"
+        elif raw_group == "khong_phep":
+            group = "khong_phep"
+        else:
+            group = "other"
+
+    palette = {
+        "co_phep": {"bg": "#E8F5E9", "border": "#2E7D32", "text": "#1B5E20"},
+        "khong_phep": {"bg": "#FDECEC", "border": "#D32F2F", "text": "#8B1E1E"},
+        "other": {"bg": "#FFF8E1", "border": "#E6B800", "text": "#6B5A00"},
+    }
+    c = palette[group]
+
+    st.markdown(
+        f"""
+        <style>
+        div[data-testid="stVerticalBlock"]:has(#{marker_id}) div[data-testid="stSelectbox"] [data-baseweb="select"] > div {{
+            background: {c['bg']} !important;
+            border: 2px solid {c['border']} !important;
+            border-radius: 12px !important;
+            box-shadow: none !important;
+        }}
+        div[data-testid="stVerticalBlock"]:has(#{marker_id}) div[data-testid="stSelectbox"] [data-baseweb="select"] * {{
+            color: {c['text']} !important;
+            font-weight: 700 !important;
+        }}
+        div[data-testid="stVerticalBlock"]:has(#{marker_id}) div[data-testid="stSelectbox"] svg {{
+            fill: {c['text']} !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -18569,13 +18673,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
 
     c_export_shift, c_import_shift = st.columns(2)
     with c_export_shift:
-        st.download_button(
-            "📥 Export Excel template phân ca",
-            data=build_shift_template_excel_bytes(df_credentials),
-            file_name=f"Vera-Spa_Template_Ca_{get_vn_today().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        render_shift_template_download_button(df_credentials)
     with c_import_shift:
         uploaded_shift = st.file_uploader(
             "📤 Import Excel template",
@@ -21561,7 +21659,19 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 list_loai_nghi = ["Nghỉ phép", "🔴 Nghỉ không phép", "Nghỉ phát sinh", "🔴 Đi trễ không phép", "🔴 Về sớm không phép"]
                 loai_nghi_dict = {l.lower(): [0.0, 0.0, "", "", False] for l in list_loai_nghi}
 
-            chosen_loai = st.selectbox("Lý do nghỉ:", ["-- Chọn lý do nghỉ --"] + list_loai_nghi, key="sb_loai_nghi_live", filter_mode="contains")
+            with st.container():
+                st.markdown('<div id="vera-leave-reason-selectbox"></div>', unsafe_allow_html=True)
+                chosen_loai = st.selectbox(
+                    "Lý do nghỉ:",
+                    ["-- Chọn lý do nghỉ --"] + list_loai_nghi,
+                    key="sb_loai_nghi_live",
+                    filter_mode="contains"
+                )
+            render_leave_reason_selectbox_color(
+                chosen_loai,
+                reason_type_map={normalize_login_name(k): (v[2] if len(v) > 2 else "") for k, v in loai_nghi_dict.items()},
+                marker_id="vera-leave-reason-selectbox",
+            )
 
             default_songay = 0.0
             default_phat = 0.0

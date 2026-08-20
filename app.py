@@ -1,4 +1,4 @@
-# V92.8 - Click ngày giữ nguyên tuyệt đối bộ lọc thời gian/nhân viên khi tiếp tục đăng ký (2026-08-20)
+# V92.7 - Click cột Ngày trong thống kê để tự gắn vào ô Chọn ngày nghỉ (2026-08-20)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -22063,58 +22063,22 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
     # V86.21: từ đây trở xuống KHÔNG phụ thuộc _registration_locked.
     # User bị khóa đăng ký vẫn được xem Thống kê chi tiết theo từng ngày và Chi tiết danh sách.
     # Bộ lọc thời gian & nhân viên
-    # V92.8: các giá trị này được phục hồi từ URL khi user bấm ngày trong bảng,
-    # nên click ngày không làm reset bộ lọc.
-    _leave_filter_options = [
-        "Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian",
-        "Tuần này", "Tuần trước", "Tuần sau",
-        "Tháng này", "Tháng trước", "Tháng sau"
-    ]
-    try:
-        _url_filter_type = str(st.query_params.get("leave_filter_type", "") or "").strip()
-        if _url_filter_type in _leave_filter_options:
-            st.session_state["leave_stats_time_filter"] = _url_filter_type
-
-        _url_filter_start = _parse_vn_date(
-            str(st.query_params.get("leave_filter_start", "") or "").strip()
-        )
-        _url_filter_end = _parse_vn_date(
-            str(st.query_params.get("leave_filter_end", "") or "").strip()
-        )
-        if _url_filter_start is not None:
-            st.session_state["leave_stats_single_date_v928"] = _url_filter_start
-        if _url_filter_start is not None and _url_filter_end is not None:
-            st.session_state["leave_stats_range_v928"] = (
-                _url_filter_start, _url_filter_end
-            )
-
-        _url_filter_nv = str(st.query_params.get("leave_filter_nv", "") or "").strip()
-        if _url_filter_nv:
-            st.session_state["leave_stats_employee_filter_v928"] = _url_filter_nv
-    except Exception:
-        pass
-
     col_date, col_name, col_refresh = st.columns([5, 4, 2])
 
     with col_date:
         render_leave_filter_label_css()
-        today = get_vn_today()
+        today = get_vn_today() 
         col_d1, col_d2 = st.columns(2)
         with col_d1:
             filter_type = st.selectbox(
-                "Lọc thời gian:",
-                _leave_filter_options,
-                index=0,
-                filter_mode="contains",
-                key="leave_stats_time_filter"
+                "Lọc thời gian:", 
+                ["Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian", "Tuần này", "Tuần trước", "Tuần sau", "Tháng này", "Tháng trước", "Tháng sau"],
+                index=0, filter_mode="contains", key="leave_stats_time_filter"
             )
         with col_d2:
-            if filter_type == "Hôm nay":
-                start_date = end_date = today
-            elif filter_type == "Hôm qua":
-                start_date = end_date = today - timedelta(days=1)
-            elif filter_type == "Ngày mai":
-                start_date = end_date = today + timedelta(days=1)
+            if filter_type == "Hôm nay": start_date = end_date = today
+            elif filter_type == "Hôm qua": start_date = end_date = today - timedelta(days=1)
+            elif filter_type == "Ngày mai": start_date = end_date = today + timedelta(days=1)
             elif filter_type == "Tuần này":
                 start_date = today - timedelta(days=today.weekday())
                 end_date = start_date + timedelta(days=6)
@@ -22126,72 +22090,26 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 end_date = start_date + timedelta(days=6)
             elif filter_type == "Tháng này":
                 start_date = today.replace(day=1)
-                end_date = today.replace(
-                    day=calendar.monthrange(today.year, today.month)[1]
-                )
+                end_date = today.replace(day=calendar.monthrange(today.year, today.month)[1])
             elif filter_type == "Tháng trước":
                 end_date = today.replace(day=1) - timedelta(days=1)
                 start_date = end_date.replace(day=1)
             elif filter_type == "Tháng sau":
-                start_date = (
-                    today.replace(year=today.year + 1, month=1, day=1)
-                    if today.month == 12
-                    else today.replace(month=today.month + 1, day=1)
-                )
-                end_date = start_date.replace(
-                    day=calendar.monthrange(start_date.year, start_date.month)[1]
-                )
+                start_date = today.replace(year=today.year + 1, month=1, day=1) if today.month == 12 else today.replace(month=today.month + 1, day=1)
+                end_date = start_date.replace(day=calendar.monthrange(start_date.year, start_date.month)[1])
             elif filter_type == "Chọn ngày":
-                start_date = end_date = st.date_input(
-                    "Chọn ngày:",
-                    value=today,
-                    key="leave_stats_single_date_v928",
-                )
+                start_date = end_date = st.date_input("Chọn ngày:", today)
             elif filter_type == "Khoảng thời gian":
-                date_range = st.date_input(
-                    "Chọn khoảng thời gian:",
-                    value=(today, today),
-                    key="leave_stats_range_v928",
-                )
-                start_date, end_date = (
-                    (date_range[0], date_range[1])
-                    if len(date_range) == 2
-                    else (date_range[0], date_range[0])
-                )
-            else:
-                start_date = end_date = today
+                date_range = st.date_input("Chọn khoảng thời gian:", [today, today])
+                start_date, end_date = (date_range[0], date_range[1]) if len(date_range) == 2 else (date_range[0], date_range[0])
+            else: start_date = end_date = today
 
     with col_name:
-        list_nv = ["- Tất cả nhân viên -"] + get_leave_eligible_employee_names(
-            df_credentials, df_nv_excel
-        )
-        _saved_filter_nv = str(
-            st.session_state.get(
-                "leave_stats_employee_filter_v928",
-                "- Tất cả nhân viên -"
-            ) or "- Tất cả nhân viên -"
-        )
-        if _saved_filter_nv not in list_nv:
-            st.session_state["leave_stats_employee_filter_v928"] = "- Tất cả nhân viên -"
-
-        selected_nv = st.selectbox(
-            "👤 Tìm kiếm nhân viên:",
-            list_nv,
-            filter_mode="contains",
-            key="leave_stats_employee_filter_v928",
-        )
-
-    # Đồng bộ filter hiện tại vào URL để Refresh/F5 và các rerun khác không làm mất.
-    try:
-        st.query_params["leave_filter_type"] = str(filter_type)
-        st.query_params["leave_filter_start"] = start_date.strftime("%Y-%m-%d")
-        st.query_params["leave_filter_end"] = end_date.strftime("%Y-%m-%d")
-        st.query_params["leave_filter_nv"] = str(selected_nv)
-    except Exception:
-        pass
+        list_nv = ["- Tất cả nhân viên -"] + get_leave_eligible_employee_names(df_credentials, df_nv_excel)
+        selected_nv = st.selectbox("👤 Tìm kiếm nhân viên:", list_nv, filter_mode="contains")
 
     with col_refresh:
-        st.write("")
+        st.write("") 
         if st.button("🔄 Cập Nhật Dữ Liệu", use_container_width=True):
             _clear_leave_data_caches()
             rerun_current_view()
@@ -22684,13 +22602,6 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 _click_query = {}
             if _day_obj is not None:
                 _click_query["leave_pick_date"] = _day_obj.strftime("%Y-%m-%d")
-
-            # V92.8 - đóng gói trạng thái bộ lọc hiện tại vào chính link ngày.
-            # Kể cả browser tạo session Streamlit mới, filter vẫn khôi phục đúng.
-            _click_query["leave_filter_type"] = str(filter_type)
-            _click_query["leave_filter_start"] = start_date.strftime("%Y-%m-%d")
-            _click_query["leave_filter_end"] = end_date.strftime("%Y-%m-%d")
-            _click_query["leave_filter_nv"] = str(selected_nv)
             _click_href = "?" + urlencode(_click_query)
 
             _row_html = [

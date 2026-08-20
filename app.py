@@ -1,4 +1,4 @@
-# V92.6.4 - Nội dung thông báo/email dùng tên 'Lễ Tân' (2026-08-21)
+# V92.6.5 - Danh sách ca có checkbox để Sửa/Xóa theo bộ phận (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -8,7 +8,7 @@ import os
 import io
 import html
 import gspread
-from google.oauth2.service_account import Credentials
+from google.oauth2.service_account import Credentialsa
 import streamlit.components.v1 as components
 import time
 import smtplib
@@ -18716,162 +18716,365 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                     else pd.DataFrame()
                 )
 
-                _labels = ["➕ Tạo ca mới"]
-                _lookup = {}
-                if not _defs.empty:
-                    for _, rr in _defs.iterrows():
-                        lbl = _shift_display_label(
-                            rr["Tên ca"], rr["Giờ bắt đầu"], rr["Giờ kết thúc"]
-                        )
-                        if (
-                            str(rr.get("Ghi chú","")).strip().lower() == "không đổi"
-                            and "không đổi" not in lbl.lower()
-                        ):
-                            lbl += " (Không đổi)"
-                        full = f"{rr['ID']} · {lbl}"
-                        _labels.append(full)
-                        _lookup[full] = rr.to_dict()
-
-                _pick = st.selectbox(
-                    f"Chọn ca · {dep}",
-                    _labels,
-                    key=f"shift_def_pick_{normalize_login_name(dep)}_v922",
-                )
-                _selected = _lookup.get(_pick, {})
-                _is_new = _pick == "➕ Tạo ca mới"
-                _safe_dep = re.sub(r"[^A-Za-z0-9]+", "_", normalize_login_name(dep))
-
-                c1,c2,c3 = st.columns([1.5,1,1])
-                with c1:
-                    _name = st.text_input(
-                        "Tên ca",
-                        value="" if _is_new else str(_selected.get("Tên ca","")),
-                        key=f"shift_name_{_safe_dep}_{_pick}",
-                        placeholder="VD: Ca 1",
-                    )
-                with c2:
-                    _start = st.text_input(
-                        "Giờ bắt đầu",
-                        value="" if _is_new else str(_selected.get("Giờ bắt đầu","")),
-                        key=f"shift_start_{_safe_dep}_{_pick}",
-                        placeholder="10:00",
-                    )
-                with c3:
-                    _end = st.text_input(
-                        "Giờ kết thúc",
-                        value="" if _is_new else str(_selected.get("Giờ kết thúc","")),
-                        key=f"shift_end_{_safe_dep}_{_pick}",
-                        placeholder="23:00",
-                    )
-
-                d1,d2 = st.columns([2,1])
-                with d1:
-                    _note = st.text_input(
-                        "Ghi chú",
-                        value="" if _is_new else str(_selected.get("Ghi chú","")),
-                        key=f"shift_note_{_safe_dep}_{_pick}",
-                    )
-                with d2:
-                    _order = st.number_input(
-                        "Thứ tự",
-                        min_value=1, max_value=999,
-                        value=(
-                            int(_selected.get("Thứ tự", len(_labels)))
-                            if not _is_new else len(_labels)
-                        ),
-                        step=1,
-                        key=f"shift_order_{_safe_dep}_{_pick}",
-                    )
-
-                # V92.3 - CẤU HÌNH NGHỈ GIỮA CA NGAY TRONG TỪNG CA.
-                _dep_default_break = SHIFT_BREAK_DEFAULTS.get(
-                    dep, {"enabled": False, "duration_minutes": 60}
-                )
-                _default_break_enabled = (
-                    bool(_dep_default_break.get("enabled", False))
-                    if _is_new
-                    else bool(_selected.get("Áp dụng nghỉ giữa ca", False))
-                )
-                _default_break_duration = (
-                    int(_dep_default_break.get("duration_minutes", 60))
-                    if _is_new
-                    else int(_selected.get("Duration nghỉ giữa ca (phút)", 60) or 60)
+                _safe_dep = re.sub(
+                    r"[^A-Za-z0-9]+", "_", normalize_login_name(dep)
                 )
 
-                st.markdown("##### ☕ Nghỉ giữa ca của ca này")
-                br1, br2 = st.columns([1.25, 1])
-                with br1:
-                    _break_enabled = st.toggle(
-                        "Áp dụng nghỉ giữa ca",
-                        value=_default_break_enabled,
-                        key=f"shift_break_enabled_{_safe_dep}_{_pick}_v923",
-                        help=(
-                            "Bật: check-in lần 2 = bắt đầu nghỉ, "
-                            "check-in lần 3 = kết thúc nghỉ."
-                        ),
-                    )
-                with br2:
-                    _break_duration = st.number_input(
-                        "Thời gian nghỉ giữa ca (phút)",
-                        min_value=1,
-                        max_value=600,
-                        value=int(_default_break_duration),
-                        step=5,
-                        disabled=not _break_enabled,
-                        key=f"shift_break_duration_{_safe_dep}_{_pick}_v923",
-                        help="Duration được tính từ check-in lần 2 đến lần 3 trên TimeSoft.",
-                    )
+                # V92.6.5 - LIỆT KÊ TOÀN BỘ CA HIỆN TẠI + CHECKBOX CHỌN.
+                st.markdown(f"#### 📋 Danh sách ca hiện tại · {dep}")
 
-                if _break_enabled:
-                    st.caption(
-                        f"✅ Ca này áp dụng nghỉ giữa ca tối đa **{int(_break_duration)} phút**. "
-                        "Không cố định giờ ra/vào."
-                    )
+                if _defs.empty:
+                    st.info("Bộ phận này hiện chưa có ca làm việc.")
+                    _selected_ids = []
+                    _selected_rows = pd.DataFrame()
                 else:
-                    st.caption("⛔ Ca này không áp dụng nghỉ giữa ca.")
+                    _shift_list = _defs.copy()
+                    _shift_list["Chọn"] = False
+                    _shift_list["Nghỉ giữa ca"] = _shift_list[
+                        "Áp dụng nghỉ giữa ca"
+                    ].apply(lambda x: "✅ Có" if bool(x) else "⛔ Không")
+                    _shift_list["Duration nghỉ (phút)"] = pd.to_numeric(
+                        _shift_list["Duration nghỉ giữa ca (phút)"],
+                        errors="coerce",
+                    ).fillna(0).astype(int)
 
-                b1,b2 = st.columns(2)
-                with b1:
-                    if st.button(
-                        "💾 Lưu ca",
-                        use_container_width=True,
-                        key=f"save_shift_{_safe_dep}_v922",
-                    ):
-                        ok,msg = save_shift_definition(
-                            "" if _is_new else _selected.get("ID",""),
-                            _name,_start,_end,_note,_order,
-                            st.session_state.current_user,
-                            department=dep,
-                            break_enabled=_break_enabled,
-                            break_duration_minutes=_break_duration,
-                        )
-                        (st.success if ok else st.error)(msg)
-                        if ok:
-                            st.session_state.pop("shift_schedule_working_df", None)
-                            st.session_state.pop("shift_schedule_seed_signature", None)
-                            rerun_current_view()
+                    _display_cols = [
+                        "Chọn",
+                        "ID",
+                        "Tên ca",
+                        "Giờ bắt đầu",
+                        "Giờ kết thúc",
+                        "Nghỉ giữa ca",
+                        "Duration nghỉ (phút)",
+                        "Ghi chú",
+                        "Thứ tự",
+                    ]
+                    _shift_list = _shift_list[_display_cols].copy()
 
-                with b2:
-                    _confirm = st.checkbox(
-                        "Xác nhận xóa ca",
-                        disabled=_is_new,
-                        key=f"confirm_delete_{_safe_dep}_{_pick}_v922",
+                    _edited_shift_list = st.data_editor(
+                        _shift_list,
+                        key=f"shift_manage_list_{_safe_dep}_v9265",
+                        hide_index=True,
+                        width="stretch",
+                        height="content",
+                        num_rows="fixed",
+                        disabled=[
+                            "ID",
+                            "Tên ca",
+                            "Giờ bắt đầu",
+                            "Giờ kết thúc",
+                            "Nghỉ giữa ca",
+                            "Duration nghỉ (phút)",
+                            "Ghi chú",
+                            "Thứ tự",
+                        ],
+                        column_config={
+                            "Chọn": st.column_config.CheckboxColumn(
+                                "Chọn",
+                                help="Tick ca cần Sửa hoặc Xóa.",
+                                width="small",
+                            ),
+                            "ID": st.column_config.TextColumn(
+                                "ID", width="small"
+                            ),
+                            "Tên ca": st.column_config.TextColumn(
+                                "Tên ca", width="medium"
+                            ),
+                            "Giờ bắt đầu": st.column_config.TextColumn(
+                                "Bắt đầu", width="small"
+                            ),
+                            "Giờ kết thúc": st.column_config.TextColumn(
+                                "Kết thúc", width="small"
+                            ),
+                            "Nghỉ giữa ca": st.column_config.TextColumn(
+                                "Nghỉ giữa ca", width="small"
+                            ),
+                            "Duration nghỉ (phút)": st.column_config.NumberColumn(
+                                "Duration nghỉ",
+                                format="%d",
+                                width="small",
+                            ),
+                            "Ghi chú": st.column_config.TextColumn(
+                                "Ghi chú", width="medium"
+                            ),
+                            "Thứ tự": st.column_config.NumberColumn(
+                                "Thứ tự", format="%d", width="small"
+                            ),
+                        },
                     )
-                    if st.button(
-                        "🗑️ Xóa ca",
-                        use_container_width=True,
-                        disabled=_is_new or not _confirm,
-                        key=f"delete_shift_{_safe_dep}_v922",
-                    ):
-                        ok,msg = delete_shift_definition(
-                            _selected.get("ID",""),
-                            st.session_state.current_user,
+
+                    _selected_ids = (
+                        _edited_shift_list.loc[
+                            _edited_shift_list["Chọn"].fillna(False).astype(bool),
+                            "ID",
+                        ]
+                        .astype(str)
+                        .tolist()
+                    )
+                    _selected_rows = _defs[
+                        _defs["ID"].astype(str).isin(_selected_ids)
+                    ].copy()
+
+                _action = st.radio(
+                    "Thao tác",
+                    ["➕ Tạo ca mới", "✏️ Sửa ca đã check", "🗑️ Xóa ca đã check"],
+                    horizontal=True,
+                    key=f"shift_manage_action_{_safe_dep}_v9265",
+                )
+
+                # ----------------------------------------------------------
+                # XÓA CA: cho phép check một hoặc nhiều ca.
+                # ----------------------------------------------------------
+                if _action == "🗑️ Xóa ca đã check":
+                    if not _selected_ids:
+                        st.warning("Hãy tick ít nhất 1 ca trong cột **Chọn** để xóa.")
+                    else:
+                        _delete_names = []
+                        for _, _rr in _selected_rows.iterrows():
+                            _delete_names.append(
+                                _shift_display_label(
+                                    _rr.get("Tên ca", ""),
+                                    _rr.get("Giờ bắt đầu", ""),
+                                    _rr.get("Giờ kết thúc", ""),
+                                )
+                            )
+                        st.warning(
+                            "Bạn đang chọn xóa: **"
+                            + " · ".join(_delete_names)
+                            + "**"
                         )
-                        (st.success if ok else st.error)(msg)
-                        if ok:
-                            st.session_state.pop("shift_schedule_working_df", None)
-                            st.session_state.pop("shift_schedule_seed_signature", None)
-                            rerun_current_view()
+                        _confirm_delete = st.checkbox(
+                            f"Xác nhận xóa {len(_selected_ids)} ca đã check",
+                            key=f"confirm_delete_checked_{_safe_dep}_v9265",
+                        )
+                        if st.button(
+                            f"🗑️ Xóa {len(_selected_ids)} ca đã check",
+                            use_container_width=True,
+                            disabled=not _confirm_delete,
+                            key=f"delete_checked_shifts_{_safe_dep}_v9265",
+                        ):
+                            _delete_ok = 0
+                            _delete_errors = []
+                            for _sid in _selected_ids:
+                                _ok, _msg = delete_shift_definition(
+                                    _sid,
+                                    st.session_state.current_user,
+                                )
+                                if _ok:
+                                    _delete_ok += 1
+                                else:
+                                    _delete_errors.append(str(_msg))
+
+                            if _delete_ok:
+                                st.success(
+                                    f"Đã xóa {_delete_ok}/{len(_selected_ids)} ca."
+                                )
+                            if _delete_errors:
+                                st.error(" | ".join(_delete_errors))
+
+                            if _delete_ok:
+                                st.session_state.pop(
+                                    "shift_schedule_working_df", None
+                                )
+                                st.session_state.pop(
+                                    "shift_schedule_seed_signature", None
+                                )
+                                rerun_current_view()
+
+                # ----------------------------------------------------------
+                # TẠO / SỬA CA
+                # ----------------------------------------------------------
+                else:
+                    _is_new = _action == "➕ Tạo ca mới"
+                    _selected = {}
+
+                    if not _is_new:
+                        if len(_selected_ids) == 0:
+                            st.warning(
+                                "Hãy tick đúng **1 ca** trong cột **Chọn** để sửa."
+                            )
+                        elif len(_selected_ids) > 1:
+                            st.warning(
+                                "Chức năng **Sửa** chỉ cho phép tick **1 ca** mỗi lần."
+                            )
+                        else:
+                            _selected = _selected_rows.iloc[0].to_dict()
+
+                    _can_edit_form = _is_new or len(_selected_ids) == 1
+
+                    if _can_edit_form:
+                        _selected_id_key = (
+                            "new"
+                            if _is_new
+                            else str(_selected.get("ID", "")).strip()
+                        )
+                        st.markdown(
+                            "#### ➕ Tạo ca mới"
+                            if _is_new
+                            else "#### ✏️ Sửa ca đã check"
+                        )
+
+                        c1, c2, c3 = st.columns([1.5, 1, 1])
+                        with c1:
+                            _name = st.text_input(
+                                "Tên ca",
+                                value=(
+                                    ""
+                                    if _is_new
+                                    else str(_selected.get("Tên ca", ""))
+                                ),
+                                key=f"shift_name_{_safe_dep}_{_selected_id_key}_v9265",
+                                placeholder="VD: Ca 1",
+                            )
+                        with c2:
+                            _start = st.text_input(
+                                "Giờ bắt đầu",
+                                value=(
+                                    ""
+                                    if _is_new
+                                    else str(_selected.get("Giờ bắt đầu", ""))
+                                ),
+                                key=f"shift_start_{_safe_dep}_{_selected_id_key}_v9265",
+                                placeholder="10:00",
+                            )
+                        with c3:
+                            _end = st.text_input(
+                                "Giờ kết thúc",
+                                value=(
+                                    ""
+                                    if _is_new
+                                    else str(_selected.get("Giờ kết thúc", ""))
+                                ),
+                                key=f"shift_end_{_safe_dep}_{_selected_id_key}_v9265",
+                                placeholder="23:00",
+                            )
+
+                        d1, d2 = st.columns([2, 1])
+                        with d1:
+                            _note = st.text_input(
+                                "Ghi chú",
+                                value=(
+                                    ""
+                                    if _is_new
+                                    else str(_selected.get("Ghi chú", ""))
+                                ),
+                                key=f"shift_note_{_safe_dep}_{_selected_id_key}_v9265",
+                            )
+                        with d2:
+                            _default_order = (
+                                len(_defs) + 1
+                                if _is_new
+                                else int(_selected.get("Thứ tự", 1) or 1)
+                            )
+                            _order = st.number_input(
+                                "Thứ tự",
+                                min_value=1,
+                                max_value=999,
+                                value=max(1, int(_default_order)),
+                                step=1,
+                                key=f"shift_order_{_safe_dep}_{_selected_id_key}_v9265",
+                            )
+
+                        # Nghỉ giữa ca riêng cho từng ca.
+                        _dep_default_break = SHIFT_BREAK_DEFAULTS.get(
+                            dep,
+                            {
+                                "enabled": False,
+                                "duration_minutes": 60,
+                            },
+                        )
+                        _default_break_enabled = (
+                            bool(_dep_default_break.get("enabled", False))
+                            if _is_new
+                            else bool(
+                                _selected.get(
+                                    "Áp dụng nghỉ giữa ca", False
+                                )
+                            )
+                        )
+                        _default_break_duration = (
+                            int(
+                                _dep_default_break.get(
+                                    "duration_minutes", 60
+                                )
+                            )
+                            if _is_new
+                            else int(
+                                _selected.get(
+                                    "Duration nghỉ giữa ca (phút)", 60
+                                )
+                                or 60
+                            )
+                        )
+
+                        st.markdown("##### ☕ Nghỉ giữa ca của ca này")
+                        br1, br2 = st.columns([1.25, 1])
+                        with br1:
+                            _break_enabled = st.toggle(
+                                "Áp dụng nghỉ giữa ca",
+                                value=_default_break_enabled,
+                                key=f"shift_break_enabled_{_safe_dep}_{_selected_id_key}_v9265",
+                                help=(
+                                    "Bật: check-in lần 2 = bắt đầu nghỉ, "
+                                    "check-in lần 3 = kết thúc nghỉ."
+                                ),
+                            )
+                        with br2:
+                            _break_duration = st.number_input(
+                                "Thời gian nghỉ giữa ca (phút)",
+                                min_value=1,
+                                max_value=600,
+                                value=int(_default_break_duration),
+                                step=5,
+                                disabled=not _break_enabled,
+                                key=f"shift_break_duration_{_safe_dep}_{_selected_id_key}_v9265",
+                                help=(
+                                    "Duration được tính từ check-in lần 2 "
+                                    "đến lần 3 trên TimeSoft."
+                                ),
+                            )
+
+                        if _break_enabled:
+                            st.caption(
+                                f"✅ Ca này áp dụng nghỉ giữa ca tối đa "
+                                f"**{int(_break_duration)} phút**. "
+                                "Không cố định giờ ra/vào."
+                            )
+                        else:
+                            st.caption(
+                                "⛔ Ca này không áp dụng nghỉ giữa ca."
+                            )
+
+                        if st.button(
+                            "💾 Tạo ca"
+                            if _is_new
+                            else "💾 Lưu thay đổi ca đã check",
+                            use_container_width=True,
+                            key=f"save_shift_{_safe_dep}_{_selected_id_key}_v9265",
+                        ):
+                            ok, msg = save_shift_definition(
+                                ""
+                                if _is_new
+                                else _selected.get("ID", ""),
+                                _name,
+                                _start,
+                                _end,
+                                _note,
+                                _order,
+                                st.session_state.current_user,
+                                department=dep,
+                                break_enabled=_break_enabled,
+                                break_duration_minutes=_break_duration,
+                            )
+                            (st.success if ok else st.error)(msg)
+                            if ok:
+                                st.session_state.pop(
+                                    "shift_schedule_working_df", None
+                                )
+                                st.session_state.pop(
+                                    "shift_schedule_seed_signature", None
+                                )
+                                rerun_current_view()
 
     st.info(
         "**Nhân viên + Leader** dùng chung danh mục ca. "

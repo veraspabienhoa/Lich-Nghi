@@ -1767,7 +1767,7 @@ st.markdown("""
            Áp dụng cho heading và toàn bộ nhãn widget như "Chọn ngày nghỉ", "Chọn nhân viên", ... */
         /* V71 - BỘ CỠ CHỮ MẶC ĐỊNH TOÀN HỆ THỐNG.
            Tiêu đề lớn 28px → tiêu đề con 22px → tiêu đề nhỏ 18px → label/nội dung 16px → bảng 13px. */
-        h1, .custom-main-title { font-size: 28px !important; line-height: 1.22 !important; }
+        h1, .custom-main-title { font-size: 28px !important; line-height: 1.22 !important;margin-top: 15px !important; }
         h2, h3 { font-size: 22px !important; line-height: 1.25 !important; }
         h4, h5, h6, [data-testid="stExpander"] details summary p { font-size: 18px !important; line-height: 1.28 !important; }
         p, .stText, [data-testid="stMarkdownContainer"],

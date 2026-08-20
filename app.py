@@ -1,4 +1,4 @@
-# V92.6.6 - Chi tiết danh sách: NV/Leader/Lễ tân/Quản lý tick dòng để xóa theo đúng quyền (2026-08-21)
+# V92.6.7 - Fix import Google service account Credentials (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone

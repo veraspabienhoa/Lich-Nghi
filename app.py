@@ -1,4 +1,4 @@
-# V92.6.9 - Cho phép đổi ID ca + sửa xóa ca hiện tại ổn định (2026-08-21)
+# V93.0-PG1 - PostgreSQL Phase 1 config migration; nền V92.6.10 + fix mobile MENU/sidebar (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -15557,6 +15557,502 @@ def send_payroll_summary_email(sender_email, sender_password, to_email, recipien
         return False, str(e)
 
 
+
+# ==========================================================
+# V93.0-PG1 - POSTGRESQL PHASE 1: CONFIG / UI SETTINGS
+# ==========================================================
+# Không thay đổi giao diện Streamlit hay nghiệp vụ. Chỉ thay lớp lưu trữ cho
+# nhóm cấu hình ít rủi ro. Chế độ triển khai:
+#   VERA_DATA_BACKEND=sheets   -> hành vi cũ
+#   VERA_DATA_BACKEND=dual     -> Google Sheets là nguồn đọc, mirror PostgreSQL
+#   VERA_DATA_BACKEND=postgres -> PostgreSQL là nguồn chính; Sheet chỉ seed khi thiếu
+# Nếu vera_postgres.py cũ chưa có Setting API thì tự quay về Sheets an toàn.
+_PHASE1_MISSING = object()
+
+
+def _phase1_storage_mode():
+    if vpg is None or not vpg.is_enabled():
+        return "sheets"
+    if not all(hasattr(vpg, name) for name in ("get_setting", "write_setting")):
+        return "sheets"
+    try:
+        mode = str(vpg.data_backend_mode()).strip().lower() if hasattr(vpg, "data_backend_mode") else str(os.getenv("VERA_DATA_BACKEND", "sheets")).strip().lower()
+    except Exception:
+        mode = "sheets"
+    return mode if mode in {"sheets", "dual", "postgres"} else "sheets"
+
+
+def _phase1_pg_read(category, setting_key):
+    """Chỉ đọc PG khi PG đã được promote thành primary."""
+    if _phase1_storage_mode() != "postgres":
+        return _PHASE1_MISSING
+    try:
+        row = vpg.get_setting(str(category), str(setting_key))
+        if not row:
+            return _PHASE1_MISSING
+        return row.get("value", _PHASE1_MISSING)
+    except Exception:
+        return _PHASE1_MISSING
+
+
+def _phase1_pg_write(category, setting_key, value, updated_by="", source="app"):
+    if _phase1_storage_mode() not in {"dual", "postgres"}:
+        return True, ""
+    try:
+        vpg.write_setting(
+            str(category), str(setting_key), value,
+            updated_by=str(updated_by or ""), source=str(source or "app")
+        )
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _phase1_mirror_sheet_value(category, setting_key, value, actor="Google Sheets mirror"):
+    if _phase1_storage_mode() not in {"dual", "postgres"}:
+        return True, ""
+    return _phase1_pg_write(category, setting_key, value, actor, source="google_sheets")
+
+
+def _phase1_clear(fn):
+    try:
+        if fn is not None and hasattr(fn, "clear"):
+            fn.clear()
+    except Exception:
+        pass
+
+
+# ---------- Auto Update phạt ----------
+_gs_load_auto_penalty_config = load_auto_penalty_config
+_gs_set_auto_penalty_paused = set_auto_penalty_paused
+
+
+def _phase1_normalize_auto_penalty(raw):
+    raw = raw if isinstance(raw, dict) else {}
+    status = str(raw.get("status", AUTO_PENALTY_RUNNING) or AUTO_PENALTY_RUNNING).strip().upper()
+    if status not in {AUTO_PENALTY_RUNNING, AUTO_PENALTY_PAUSED}:
+        status = AUTO_PENALTY_RUNNING
+    try:
+        threshold = max(AUTO_PENALTY_MINUTES, int(float(raw.get("threshold_minutes", AUTO_PENALTY_MINUTES) or AUTO_PENALTY_MINUTES)))
+    except Exception:
+        threshold = AUTO_PENALTY_MINUTES
+    return {
+        "paused": status == AUTO_PENALTY_PAUSED,
+        "status": status,
+        "threshold_minutes": threshold,
+        "updated_date": str(raw.get("updated_date", "") or ""),
+        "updated_time": str(raw.get("updated_time", "") or ""),
+        "updated_by": str(raw.get("updated_by", "") or ""),
+        "error": str(raw.get("error", "") or ""),
+    }
+
+
+def load_auto_penalty_config():
+    pg_value = _phase1_pg_read("system", AUTO_PENALTY_CONFIG_KEY)
+    if pg_value is not _PHASE1_MISSING:
+        out = _phase1_normalize_auto_penalty(pg_value)
+        out["error"] = ""
+        return out
+    out = _phase1_normalize_auto_penalty(_gs_load_auto_penalty_config())
+    if not out.get("error"):
+        _phase1_mirror_sheet_value("system", AUTO_PENALTY_CONFIG_KEY, out)
+    return out
+
+
+def set_auto_penalty_paused(paused, updated_by):
+    now = datetime.now(VN_TZ)
+    status = AUTO_PENALTY_PAUSED if bool(paused) else AUTO_PENALTY_RUNNING
+    payload = {
+        "paused": bool(paused),
+        "status": status,
+        "threshold_minutes": AUTO_PENALTY_MINUTES,
+        "updated_date": now.strftime("%d/%m/%Y"),
+        "updated_time": now.strftime("%H:%M:%S"),
+        "updated_by": str(updated_by or "Admin"),
+        "error": "",
+    }
+    mode = _phase1_storage_mode()
+    state_vi = "TẠM DỪNG" if paused else "HOẠT ĐỘNG"
+    success_msg = f"Auto Update phạt đã chuyển sang trạng thái {state_vi}. Ngưỡng tự động: từ {AUTO_PENALTY_MINUTES} phút."
+    if mode == "postgres":
+        ok, err = _phase1_pg_write("system", AUTO_PENALTY_CONFIG_KEY, payload, updated_by)
+        return (True, success_msg) if ok else (False, f"Không cập nhật được trạng thái Auto Update trên PostgreSQL: {err}")
+    ok, msg = _gs_set_auto_penalty_paused(paused, updated_by)
+    if ok and mode == "dual":
+        pg_ok, pg_err = _phase1_pg_write("system", AUTO_PENALTY_CONFIG_KEY, payload, updated_by, source="dual_write")
+        if not pg_ok:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {pg_err}"
+    return ok, msg
+
+
+# ---------- Tạm dừng nhận đơn nghỉ dài hạn ----------
+_gs_load_long_leave_request_pause = load_long_leave_request_pause
+_gs_save_long_leave_request_pause = save_long_leave_request_pause
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def load_long_leave_request_pause():
+    default = {
+        "enabled": False,
+        "message": "Admin đang tạm dừng nhận đơn nghỉ dài hạn.",
+        "updated_by": "",
+        "updated_at": "",
+    }
+    pg_value = _phase1_pg_read("system", LONG_LEAVE_REQUEST_PAUSE_KEY)
+    if isinstance(pg_value, dict):
+        out = default.copy(); out.update(pg_value)
+        out["enabled"] = bool(out.get("enabled", False))
+        return out
+    out = _gs_load_long_leave_request_pause()
+    if isinstance(out, dict):
+        _phase1_mirror_sheet_value("system", LONG_LEAVE_REQUEST_PAUSE_KEY, out)
+    return out
+
+
+def save_long_leave_request_pause(enabled, username, message=""):
+    now = datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S")
+    payload = {
+        "enabled": bool(enabled),
+        "message": str(message or "Admin đang tạm dừng nhận đơn nghỉ dài hạn.").strip(),
+        "updated_by": str(username or "").strip(),
+        "updated_at": now,
+    }
+    mode = _phase1_storage_mode()
+    if mode == "postgres":
+        ok, err = _phase1_pg_write("system", LONG_LEAVE_REQUEST_PAUSE_KEY, payload, username)
+        _phase1_clear(load_long_leave_request_pause)
+        return (True, "Đã cập nhật trạng thái nhận đơn nghỉ dài hạn.") if ok else (False, f"Lỗi cập nhật trạng thái nhận đơn trên PostgreSQL: {err}")
+    ok, msg = _gs_save_long_leave_request_pause(enabled, username, message)
+    _phase1_clear(_gs_load_long_leave_request_pause)
+    _phase1_clear(load_long_leave_request_pause)
+    if ok and mode == "dual":
+        pg_ok, pg_err = _phase1_pg_write("system", LONG_LEAVE_REQUEST_PAUSE_KEY, payload, username, source="dual_write")
+        if not pg_ok:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {pg_err}"
+    return ok, msg
+
+
+# ---------- Menu Admin ----------
+_gs_load_admin_menu_order = load_admin_menu_order
+_gs_save_admin_menu_order = save_admin_menu_order
+
+
+def _phase1_clean_menu_pair(raw):
+    if isinstance(raw, list):
+        raw = {"desktop": list(raw), "mobile": list(raw)}
+    raw = raw if isinstance(raw, dict) else {}
+    out = {"desktop": [], "mobile": []}
+    for device in ("desktop", "mobile"):
+        seen = set()
+        for item in raw.get(device, []) if isinstance(raw.get(device, []), list) else []:
+            item = str(item).strip()
+            if item and item not in seen:
+                out[device].append(item); seen.add(item)
+    if not out["desktop"] and out["mobile"]:
+        out["desktop"] = list(out["mobile"])
+    if not out["mobile"] and out["desktop"]:
+        out["mobile"] = list(out["desktop"])
+    return out
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_admin_menu_order():
+    pg_value = _phase1_pg_read("ui", ADMIN_MENU_CONFIG_KEY)
+    if pg_value is not _PHASE1_MISSING:
+        return _phase1_clean_menu_pair(pg_value), ""
+    value, err = _gs_load_admin_menu_order()
+    value = _phase1_clean_menu_pair(value)
+    if not err:
+        _phase1_mirror_sheet_value("ui", ADMIN_MENU_CONFIG_KEY, value)
+    return value, err
+
+
+def save_admin_menu_order(order, username, device=None):
+    current, _ = load_admin_menu_order()
+    pair = _phase1_clean_menu_pair(current)
+    if isinstance(order, dict):
+        if "desktop" in order:
+            pair["desktop"] = _phase1_clean_menu_pair({"desktop": order.get("desktop", [])})["desktop"]
+        if "mobile" in order:
+            pair["mobile"] = _phase1_clean_menu_pair({"mobile": order.get("mobile", [])})["mobile"]
+    else:
+        target = str(device or _ui_runtime_device())
+        if target not in {"desktop", "mobile"}:
+            target = "desktop"
+        seen = set(); cleaned = []
+        for item in order or []:
+            item = str(item).strip()
+            if item and item not in seen:
+                cleaned.append(item); seen.add(item)
+        pair[target] = cleaned
+    mode = _phase1_storage_mode()
+    if mode == "postgres":
+        ok, err = _phase1_pg_write("ui", ADMIN_MENU_CONFIG_KEY, pair, username)
+        _phase1_clear(load_admin_menu_order)
+        return (True, "Đã lưu thứ tự MENU riêng cho Web và Mobile.") if ok else (False, f"Lỗi lưu thứ tự MENU admin trên PostgreSQL: {err}")
+    ok, msg = _gs_save_admin_menu_order(order, username, device=device)
+    _phase1_clear(_gs_load_admin_menu_order)
+    _phase1_clear(load_admin_menu_order)
+    if ok and mode == "dual":
+        pg_ok, pg_err = _phase1_pg_write("ui", ADMIN_MENU_CONFIG_KEY, pair, username, source="dual_write")
+        if not pg_ok:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {pg_err}"
+    return ok, msg
+
+
+# ---------- Global UI Theme ----------
+_gs_load_ui_theme_config = load_ui_theme_config
+_gs_save_ui_theme_config = save_ui_theme_config
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_ui_theme_config():
+    pg_value = _phase1_pg_read("ui", UI_THEME_KEY)
+    if pg_value is not _PHASE1_MISSING:
+        return _normalized_theme_config(pg_value), ""
+    value, err = _gs_load_ui_theme_config()
+    if not err:
+        _phase1_mirror_sheet_value("ui", UI_THEME_KEY, value)
+    return value, err
+
+
+def save_ui_theme_config(config, username):
+    cfg = _normalized_theme_config(config)
+    mode = _phase1_storage_mode()
+    if mode == "postgres":
+        ok, err = _phase1_pg_write("ui", UI_THEME_KEY, cfg, username)
+        _phase1_clear(load_ui_theme_config)
+        return (True, "Đã lưu giao diện Desktop/Mobile làm mặc định cho toàn hệ thống.") if ok else (False, f"Lỗi lưu cấu hình giao diện trên PostgreSQL: {err}")
+    ok, msg = _gs_save_ui_theme_config(cfg, username)
+    _phase1_clear(_gs_load_ui_theme_config)
+    _phase1_clear(load_ui_theme_config)
+    if ok and mode == "dual":
+        pg_ok, pg_err = _phase1_pg_write("ui", UI_THEME_KEY, cfg, username, source="dual_write")
+        if not pg_ok:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {pg_err}"
+    return ok, msg
+
+
+# ---------- Daily Summary UI ----------
+_gs_load_daily_summary_ui_config = load_daily_summary_ui_config
+_gs_save_daily_summary_ui_config = save_daily_summary_ui_config
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_daily_summary_ui_config():
+    pg_value = _phase1_pg_read("ui", DAILY_SUMMARY_UI_KEY)
+    if pg_value is not _PHASE1_MISSING:
+        return _normalize_daily_summary_ui_config(pg_value), ""
+    value, err = _gs_load_daily_summary_ui_config()
+    if not err:
+        _phase1_mirror_sheet_value("ui", DAILY_SUMMARY_UI_KEY, value)
+    return value, err
+
+
+def save_daily_summary_ui_config(config, username):
+    cfg = _normalize_daily_summary_ui_config(config)
+    mode = _phase1_storage_mode()
+    if mode == "postgres":
+        ok, err = _phase1_pg_write("ui", DAILY_SUMMARY_UI_KEY, cfg, username)
+        _phase1_clear(load_daily_summary_ui_config)
+        return (True, "Đã lưu giao diện bảng Thống kê chi tiết theo từng ngày.") if ok else (False, f"Lỗi lưu giao diện bảng thống kê ngày trên PostgreSQL: {err}")
+    ok, msg = _gs_save_daily_summary_ui_config(cfg, username)
+    _phase1_clear(_gs_load_daily_summary_ui_config)
+    _phase1_clear(load_daily_summary_ui_config)
+    if ok and mode == "dual":
+        pg_ok, pg_err = _phase1_pg_write("ui", DAILY_SUMMARY_UI_KEY, cfg, username, source="dual_write")
+        if not pg_ok:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {pg_err}"
+    return ok, msg
+
+
+# ---------- Data Table UI ----------
+_gs_load_data_table_ui_config = load_data_table_ui_config
+_gs_save_data_table_ui_config = save_data_table_ui_config
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_data_table_ui_config():
+    pg_value = _phase1_pg_read("ui", DATA_TABLE_UI_KEY)
+    if pg_value is not _PHASE1_MISSING:
+        return _normalize_data_table_config(pg_value), ""
+    value, err = _gs_load_data_table_ui_config()
+    if not err:
+        _phase1_mirror_sheet_value("ui", DATA_TABLE_UI_KEY, value)
+    return value, err
+
+
+def save_data_table_ui_config(config, username):
+    cfg = _normalize_data_table_config(config)
+    mode = _phase1_storage_mode()
+    if mode == "postgres":
+        ok, err = _phase1_pg_write("ui", DATA_TABLE_UI_KEY, cfg, username)
+        _phase1_clear(load_data_table_ui_config)
+        return (True, "Đã lưu cấu hình Data Table.") if ok else (False, f"Lỗi lưu Data Table UI trên PostgreSQL: {err}")
+    ok, msg = _gs_save_data_table_ui_config(cfg, username)
+    _phase1_clear(_gs_load_data_table_ui_config)
+    _phase1_clear(load_data_table_ui_config)
+    if ok and mode == "dual":
+        pg_ok, pg_err = _phase1_pg_write("ui", DATA_TABLE_UI_KEY, cfg, username, source="dual_write")
+        if not pg_ok:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {pg_err}"
+    return ok, msg
+
+
+# ---------- Compact Admin Preset ----------
+_gs_load_compact_admin_preset = load_compact_admin_preset
+_gs_save_compact_admin_preset = save_compact_admin_preset
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_compact_admin_preset():
+    pg_value = _phase1_pg_read("ui", COMPACT_ADMIN_PRESET_KEY)
+    if pg_value is not _PHASE1_MISSING:
+        return _normalize_compact_admin_preset(pg_value), ""
+    value, err = _gs_load_compact_admin_preset()
+    if not err:
+        _phase1_mirror_sheet_value("ui", COMPACT_ADMIN_PRESET_KEY, value)
+    return value, err
+
+
+def save_compact_admin_preset(config, username):
+    cfg = _normalize_compact_admin_preset(config)
+    mode = _phase1_storage_mode()
+    if mode == "postgres":
+        ok, err = _phase1_pg_write("ui", COMPACT_ADMIN_PRESET_KEY, cfg, username)
+        _phase1_clear(load_compact_admin_preset)
+        return (True, "Đã lưu preset Bảng quản trị gọn.") if ok else (False, f"Lỗi lưu preset quản trị trên PostgreSQL: {err}")
+    ok, msg = _gs_save_compact_admin_preset(cfg, username)
+    _phase1_clear(_gs_load_compact_admin_preset)
+    _phase1_clear(load_compact_admin_preset)
+    if ok and mode == "dual":
+        pg_ok, pg_err = _phase1_pg_write("ui", COMPACT_ADMIN_PRESET_KEY, cfg, username, source="dual_write")
+        if not pg_ok:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {pg_err}"
+    return ok, msg
+
+
+# ---------- Save Button UI ----------
+_gs_load_save_button_ui_config = load_save_button_ui_config
+_gs_save_save_button_ui_config = save_save_button_ui_config
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_save_button_ui_config():
+    pg_value = _phase1_pg_read("ui", SAVE_BUTTON_UI_KEY)
+    if pg_value is not _PHASE1_MISSING:
+        return _normalize_save_button_config(pg_value), ""
+    value, err = _gs_load_save_button_ui_config()
+    if not err:
+        _phase1_mirror_sheet_value("ui", SAVE_BUTTON_UI_KEY, value)
+    return value, err
+
+
+def save_save_button_ui_config(config, username):
+    cfg = _normalize_save_button_config(config)
+    mode = _phase1_storage_mode()
+    if mode == "postgres":
+        ok, err = _phase1_pg_write("ui", SAVE_BUTTON_UI_KEY, cfg, username)
+        _phase1_clear(load_save_button_ui_config)
+        return (True, "Đã lưu giao diện nút Lưu / Save.") if ok else (False, f"Lỗi lưu giao diện nút Lưu trên PostgreSQL: {err}")
+    ok, msg = _gs_save_save_button_ui_config(cfg, username)
+    _phase1_clear(_gs_load_save_button_ui_config)
+    _phase1_clear(load_save_button_ui_config)
+    if ok and mode == "dual":
+        pg_ok, pg_err = _phase1_pg_write("ui", SAVE_BUTTON_UI_KEY, cfg, username, source="dual_write")
+        if not pg_ok:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {pg_err}"
+    return ok, msg
+
+
+# ---------- Table Layouts ----------
+_gs_load_table_layouts = load_table_layouts
+_gs_save_table_layout_config = save_table_layout_config
+_PHASE1_TABLE_LAYOUT_KEY = "all_table_layouts_v930"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_table_layouts():
+    pg_value = _phase1_pg_read("ui_layout", _PHASE1_TABLE_LAYOUT_KEY)
+    if isinstance(pg_value, dict):
+        return pg_value, ""
+    value, err = _gs_load_table_layouts()
+    if not err:
+        _phase1_mirror_sheet_value("ui_layout", _PHASE1_TABLE_LAYOUT_KEY, value)
+    return value, err
+
+
+def _phase1_table_pair_from_existing(cfg):
+    devices_old = cfg.get("devices", {}) if isinstance(cfg, dict) and isinstance(cfg.get("devices", {}), dict) else {}
+    pair = {}
+    for d in ("desktop", "mobile"):
+        old = devices_old.get(d, {}) if isinstance(devices_old.get(d, {}), dict) else {}
+        pair[d] = {
+            "order": list(old.get("order", [])) if isinstance(old.get("order", []), list) else [],
+            "widths": dict(old.get("widths", {})) if isinstance(old.get("widths", {}), dict) else {},
+            "visual": dict(old.get("visual", {})) if isinstance(old.get("visual", {}), dict) else {},
+        }
+    return pair
+
+
+def save_table_layout_config(table_key, order, widths, username, visual=None, device=None):
+    mode = _phase1_storage_mode()
+    if mode == "postgres":
+        try:
+            layouts, _ = load_table_layouts()
+            layouts = dict(layouts) if isinstance(layouts, dict) else {}
+            old_cfg = layouts.get(table_key, {}) if isinstance(layouts.get(table_key, {}), dict) else {}
+            pair = _phase1_table_pair_from_existing(old_cfg)
+            pair_order = isinstance(order, dict) and any(k in order for k in ("desktop", "mobile"))
+            pair_widths = isinstance(widths, dict) and any(k in widths for k in ("desktop", "mobile"))
+            pair_visual = isinstance(visual, dict) and any(k in visual for k in ("desktop", "mobile"))
+            if pair_order or pair_widths or pair_visual:
+                for d in ("desktop", "mobile"):
+                    if pair_order and isinstance(order.get(d, []), list):
+                        pair[d]["order"] = [str(x) for x in order[d]]
+                    if pair_widths and isinstance(widths.get(d, {}), dict):
+                        pair[d]["widths"] = {str(k): max(50, min(800, int(float(v)))) for k, v in widths[d].items()}
+                    if pair_visual and isinstance(visual.get(d, {}), dict):
+                        pair[d]["visual"] = dict(visual[d])
+            else:
+                target = str(device or _ui_runtime_device())
+                if target not in {"desktop", "mobile"}:
+                    target = "desktop"
+                pair[target]["order"] = [str(x) for x in (order or [])]
+                pair[target]["widths"] = {str(k): max(50, min(800, int(float(v)))) for k, v in (widths or {}).items()}
+                if visual is not None:
+                    pair[target]["visual"] = dict(visual) if isinstance(visual, dict) else {}
+            now = datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S")
+            new_cfg = dict(old_cfg)
+            new_cfg["devices"] = pair
+            new_cfg["updated_at"] = now
+            new_cfg["updated_by"] = str(username)
+            new_cfg.pop("row", None)
+            layouts[str(table_key)] = new_cfg
+            ok, err = _phase1_pg_write("ui_layout", _PHASE1_TABLE_LAYOUT_KEY, layouts, username)
+            _phase1_clear(load_table_layouts)
+            return (True, "Đã lưu cấu hình bảng riêng cho Web và Mobile.") if ok else (False, f"Lỗi lưu giao diện tùy chỉnh trên PostgreSQL: {err}")
+        except Exception as exc:
+            return False, f"Lỗi lưu giao diện tùy chỉnh trên PostgreSQL: {exc}"
+
+    ok, msg = _gs_save_table_layout_config(table_key, order, widths, username, visual=visual, device=device)
+    _phase1_clear(_gs_load_table_layouts)
+    _phase1_clear(load_table_layouts)
+    if ok and mode == "dual":
+        try:
+            fresh, fresh_err = _gs_load_table_layouts()
+            if not fresh_err:
+                pg_ok, pg_err = _phase1_pg_write("ui_layout", _PHASE1_TABLE_LAYOUT_KEY, fresh, username, source="dual_write")
+                if not pg_ok:
+                    msg += f" ⚠️ PostgreSQL mirror lỗi: {pg_err}"
+        except Exception as exc:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {exc}"
+    return ok, msg
+
+
+# Kết thúc adapter Phase 1. Các hàm UI phía dưới tiếp tục gọi cùng tên hàm cũ.
+
+
 # Tải dữ liệu
 ensure_credential_control_columns()
 df_credentials = load_credentials_recent()
@@ -15803,6 +16299,57 @@ def save_system_maintenance_mode(enabled, username, message=""):
         return True, "Đã bật chế độ bảo trì." if enabled else "Đã tắt chế độ bảo trì."
     except Exception as e:
         return False, f"Lỗi cập nhật chế độ bảo trì: {e}"
+
+
+
+# ==========================================================
+# V93.0-PG1 - MAINTENANCE SETTING ADAPTER
+# ==========================================================
+_gs_load_system_maintenance_mode = load_system_maintenance_mode
+_gs_save_system_maintenance_mode = save_system_maintenance_mode
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def load_system_maintenance_mode():
+    default = {
+        "enabled": False,
+        "message": "Hệ thống đang tạm dừng để bảo trì. Vui lòng quay lại sau.",
+        "updated_by": "",
+        "updated_at": "",
+    }
+    pg_value = _phase1_pg_read("system", MAINTENANCE_MODE_KEY)
+    if isinstance(pg_value, dict):
+        out = default.copy(); out.update(pg_value)
+        out["enabled"] = bool(out.get("enabled", False))
+        return out
+    out = _gs_load_system_maintenance_mode()
+    if isinstance(out, dict):
+        _phase1_mirror_sheet_value("system", MAINTENANCE_MODE_KEY, out)
+    return out
+
+
+def save_system_maintenance_mode(enabled, username, message=""):
+    now = datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S")
+    payload = {
+        "enabled": bool(enabled),
+        "message": str(message or "Hệ thống đang tạm dừng để bảo trì. Vui lòng quay lại sau.").strip(),
+        "updated_by": str(username or "").strip(),
+        "updated_at": now,
+    }
+    mode = _phase1_storage_mode()
+    success_msg = "Đã bật chế độ bảo trì." if enabled else "Đã tắt chế độ bảo trì."
+    if mode == "postgres":
+        ok, err = _phase1_pg_write("system", MAINTENANCE_MODE_KEY, payload, username)
+        _phase1_clear(load_system_maintenance_mode)
+        return (True, success_msg) if ok else (False, f"Lỗi cập nhật chế độ bảo trì trên PostgreSQL: {err}")
+    ok, msg = _gs_save_system_maintenance_mode(enabled, username, message)
+    _phase1_clear(_gs_load_system_maintenance_mode)
+    _phase1_clear(load_system_maintenance_mode)
+    if ok and mode == "dual":
+        pg_ok, pg_err = _phase1_pg_write("system", MAINTENANCE_MODE_KEY, payload, username, source="dual_write")
+        if not pg_ok:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {pg_err}"
+    return ok, msg
 
 
 def _render_maintenance_lock_screen(maintenance_cfg):
@@ -16197,6 +16744,106 @@ div[data-testid="stFormSubmitButton"]>button{
                 else:
                     st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
     st.stop()
+
+
+# V92.6.10 - Sau khi đã đăng nhập, xóa sạch CSS login từng ẩn sidebar.
+# Đồng thời bảo đảm nút mở sidebar luôn hiện và bấm được trên mobile.
+components.html(r"""
+<script>
+(function(){
+  try {
+    const W = window.parent;
+    const D = W.document;
+
+    // Xóa các style login cũ/còn sót lại.
+    [
+      'vera-login-mobile-v907',
+      'vera-login-mobile-v909',
+      'vera-login-mobile-v910'
+    ].forEach(function(id){
+      const el = D.getElementById(id);
+      if (el) el.remove();
+    });
+
+    // Style cố định cho sidebar sau đăng nhập.
+    const STYLE_ID = 'vera-mobile-sidebar-fix-v92610';
+    let style = D.getElementById(STYLE_ID);
+    if (!style) {
+      style = D.createElement('style');
+      style.id = STYLE_ID;
+      D.head.appendChild(style);
+    }
+    style.textContent = `
+@media (max-width: 768px) {
+  [data-testid="stSidebar"] {
+    display: block !important;
+    visibility: visible !important;
+  }
+
+  [data-testid="collapsedControl"],
+  [data-testid="stSidebarCollapsedControl"],
+  [data-testid="stSidebarCollapsedControl"] button,
+  button[aria-label*="sidebar" i],
+  button[aria-label*="menu" i] {
+    visibility: visible !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    z-index: 999999 !important;
+  }
+
+  [data-testid="collapsedControl"],
+  [data-testid="stSidebarCollapsedControl"] {
+    position: fixed !important;
+    top: 8px !important;
+    left: 8px !important;
+    width: auto !important;
+    height: auto !important;
+  }
+
+  [data-testid="stSidebar"] {
+    z-index: 999998 !important;
+  }
+}
+    `;
+
+    // Nếu Streamlit đổi testid giữa các phiên bản, tìm nút mở menu theo aria-label.
+    function ensureMobileMenuButton(){
+      try {
+        if (!W.matchMedia('(max-width: 768px)').matches) return;
+
+        const selectors = [
+          '[data-testid="collapsedControl"] button',
+          '[data-testid="collapsedControl"]',
+          '[data-testid="stSidebarCollapsedControl"] button',
+          '[data-testid="stSidebarCollapsedControl"]',
+          'button[aria-label="Open sidebar"]',
+          'button[aria-label*="sidebar" i]',
+          'button[aria-label*="menu" i]'
+        ];
+
+        let found = null;
+        for (const s of selectors) {
+          const x = D.querySelector(s);
+          if (x) { found = x; break; }
+        }
+
+        if (found) {
+          found.style.visibility = 'visible';
+          found.style.opacity = '1';
+          found.style.pointerEvents = 'auto';
+          found.style.zIndex = '999999';
+        }
+      } catch(e) {}
+    }
+
+    [0, 100, 300, 800, 1600].forEach(function(ms){
+      setTimeout(ensureMobileMenuButton, ms);
+    });
+
+  } catch(e) {}
+})();
+</script>
+""", height=0, width=0)
 
 
 # V90.5: đồng bộ trạng thái nghỉ dài hạn theo ngày bắt đầu/kết thúc.
@@ -17308,13 +17955,16 @@ def collapse_sidebar_after_navigation_once():
       try {
         const doc = window.parent.document;
         const clickCollapse = () => {
-          const collapsedControl = doc.querySelector('[data-testid="collapsedControl"]');
+          const collapsedControl =
+            doc.querySelector('[data-testid="collapsedControl"]')
+            || doc.querySelector('[data-testid="stSidebarCollapsedControl"]');
           if (collapsedControl && collapsedControl.offsetParent !== null) return;
           const sidebar = doc.querySelector('[data-testid="stSidebar"]');
           if (!sidebar) return;
           const candidates = [
             doc.querySelector('[data-testid="stSidebarCollapseButton"] button'),
             doc.querySelector('[data-testid="stSidebarCollapseButton"]'),
+            doc.querySelector('[data-testid="stSidebarHeader"] button'),
             sidebar.querySelector('button[aria-label="Close sidebar"]'),
             sidebar.querySelector('button[aria-label*="sidebar" i]'),
             sidebar.querySelector('button[kind="header"]')

@@ -1,4 +1,4 @@
-# V92.6.2 - Tô màu dropdown Lý do nghỉ: CÓ phép xanh, KHÔNG phép đỏ, còn lại vàng (2026-08-21)
+# V92.6.3 - Lễ tân đăng ký nghỉ: email + thông báo tài khoản Nhân viên/Leader (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -2907,6 +2907,118 @@ def get_smtp_sender_credentials():
         except Exception:
             pass
     return sender_email, sender_pass
+
+
+def _credential_profile_by_username(username, credentials_df=None):
+    """Lấy hồ sơ mới nhất theo Tên nhân viên."""
+    try:
+        d = credentials_df if isinstance(credentials_df, pd.DataFrame) else load_credentials_fresh_for_email()
+        if d is None or d.empty or "Tên nhân viên" not in d.columns:
+            return {}
+        key = normalize_login_name(username)
+        hit = d[
+            d["Tên nhân viên"].astype(str).apply(normalize_login_name).eq(key)
+        ]
+        if hit.empty:
+            return {}
+        return hit.iloc[0].to_dict()
+    except Exception:
+        return {}
+
+
+def send_reception_leave_registration_email(
+    receptionist_username,
+    employee_username,
+    employee_role,
+    start_date,
+    end_date,
+    leave_reason,
+    leave_detail="",
+):
+    """
+    V92.6.3:
+    Lễ tân đăng ký lịch nghỉ cho nhanvien/leader -> gửi email tới nhân viên.
+    Header From + Reply-To dùng Email trong hồ sơ của chính user Lễ tân.
+    SMTP vẫn xác thực bằng tài khoản SMTP hệ thống để không lưu mật khẩu email cá nhân trong app.py.
+    """
+    try:
+        fresh_creds = load_credentials_fresh_for_email()
+        rec = _credential_profile_by_username(receptionist_username, fresh_creds)
+        emp = _credential_profile_by_username(employee_username, fresh_creds)
+
+        rec_role = str(rec.get("Phân quyền", "") or "").strip().lower()
+        target_role = str(employee_role or emp.get("Phân quyền", "") or "").strip().lower()
+        if rec_role != "letan":
+            return False, "Chỉ gửi email tự động khi người đăng ký là tài khoản Lễ tân."
+        if target_role not in {"nhanvien", "leader"}:
+            return False, "Email tự động này chỉ áp dụng cho Nhân viên/Leader."
+
+        receptionist_email = str(rec.get("Email", "") or "").strip()
+        employee_email = str(emp.get("Email", "") or "").strip()
+        if not receptionist_email or "@" not in receptionist_email:
+            return False, f"Tài khoản Lễ tân {receptionist_username} chưa có Email hợp lệ trong hồ sơ."
+        if not employee_email or "@" not in employee_email:
+            return False, f"Tài khoản {employee_username} chưa có Email hợp lệ trong hồ sơ."
+
+        smtp_email, smtp_password = get_smtp_sender_credentials()
+        if not smtp_email or not smtp_password:
+            return False, "Chưa cấu hình SMTP để gửi email."
+
+        s = start_date.date() if isinstance(start_date, datetime) else start_date
+        e = end_date.date() if isinstance(end_date, datetime) else end_date
+        if not isinstance(s, date) or not isinstance(e, date):
+            return False, "Ngày nghỉ không hợp lệ."
+
+        if s == e:
+            date_text = s.strftime("%d/%m/%Y")
+        else:
+            date_text = f"{s.strftime('%d/%m/%Y')} - {e.strftime('%d/%m/%Y')}"
+
+        receptionist_name = str(
+            rec.get("Họ và tên đầy đủ", "") or receptionist_username
+        ).strip()
+        employee_name = str(
+            emp.get("Họ và tên đầy đủ", "") or employee_username
+        ).strip()
+
+        # Nội dung phải BẮT ĐẦU bằng "Bộ phận lễ tân..."
+        body_html = f"""Bộ phận lễ tân Vera Spa thông báo lịch nghỉ đã được đăng ký cho {html.escape(employee_name)}.
+<br><br>
+<b>Ngày nghỉ:</b> {html.escape(date_text)}<br>
+<b>Lý do nghỉ:</b> {html.escape(clean_leave_reason_display(leave_reason))}<br>
+"""
+        if str(leave_detail or "").strip():
+            body_html += f"<b>Chi tiết/Ghi chú:</b> {html.escape(str(leave_detail).strip())}<br>"
+        body_html += (
+            f"<b>Người đăng ký:</b> {html.escape(receptionist_name)}"
+            f" ({html.escape(receptionist_username)})<br><br>"
+            "Vui lòng đăng nhập hệ thống VERA để kiểm tra lại lịch nghỉ."
+        )
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"Thông báo lịch nghỉ · {employee_username} · {date_text}"
+        # Địa chỉ hiển thị gửi và Reply-To đều là Email của user Lễ tân.
+        msg["From"] = f"Bộ phận lễ tân Vera Spa <{receptionist_email}>"
+        msg["Reply-To"] = receptionist_email
+        msg["Sender"] = smtp_email
+        msg["To"] = employee_email
+        msg.attach(MIMEText(body_html, "html", "utf-8"))
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(smtp_email, smtp_password)
+        server.sendmail(
+            smtp_email,
+            [employee_email],
+            msg.as_string(),
+        )
+        server.quit()
+        return True, (
+            f"Đã gửi email thông báo tới {employee_username} ({employee_email}) "
+            f"với địa chỉ Lễ tân {receptionist_email}."
+        )
+    except Exception as e:
+        return False, f"Không gửi được email thông báo lịch nghỉ: {e}"
 
 
 def gspread_update_range(sheet, range_name, values, **kwargs):
@@ -16247,6 +16359,104 @@ def dismiss_account_notice(username, notice_id, notice_key, message):
         return False, f"Không đóng được thông báo: {e}"
 
 
+def _reception_leave_notices_for_current_user(limit=5):
+    """
+    Các lịch nghỉ do tài khoản Lễ tân đăng ký cho chính Nhân viên/Leader đang đăng nhập.
+    Nguồn là Sheet lịch nghỉ hiện có nên không cần thêm sheet thông báo riêng.
+    Chỉ lấy bản ghi cập nhật trong 30 ngày gần nhất và ngày nghỉ từ hôm nay trở đi.
+    """
+    role = str(st.session_state.get("current_role", "") or "").strip().lower()
+    username = str(st.session_state.get("current_user", "") or "").strip()
+    if role not in {"nhanvien", "leader"} or not username:
+        return []
+
+    try:
+        d = load_backup_sheet_data()
+        if not isinstance(d, pd.DataFrame) or d.empty:
+            return []
+        required = {"Tên nhân viên", "Ngày", "Lý do nghỉ", "Người cập nhật"}
+        if not required.issubset(set(d.columns)):
+            return []
+
+        creds = load_credentials_recent()
+        role_map = {}
+        if isinstance(creds, pd.DataFrame) and not creds.empty:
+            for _, r in creds.iterrows():
+                role_map[normalize_login_name(r.get("Tên nhân viên", ""))] = (
+                    str(r.get("Phân quyền", "") or "").strip().lower()
+                )
+
+        out = d[
+            d["Tên nhân viên"].astype(str).apply(normalize_login_name)
+            .eq(normalize_login_name(username))
+        ].copy()
+        if out.empty:
+            return []
+
+        out["__creator_role"] = out["Người cập nhật"].astype(str).apply(
+            lambda x: role_map.get(normalize_login_name(x), "")
+        )
+        out = out[out["__creator_role"].eq("letan")].copy()
+        if out.empty:
+            return []
+
+        out["__leave_date"] = out["Ngày"].apply(_parse_vn_date)
+        today = get_vn_today()
+        out = out[
+            out["__leave_date"].apply(
+                lambda x: isinstance(x, date) and x >= today
+            )
+        ].copy()
+        if out.empty:
+            return []
+
+        if "Ngày cập nhật" in out.columns:
+            out["__updated_date"] = out["Ngày cập nhật"].apply(_parse_vn_date)
+            cutoff = today - timedelta(days=30)
+            out = out[
+                out["__updated_date"].apply(
+                    lambda x: isinstance(x, date) and x >= cutoff
+                )
+            ].copy()
+
+        # mới nhất trước
+        if "Giờ cập nhật" in out.columns:
+            out["__sort"] = (
+                out.get("Ngày cập nhật", "").astype(str)
+                + " "
+                + out["Giờ cập nhật"].astype(str)
+            )
+            out = out.sort_values("__sort", ascending=False, kind="stable")
+        else:
+            out = out.iloc[::-1]
+
+        notices = []
+        for _, r in out.head(max(1, int(limit))).iterrows():
+            d0 = r.get("__leave_date")
+            day_text = d0.strftime("%d/%m/%Y") if isinstance(d0, date) else str(r.get("Ngày", ""))
+            reason = clean_leave_reason_display(r.get("Lý do nghỉ", ""))
+            creator = str(r.get("Người cập nhật", "") or "").strip()
+            key_raw = "|".join([
+                normalize_login_name(username),
+                str(day_text),
+                normalize_leave_reason(reason),
+                normalize_login_name(creator),
+            ])
+            key = hashlib.sha1(key_raw.encode("utf-8")).hexdigest()[:20]
+            notices.append({
+                "message": (
+                    f"📅 Bộ phận lễ tân đã đăng ký lịch nghỉ cho bạn: "
+                    f"{day_text} · {reason}"
+                    + (f" · Lễ tân: {creator}" if creator else "")
+                    + "."
+                ),
+                "notice_key": f"reception_leave_registered:{key}",
+            })
+        return notices
+    except Exception:
+        return []
+
+
 # ==========================================================
 # V91.8 - THÔNG BÁO CLICK ĐỂ MỞ ĐÚNG KHU VỰC, KHÔNG RELOAD TRÌNH DUYỆT
 # ==========================================================
@@ -16603,6 +16813,20 @@ if _ll_notice_role in {"quanly", "letan", "leader"}:
                     f"long_leave_rejected_view:{_rej_id}",
                     kind="error",
                 )
+    except Exception:
+        pass
+
+
+# V92.6.3: Nhân viên/Leader nhận thông báo khi Lễ tân vừa đăng ký lịch nghỉ cho mình.
+if _ll_notice_role in {"nhanvien", "leader"}:
+    try:
+        for _rec_notice in _reception_leave_notices_for_current_user(limit=5):
+            render_clickable_app_notice(
+                _rec_notice["message"],
+                "📅 Đăng ký nghỉ phép",
+                _rec_notice["notice_key"],
+                kind="info",
+            )
     except Exception:
         pass
 
@@ -22113,6 +22337,37 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                                             str(note) for note in save_success_notes
                                             if note and "Người Thứ" in str(note)
                                         ]
+
+                                        # V92.6.3 - Lễ tân đăng ký cho Nhân viên/Leader:
+                                        # gửi 1 email tổng hợp cho cả lượt đăng ký.
+                                        _actor_role_v9263 = str(
+                                            st.session_state.get("current_role", "") or ""
+                                        ).strip().lower()
+                                        _target_profile_v9263 = _credential_profile_by_username(
+                                            chosen_nv, df_credentials
+                                        )
+                                        _target_role_v9263 = str(
+                                            _target_profile_v9263.get("Phân quyền", "") or ""
+                                        ).strip().lower()
+
+                                        if (
+                                            _actor_role_v9263 == "letan"
+                                            and _target_role_v9263 in {"nhanvien", "leader"}
+                                        ):
+                                            _mail_ok_v9263, _mail_msg_v9263 = send_reception_leave_registration_email(
+                                                st.session_state.current_user,
+                                                chosen_nv,
+                                                _target_role_v9263,
+                                                start_date,
+                                                end_date,
+                                                chosen_loai,
+                                                input_chitiet,
+                                            )
+                                            _flash_notes.append(
+                                                ("📧 " if _mail_ok_v9263 else "⚠️ ")
+                                                + str(_mail_msg_v9263)
+                                            )
+
                                         st.session_state["_leave_registration_flash_v884"] = (
                                             f"✅ Đã ghi nhận lịch nghỉ thành công cho {num_days_selected} ngày!"
                                         )

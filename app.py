@@ -1,4 +1,4 @@
-# V92.6.3 - Lễ tân đăng ký nghỉ: email + thông báo tài khoản Nhân viên/Leader (2026-08-21)
+# V92.6.4 - Nội dung thông báo/email dùng tên 'Lễ Tân' (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -2981,8 +2981,8 @@ def send_reception_leave_registration_email(
             emp.get("Họ và tên đầy đủ", "") or employee_username
         ).strip()
 
-        # Nội dung phải BẮT ĐẦU bằng "Bộ phận lễ tân..."
-        body_html = f"""Bộ phận lễ tân Vera Spa thông báo lịch nghỉ đã được đăng ký cho {html.escape(employee_name)}.
+        # Nội dung phải BẮT ĐẦU bằng "Lễ Tân..."
+        body_html = f"""Lễ Tân Vera Spa thông báo lịch nghỉ đã được đăng ký cho {html.escape(employee_name)}.
 <br><br>
 <b>Ngày nghỉ:</b> {html.escape(date_text)}<br>
 <b>Lý do nghỉ:</b> {html.escape(clean_leave_reason_display(leave_reason))}<br>
@@ -2998,7 +2998,7 @@ def send_reception_leave_registration_email(
         msg = MIMEMultipart("alternative")
         msg["Subject"] = f"Thông báo lịch nghỉ · {employee_username} · {date_text}"
         # Địa chỉ hiển thị gửi và Reply-To đều là Email của user Lễ tân.
-        msg["From"] = f"Bộ phận lễ tân Vera Spa <{receptionist_email}>"
+        msg["From"] = f"Lễ Tân Vera Spa <{receptionist_email}>"
         msg["Reply-To"] = receptionist_email
         msg["Sender"] = smtp_email
         msg["To"] = employee_email
@@ -16445,7 +16445,7 @@ def _reception_leave_notices_for_current_user(limit=5):
             key = hashlib.sha1(key_raw.encode("utf-8")).hexdigest()[:20]
             notices.append({
                 "message": (
-                    f"📅 Bộ phận lễ tân đã đăng ký lịch nghỉ cho bạn: "
+                    f"📅 Lễ Tân đã đăng ký lịch nghỉ cho bạn: "
                     f"{day_text} · {reason}"
                     + (f" · Lễ tân: {creator}" if creator else "")
                     + "."

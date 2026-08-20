@@ -1,4 +1,4 @@
-# V91.0 - Fix triệt để CSS Login: inject vào parent document, không render Markdown (2026-08-20)
+# V91.2 - Xóa CSS Login tùy biến gây hiện mã CSS, dùng login Streamlit sạch (2026-08-20)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -13813,210 +13813,48 @@ if (
 if not st.session_state.logged_in:
     # V90.7: LOGIN là màn hình độc lập, không để CSS/JS nghiệp vụ trước đó làm cắt hoặc
     # giữ lại nút của trang Đăng ký lịch nghỉ trên mobile.
-    # V91.0: chỉ render marker nhỏ; KHÔNG render CSS bằng Markdown.
-    st.markdown(
-        "<span id='vera-login-page-v910' style='display:none!important'></span>",
-        unsafe_allow_html=True,
-    )
-
+    # V91.2: dùng giao diện đăng nhập Streamlit nguyên bản để tránh mọi lỗi CSS hiển thị thành chữ.
+    # Chỉ cleanup DOM cũ từ các phiên bản trước; không inject CSS selector vào trang.
     components.html(r"""
     <script>
     (function(){
-      try {
-        const W = window.parent;
-        const D = W.document;
-        const STYLE_ID = 'vera-login-mobile-v910';
+      try{
+        const W=window.parent,D=W.document;
 
-        let style = D.getElementById(STYLE_ID);
-        if (!style) {
-          style = D.createElement('style');
-          style.id = STYLE_ID;
-          D.head.appendChild(style);
-        }
-
-        style.textContent = `
-[data-testid="stSidebar"]{
-  display:none!important;
-}
-.block-container{
-  max-width:760px!important;
-  margin-left:auto!important;
-  margin-right:auto!important;
-  padding-top:72px!important;
-  padding-bottom:40px!important;
-  padding-left:18px!important;
-  padding-right:18px!important;
-  overflow:visible!important;
-}
-[data-testid="stMarkdownContainer"] h1,
-.block-container h1{
-  display:block!important;
-  width:100%!important;
-  max-width:100%!important;
-  min-width:0!important;
-  height:auto!important;
-  min-height:0!important;
-  max-height:none!important;
-  margin:0 0 18px 0!important;
-  padding:0!important;
-  overflow:visible!important;
-  white-space:normal!important;
-  text-overflow:clip!important;
-  font-size:34px!important;
-  line-height:1.20!important;
-  font-weight:700!important;
-  text-align:left!important;
-  border:0!important;
-  box-shadow:none!important;
-  background:transparent!important;
-}
-div[data-testid="stForm"]{
-  width:100%!important;
-  max-width:100%!important;
-  min-width:0!important;
-  height:auto!important;
-  overflow:visible!important;
-  box-sizing:border-box!important;
-  margin:0!important;
-  padding:0!important;
-  border:0!important;
-  box-shadow:none!important;
-  background:transparent!important;
-}
-[data-testid="stTextInput"]{
-  width:100%!important;
-  min-width:0!important;
-  overflow:visible!important;
-}
-[data-testid="stTextInput"]>div,
-[data-testid="stTextInput"] input{
-  width:100%!important;
-  min-width:0!important;
-  box-sizing:border-box!important;
-}
-div[data-testid="stFormSubmitButton"]{
-  display:block!important;
-  width:100%!important;
-  margin-top:8px!important;
-}
-div[data-testid="stFormSubmitButton"]>button{
-  width:100%!important;
-  max-width:100%!important;
-  min-width:0!important;
-  height:auto!important;
-  min-height:48px!important;
-  overflow:visible!important;
-}
-@media(max-width:768px){
-  .block-container{
-    padding-top:calc(88px + env(safe-area-inset-top))!important;
-    padding-left:14px!important;
-    padding-right:14px!important;
-    padding-bottom:calc(36px + env(safe-area-inset-bottom))!important;
-    max-width:100%!important;
-  }
-  [data-testid="stMarkdownContainer"] h1,
-  .block-container h1{
-    font-size:29px!important;
-    line-height:1.20!important;
-    margin-bottom:16px!important;
-  }
-  [data-testid="stTextInput"] input{
-    min-height:48px!important;
-    font-size:16px!important;
-  }
-  [data-testid="stCaptionContainer"]{
-    line-height:1.4!important;
-    font-size:15px!important;
-  }
-  div[data-testid="stFormSubmitButton"]>button{
-    min-height:50px!important;
-    font-size:17px!important;
-  }
-}
-        `;
-
-        // Xóa style login cũ nếu còn tồn tại.
-        ['vera-login-mobile-v907','vera-login-mobile-v909'].forEach(function(id){
-          const old = D.getElementById(id);
-          if (old) old.remove();
+        // Xóa toàn bộ style login tùy biến cũ nếu tab trình duyệt còn giữ.
+        [
+          'vera-login-mobile-v907',
+          'vera-login-mobile-v909',
+          'vera-login-mobile-v910'
+        ].forEach(function(id){
+          const el=D.getElementById(id);
+          if(el) el.remove();
         });
 
-        // Dừng observer nút Save cũ trong màn login.
-        try {
-          if (W.__veraSaveButtonObserverV89) {
+        // Xóa marker cũ.
+        [
+          'vera-login-page-v907',
+          'vera-login-page-v909',
+          'vera-login-page-v910'
+        ].forEach(function(id){
+          const el=D.getElementById(id);
+          if(el) el.remove();
+        });
+
+        // Xóa floating save cũ.
+        const floater=D.getElementById('vera-global-floating-save-v72');
+        if(floater) floater.remove();
+
+        // Dừng observer Save cũ nếu còn.
+        try{
+          if(W.__veraSaveButtonObserverV89){
             W.__veraSaveButtonObserverV89.disconnect();
-            W.__veraSaveButtonObserverV89 = null;
+            W.__veraSaveButtonObserverV89=null;
           }
-        } catch(e) {}
+        }catch(e){}
 
-        // Xóa floating-save cũ nếu tab chưa reload hoàn toàn.
-        const oldFloat = D.getElementById('vera-global-floating-save-v72');
-        if (oldFloat) oldFloat.remove();
-
-        // Cuộn về đầu.
-        try { W.scrollTo({top:0,left:0,behavior:'instant'}); }
-        catch(e) { W.scrollTo(0,0); }
-
-      } catch(e) {}
-    })();
-    </script>
-    """, height=0, width=0)
-
-
-    # Xóa các DOM element nghiệp vụ bị giữ lại bởi observer từ lượt render trước.
-    components.html(r"""
-    <script>
-    (function(){
-      try {
-        const W = window.parent;
-        const D = W.document;
-
-        function cleanupLoginDom(){
-          /* Dừng observer đổi tên/style nút Save từ trang nghiệp vụ nếu đang tồn tại. */
-          try {
-            if (W.__veraSaveButtonObserverV89) {
-              W.__veraSaveButtonObserverV89.disconnect();
-              W.__veraSaveButtonObserverV89 = null;
-            }
-          } catch(e) {}
-
-          /* Gỡ class/dataset nút save cũ. */
-          D.querySelectorAll('button.vera-save-action-v89, button.vera-save-action-v884')
-            .forEach(function(btn){
-              btn.classList.remove('vera-save-action-v89');
-              btn.classList.remove('vera-save-action-v884');
-              try { delete btn.dataset.veraOriginalSaveLabel; } catch(e) {}
-            });
-
-          /* Nếu DOM cũ của trang nghiệp vụ còn sót, ẩn đúng các nút không thuộc form Login. */
-          D.querySelectorAll('button').forEach(function(btn){
-            const txt = String(btn.innerText || btn.textContent || '')
-              .replace(/\s+/g,' ').trim().toLowerCase();
-
-            const isBusinessButton =
-              txt.includes('xác nhận ghi lịch nghỉ') ||
-              txt.includes('gửi đơn xin nghỉ dài hạn') ||
-              txt.includes('duyệt nghỉ dài hạn') ||
-              txt.includes('không duyệt nghỉ');
-
-            if (isBusinessButton && !btn.closest('form')) {
-              const host = btn.closest('[data-testid="stButton"]') ||
-                           btn.closest('[data-testid="stFormSubmitButton"]') ||
-                           btn.parentElement;
-              if (host) host.style.display = 'none';
-            }
-          });
-
-          /* Cuộn login về đầu trang sau rerun. */
-          try { W.scrollTo({top:0, left:0, behavior:'instant'}); } catch(e) { W.scrollTo(0,0); }
-        }
-
-        cleanupLoginDom();
-        setTimeout(cleanupLoginDom, 80);
-        setTimeout(cleanupLoginDom, 300);
-        setTimeout(cleanupLoginDom, 800);
-      } catch(e) {}
+        try{W.scrollTo(0,0);}catch(e){}
+      }catch(e){}
     })();
     </script>
     """, height=0, width=0)
@@ -16657,6 +16495,13 @@ elif selected_page == "➕ Thêm nhân viên" and has_feature_access("employee_a
         _new_role_options = ALL_ACCOUNT_ROLES if st.session_state.current_role == 'admin' else ["nhanvien", "locker", "tapvu"]
         new_role = st.selectbox("Phân quyền", _new_role_options, filter_mode="contains", key="new_emp_role")
         new_fn = st.text_input("Họ và tên đầy đủ", key="new_emp_fullname")
+        new_dob = st.date_input(
+            "Ngày sinh",
+            value=None,
+            max_value=get_vn_today(),
+            format="DD/MM/YYYY",
+            key="new_emp_dob",
+        )
         new_phone = st.text_input("Số điện thoại", key="new_emp_phone")
         new_email = st.text_input("Email", key="new_emp_email")
     with col2:
@@ -16676,8 +16521,13 @@ elif selected_page == "➕ Thêm nhân viên" and has_feature_access("employee_a
                     st.error("Tên đăng nhập đã tồn tại (hệ thống không phân biệt dấu và HOA/thường)!")
                 else:
                     stt_new = len(all_emps)
+                    new_dob_text = (
+                        new_dob.strftime("%d/%m/%Y")
+                        if new_dob is not None
+                        else ""
+                    )
                     row_data = [
-                        stt_new, new_usr, str(new_pwd), new_role, new_fn, "", new_phone, new_email, new_address,
+                        stt_new, new_usr, str(new_pwd), new_role, new_fn, new_dob_text, new_phone, new_email, new_address,
                         new_bank_account, new_bank_name, "0", "0", "0", "", "", "", "", "", ""
                     ]
                     _gs_call_with_backoff(sheet_mk.append_row, row_data, value_input_option='USER_ENTERED')
@@ -16701,7 +16551,8 @@ elif selected_page == "➕ Thêm nhân viên" and has_feature_access("employee_a
 
                     if tl_ok and stt_ok and tl_sync_ok:
                         extra = f" · Ngày bắt đầu làm {start_work_date.strftime('%d/%m/%Y')}" if role_new not in TICHLUY_EXCLUDED_ROLES else ""
-                        st.success(f"Đã thêm thành công: {new_usr}{extra} · đã sắp xếp lại STT Sheet1/TichLuy.")
+                        dob_note = f" · Ngày sinh {new_dob_text}" if new_dob_text else ""
+                        st.success(f"Đã thêm thành công: {new_usr}{dob_note}{extra} · đã sắp xếp lại STT Sheet1/TichLuy.")
                     else:
                         st.warning(
                             f"Đã tạo tài khoản {new_usr}, nhưng có bước phụ chưa hoàn tất: "

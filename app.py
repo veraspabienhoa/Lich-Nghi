@@ -1,4 +1,4 @@
-# V92.6.65 - Snapshot dropdown + theo dõi nghỉ giữa ca trong bảng chấm công (2026-08-22)
+# V92.6.66 - Nút Ghi/Save xanh bóng + reset chắc chắn Lý do nghỉ sau khi lưu (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -15053,7 +15053,7 @@ SAVE_BUTTON_STYLE_OPTIONS = ["Thường", "Italic"]
 def _save_button_default_labels():
     return {
         "generic":"💾 Lưu",
-        "confirm_leave":"💾 Xác Nhận Ghi Lịch Nghỉ",
+        "confirm_leave":"💾 Ghi Lịch Nghỉ",
         "save_all":"💾 Lưu tất cả thay đổi",
         "save_default":"💾 Lưu làm mặc định",
         "overwrite":"💾 Ghi đè cập nhật bản lương này",
@@ -15061,12 +15061,14 @@ def _save_button_default_labels():
 
 
 def _save_button_default_config():
+    # V92.6.66 - preset Ghi/Save theo mẫu nút SAVE xanh bóng:
+    # chữ trắng đậm, nền xanh nhạt có highlight kính và bóng nổi.
     def one():
         return {
-            "font_family":"Roboto", "font_size":14, "font_weight":"700", "font_style":"Thường",
-            "text_color":"#173A63", "bg_color":"#DCEBFF", "border_color":"#8CB4E8",
-            "border_width":1, "radius":7, "width_px":0, "height_px":40, "shadow":"Nhẹ",
-            "hover_bg":"#C7DEFF", "hover_text":"#102E50",
+            "font_family":"Arial", "font_size":16, "font_weight":"800", "font_style":"Thường",
+            "text_color":"#FFFFFF", "bg_color":"#9DDEFF", "border_color":"#4EA9E7",
+            "border_width":1, "radius":12, "width_px":0, "height_px":44, "shadow":"Đậm",
+            "hover_bg":"#78D0FF", "hover_text":"#FFFFFF",
         }
     labels = _save_button_default_labels()
     return {
@@ -20369,38 +20371,67 @@ table tbody tr:hover td {{
 </style>
 """, unsafe_allow_html=True)
 
-# V89 - Nút Lưu / Save dùng cấu hình riêng từ UI Builder.
+# V92.6.66 - Nút Ghi / Lưu / Save dùng chung phong cách SAVE xanh bóng.
+# Giữ UI Builder để Admin vẫn chỉnh kích thước/bo góc, nhưng preset hình ảnh cốt lõi
+# (chữ trắng đậm + nền xanh nhạt bóng kính + shadow) được áp dụng đồng nhất toàn hệ thống.
 try:
     _save_btn_cfg, _save_btn_err = load_save_button_ui_config()
 except Exception:
     _save_btn_cfg = _save_button_default_config()
 _sbd = _save_btn_cfg["desktop"]; _sbm = _save_btn_cfg["mobile"]
-_save_shadow_map = {"Không":"none","Nhẹ":"0 2px 6px rgba(0,0,0,.10)","Vừa":"0 5px 14px rgba(0,0,0,.16)","Đậm":"0 10px 28px rgba(0,0,0,.24)"}
 _sbd_width = f"width:{int(_sbd.get('width_px',0))}px!important;max-width:100%!important;" if int(_sbd.get("width_px",0) or 0)>0 else ""
 _sbm_width = f"width:{int(_sbm.get('width_px',0))}px!important;max-width:100%!important;" if int(_sbm.get("width_px",0) or 0)>0 else ""
 st.markdown(f"""
-<style id="vera-save-action-style-v89">
+<style id="vera-save-action-style-v92666">
 button.vera-save-action-v89 {{
- font-family:'{str(_sbd.get("font_family","Roboto")).replace(chr(39),"")}',sans-serif!important;
- font-size:{int(_sbd.get("font_size",14))}px!important;font-weight:{_sbd.get("font_weight","700")}!important;
- font-style:{'italic' if _sbd.get("font_style")=='Italic' else 'normal'}!important;
- color:{_sbd.get("text_color","#173A63")}!important;background:{_sbd.get("bg_color","#DCEBFF")}!important;
- border:{int(_sbd.get("border_width",1))}px solid {_sbd.get("border_color","#8CB4E8")}!important;
- border-radius:{int(_sbd.get("radius",7))}px!important;min-height:{int(_sbd.get("height_px",40))}px!important;height:{int(_sbd.get("height_px",40))}px!important;
- {_sbd_width}box-shadow:{_save_shadow_map.get(_sbd.get("shadow","Nhẹ"),"none")}!important;
+ position:relative!important;overflow:hidden!important;isolation:isolate!important;
+ font-family:'Arial','Roboto',sans-serif!important;
+ font-size:16px!important;font-weight:800!important;font-style:normal!important;
+ color:#FFFFFF!important;
+ background:linear-gradient(180deg,#E9F9FF 0%,#BCEBFF 30%,#92DAFB 62%,#72C7F2 100%)!important;
+ border:1px solid #4EA9E7!important;
+ border-radius:{max(10,int(_sbd.get("radius",12)))}px!important;
+ min-height:{max(42,int(_sbd.get("height_px",44)))}px!important;
+ height:{max(42,int(_sbd.get("height_px",44)))}px!important;
+ {_sbd_width}
+ box-shadow:0 6px 14px rgba(17,111,181,.28),0 2px 4px rgba(0,82,155,.18),inset 0 1px 0 rgba(255,255,255,.98),inset 0 -2px 0 rgba(0,94,166,.14)!important;
+ text-shadow:0 1px 1px rgba(0,71,143,.95),0 0 2px rgba(0,91,180,.45)!important;
+ transition:transform .14s ease,box-shadow .14s ease,filter .14s ease!important;
 }}
-button.vera-save-action-v89:hover {{background:{_sbd.get("hover_bg","#C7DEFF")}!important;color:{_sbd.get("hover_text","#102E50")}!important;}}
+button.vera-save-action-v89::before {{
+ content:"";position:absolute;z-index:0;pointer-events:none;
+ left:5%;right:5%;top:3px;height:46%;border-radius:999px;
+ background:linear-gradient(180deg,rgba(255,255,255,.78),rgba(255,255,255,.28) 70%,rgba(255,255,255,0));
+ opacity:.88;
+}}
+button.vera-save-action-v89 > * {{position:relative!important;z-index:1!important;}}
+button.vera-save-action-v89 p,
+button.vera-save-action-v89 span,
+button.vera-save-action-v89 div {{
+ color:#FFFFFF!important;font-family:'Arial','Roboto',sans-serif!important;
+ font-size:16px!important;font-weight:800!important;font-style:normal!important;
+ text-shadow:0 1px 1px rgba(0,71,143,.95),0 0 2px rgba(0,91,180,.45)!important;
+}}
+button.vera-save-action-v89 svg {{color:#FFFFFF!important;fill:currentColor!important;filter:drop-shadow(0 1px 1px rgba(0,71,143,.55));}}
+button.vera-save-action-v89:hover:not(:disabled) {{
+ color:#FFFFFF!important;
+ background:linear-gradient(180deg,#F2FCFF 0%,#C9F0FF 28%,#9DE1FF 60%,#65C3F2 100%)!important;
+ box-shadow:0 8px 18px rgba(17,111,181,.34),0 3px 6px rgba(0,82,155,.20),inset 0 1px 0 rgba(255,255,255,1),inset 0 -2px 0 rgba(0,94,166,.16)!important;
+ transform:translateY(-1px)!important;filter:saturate(1.04)!important;
+}}
+button.vera-save-action-v89:active:not(:disabled) {{transform:translateY(1px)!important;box-shadow:0 3px 8px rgba(17,111,181,.24),inset 0 2px 4px rgba(0,86,155,.14)!important;}}
+button.vera-save-action-v89:disabled {{opacity:.55!important;filter:grayscale(.08)!important;}}
 @media (max-width:768px) {{
  button.vera-save-action-v89 {{
-  font-family:'{str(_sbm.get("font_family","Roboto")).replace(chr(39),"")}',sans-serif!important;
-  font-size:{int(_sbm.get("font_size",14))}px!important;font-weight:{_sbm.get("font_weight","700")}!important;
-  font-style:{'italic' if _sbm.get("font_style")=='Italic' else 'normal'}!important;
-  color:{_sbm.get("text_color","#173A63")}!important;background:{_sbm.get("bg_color","#DCEBFF")}!important;
-  border:{int(_sbm.get("border_width",1))}px solid {_sbm.get("border_color","#8CB4E8")}!important;
-  border-radius:{int(_sbm.get("radius",7))}px!important;min-height:{int(_sbm.get("height_px",40))}px!important;height:{int(_sbm.get("height_px",40))}px!important;
-  {_sbm_width}box-shadow:{_save_shadow_map.get(_sbm.get("shadow","Nhẹ"),"none")}!important;
+  font-size:16px!important;font-weight:800!important;
+  border-radius:{max(10,int(_sbm.get("radius",12)))}px!important;
+  min-height:{max(42,int(_sbm.get("height_px",44)))}px!important;
+  height:{max(42,int(_sbm.get("height_px",44)))}px!important;
+  {_sbm_width}
  }}
- button.vera-save-action-v89:hover {{background:{_sbm.get("hover_bg","#C7DEFF")}!important;color:{_sbm.get("hover_text","#102E50")}!important;}}
+ button.vera-save-action-v89 p,
+ button.vera-save-action-v89 span,
+ button.vera-save-action-v89 div {{font-size:16px!important;font-weight:800!important;color:#FFFFFF!important;}}
 }}
 </style>
 """,unsafe_allow_html=True)
@@ -20413,10 +20444,39 @@ components.html(f"""
   const labels=(W.matchMedia&&W.matchMedia('(max-width:768px)').matches)
     ? (labelSets.mobile||labelSets.desktop||{{}})
     : (labelSets.desktop||labelSets.mobile||{{}});
-  const rx=/(^|\\s)(lưu|save|ghi đè|xác nhận ghi)(\\s|$)/i;
-  function chooseLabel(original){{const low=String(original||'').toLowerCase();if(/xác nhận ghi lịch nghỉ/.test(low))return labels.confirm_leave||original;if(/lưu tất cả/.test(low))return labels.save_all||original;if(/lưu làm mặc định|lưu bố cục/.test(low))return labels.save_default||original;if(/ghi đè/.test(low))return labels.overwrite||original;return labels.generic||original;}}
-  function mark(){{D.querySelectorAll('button').forEach(function(btn){{let original=btn.dataset.veraOriginalSaveLabel||'';const current=String(btn.innerText||btn.textContent||'').replace(/\\s+/g,' ').trim();if(!original&&rx.test(current)){{original=current;btn.dataset.veraOriginalSaveLabel=current;}}if(original){{btn.classList.add('vera-save-action-v89');const display=chooseLabel(original);const q=btn.querySelector('p');if(q)q.textContent=display;else if(btn.textContent!==display)btn.textContent=display;}}else btn.classList.remove('vera-save-action-v89');}});}}
-  mark();if(!W.__veraSaveButtonObserverV89){{const ob=new MutationObserver(function(){{setTimeout(mark,20);}});ob.observe(D.body,{{childList:true,subtree:true,characterData:true}});W.__veraSaveButtonObserverV89=ob;}}setTimeout(mark,100);setTimeout(mark,400);
+  // V92.6.66: mọi button có nghĩa GHI / LƯU / SAVE đều nhận cùng style.
+  const rx=/(^|\\s)(lưu|save|ghi)(\\s|$)/i;
+  function chooseLabel(original){{
+    const clean=String(original||'').replace(/\\s+/g,' ').trim();
+    const low=clean.toLowerCase();
+    if(/xác nhận ghi lịch nghỉ|ghi lịch nghỉ/.test(low))return labels.confirm_leave||original;
+    if(/lưu tất cả/.test(low))return labels.save_all||original;
+    if(/lưu làm mặc định|lưu bố cục/.test(low))return labels.save_default||original;
+    if(/ghi đè/.test(low))return labels.overwrite||original;
+    if(/^(?:💾\\s*)?(?:lưu|save)$/i.test(clean))return labels.generic||original;
+    // Các nút Ghi/Lưu chuyên biệt khác chỉ đổi STYLE, giữ nguyên nội dung hiện tại.
+    return original;
+  }}
+  function mark(){{
+    D.querySelectorAll('button').forEach(function(btn){{
+      let original=btn.dataset.veraOriginalSaveLabel||'';
+      const current=String(btn.innerText||btn.textContent||'').replace(/\\s+/g,' ').trim();
+      if(!original&&rx.test(current)){{original=current;btn.dataset.veraOriginalSaveLabel=current;}}
+      if(original){{
+        btn.classList.add('vera-save-action-v89');
+        const display=chooseLabel(original);
+        const q=btn.querySelector('p');
+        if(q)q.textContent=display;else if(btn.textContent!==display)btn.textContent=display;
+      }}else btn.classList.remove('vera-save-action-v89');
+    }});
+  }}
+  mark();
+  if(!W.__veraSaveButtonObserverV92666){{
+    const ob=new MutationObserver(function(){{setTimeout(mark,20);}});
+    ob.observe(D.body,{{childList:true,subtree:true,characterData:true}});
+    W.__veraSaveButtonObserverV92666=ob;
+  }}
+  setTimeout(mark,100);setTimeout(mark,400);setTimeout(mark,1000);
  }}catch(e){{}}
 }})();
 </script>
@@ -27200,12 +27260,28 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
     _can_leave_detail_delete = action_access("leave_detail_delete")
     is_admin_leave_registration = str(st.session_state.get("current_role", "")).strip().lower() == "admin"
 
-    # V92.6.61: sau khi lưu thành công phải reset form; đặc biệt Lý do nghỉ luôn
-    # quay về option mặc định "-- Chọn lý do nghỉ --" ở lượt rerun kế tiếp.
+    # V92.6.66: reset chắc chắn Lý do nghỉ sau khi Ghi thành công.
+    # Không chỉ pop cùng một key (frontend có thể khôi phục widget cũ); mỗi lần reset sẽ
+    # tăng generation để Streamlit tạo Selectbox với widget-id MỚI và index 0 tuyệt đối.
+    _leave_reason_generation_key_v92666 = "_leave_reason_widget_generation_v92666"
+    try:
+        _leave_reason_generation_v92666 = int(
+            st.session_state.get(_leave_reason_generation_key_v92666, 0) or 0
+        )
+    except Exception:
+        _leave_reason_generation_v92666 = 0
+
     _leave_reset_pending = bool(st.session_state.pop("_leave_registration_reset_pending_v884", False))
     if _leave_reset_pending:
-        # Xóa state selectbox trước khi widget được tạo lại => Streamlit chọn index 0 mặc định.
+        # Dọn key tĩnh của các bản cũ + mọi widget Lý do nghỉ đã sinh trước đó.
         st.session_state.pop("sb_loai_nghi_live", None)
+        for _reset_key in list(st.session_state.keys()):
+            if str(_reset_key).startswith("sb_loai_nghi_live_v92666_"):
+                st.session_state.pop(_reset_key, None)
+
+        _leave_reason_generation_v92666 += 1
+        st.session_state[_leave_reason_generation_key_v92666] = _leave_reason_generation_v92666
+
         for _reset_key in [
             "sb_chosen_date", "sb_chosen_date_v92633_single",
             "sb_chosen_nv",
@@ -27219,6 +27295,14 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 or str(_reset_key).startswith("leave_reg_detail_")
             ):
                 st.session_state.pop(_reset_key, None)
+    else:
+        st.session_state.setdefault(
+            _leave_reason_generation_key_v92666, _leave_reason_generation_v92666
+        )
+
+    _leave_reason_widget_key_v92666 = (
+        f"sb_loai_nghi_live_v92666_{_leave_reason_generation_v92666}"
+    )
 
     # V92.6.27: khu Đăng ký lịch nghỉ luôn hiển thị với mọi tài khoản,
     # bao gồm Admin. Không dùng expander/collapse riêng cho Admin nữa.
@@ -27343,7 +27427,8 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 chosen_loai = st.selectbox(
                     "Lý do nghỉ:",
                     ["-- Chọn lý do nghỉ --"] + list_loai_nghi,
-                    key="sb_loai_nghi_live",
+                    index=0,
+                    key=_leave_reason_widget_key_v92666,
                     filter_mode="contains",
                 )
             render_leave_reason_selectbox_color(

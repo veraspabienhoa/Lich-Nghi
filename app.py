@@ -1,4 +1,4 @@
-# V92.6.25 - Date range luôn hiện + auto-open calendar + audit sửa/xóa lịch cho Admin (2026-08-21)
+# V92.6.26 - Rule Engine LoaiNghi A:N động hoàn toàn (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -7457,7 +7457,7 @@ def load_backup_sheet_data():
         )
     return _load_backup_sheet_data_from_sheets()
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def load_loai_nghi_from_gsheet():
     try:
         client = get_gspread_client()
@@ -8029,81 +8029,154 @@ def _parse_leave_number(value, default=0.0, money=False):
         return float(default)
 
 
-def build_leave_reason_catalog(source_df=None):
-    """
-    Danh mục Lý do nghỉ từ sheet LoaiNghi.
-    V92.6.24: ngoài Số ngày/Phạt còn đọc:
-      I = Số ngày đăng ký trước
-      J = Số ngày hủy trước
-    Việc đọc ưu tiên TÊN HEADER, không phụ thuộc tuyệt đối vào vị trí cột.
-    """
-    source = source_df if source_df is not None else globals().get("df_loai_nghi", pd.DataFrame())
-    catalog = {}
-    if source is None or source.empty:
-        return catalog
+def _leave_policy_row_value(row, aliases, fallback_idx=None, default=""):
+    """Đọc field LoaiNghi theo HEADER động; hỗ trợ cả header cũ và typo hiện hữu."""
+    aliases = [aliases] if isinstance(aliases, str) else list(aliases or [])
+    try:
+        normalized_columns = {
+            normalize_login_name(col): col for col in list(getattr(row, "index", []))
+        }
+        for alias in aliases:
+            actual = normalized_columns.get(normalize_login_name(alias))
+            if actual is not None:
+                value = row.get(actual, default)
+                try:
+                    if pd.isna(value):
+                        continue
+                except Exception:
+                    pass
+                return value
+    except Exception:
+        pass
 
-    def _row_value(row, header, fallback_idx=None, default=""):
+    if fallback_idx is not None:
         try:
-            if header in row.index:
-                value = row.get(header, default)
-                if not pd.isna(value):
-                    return value
-        except Exception:
-            pass
-        if fallback_idx is not None:
             vals = row.tolist()
-            if fallback_idx < len(vals):
-                value = vals[fallback_idx]
+            if 0 <= int(fallback_idx) < len(vals):
+                value = vals[int(fallback_idx)]
                 try:
                     if pd.isna(value):
                         return default
                 except Exception:
                     pass
                 return value
-        return default
+        except Exception:
+            pass
+    return default
+
+
+def _leave_policy_clean_text(value):
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value or "").strip()
+    return "" if text.casefold() in {"nan", "none", "nat", "<na>"} else text
+
+
+def _leave_policy_role_tokens(raw_value):
+    """Tách danh sách role ở H/K/N; chấp nhận cả 'ngoại trừ ...' và list thuần."""
+    norm = normalize_login_name(raw_value)
+    if not norm or norm in {"nan", "none", "tat ca", "all"}:
+        return set()
+    known = [
+        "admin", "quanly", "letan", "leader", "nhanvien",
+        "locker", "tapvu", "auto update",
+    ]
+    return {role for role in known if role in norm}
+
+
+def build_leave_reason_catalog(source_df=None):
+    """
+    Rule Engine LoaiNghi V2 — đọc A:N theo HEADER thực tế.
+
+    A STT
+    B Lý do nghỉ
+    C Loại nghỉ
+    D Chi tiết
+    E Số ngày tính phép
+    F Phạt vi phạm
+    G Chỉ nhập được cuối tuần / ngày được phép nhập
+    H User có quyền được nhập
+    I Kiểu đăng ký (sheet hiện tại đang ghi 'Kiều đăng ký' — code chấp nhận cả 2)
+    J Giá trị
+    K Ngoại trừ đăng ký
+    L Kiểu hủy
+    M Số ngày hủy trước / Giá trị hủy
+    N Ngoại trừ hủy
+
+    Từ bản này không gắn rule thời gian vào tên Lý do nghỉ. Thêm/đổi Lý do hoặc
+    thay số ngày/giờ/ngoại lệ chỉ cần sửa LoaiNghi.
+    """
+    source = source_df if source_df is not None else globals().get("df_loai_nghi", pd.DataFrame())
+    catalog = {}
+    if source is None or source.empty:
+        return catalog
 
     for _, row in source.iterrows():
-        name = str(_row_value(row, "Lý do nghỉ", 1, "") or "").strip()
-        name = clean_leave_reason_display(name)
-        if not name or name.lower() in {"nan", "none", "loại nghỉ", "lý do nghỉ"}:
+        name = clean_leave_reason_display(_leave_policy_clean_text(
+            _leave_policy_row_value(row, ["Lý do nghỉ", "Loại nghỉ"], 1, "")
+        ))
+        if not name or normalize_login_name(name) in {"loai nghi", "ly do nghi", "none", "nan"}:
             continue
 
-        detail_raw = _row_value(row, "Chi tiết", 3, "")
-        detail = "" if str(detail_raw).strip().lower() in {"nan", "none", "nat"} else str(detail_raw).strip()
-        days = _parse_leave_number(_row_value(row, "Số ngày tính phép", 4, 0), 0.0, money=False)
-        penalty_raw = _row_value(row, "Phạt vi phạm", 5, "")
+        detail = _leave_policy_clean_text(
+            _leave_policy_row_value(row, "Chi tiết", 3, "")
+        )
+        days = _parse_leave_number(
+            _leave_policy_row_value(row, ["Số ngày tính phép", "Số ngày tính"], 4, 0),
+            0.0,
+            money=False,
+        )
+        penalty_raw = _leave_policy_row_value(row, "Phạt vi phạm", 5, "")
         penalty = _parse_leave_number(penalty_raw, 0.0, money=True)
-        penalty_raw_text = str(penalty_raw).strip() if str(penalty_raw).strip().lower() not in {"nan", "none", "nat"} else ""
-        penalty_configured = penalty_raw_text.casefold() not in {"", "-", "nan", "none", "nat"}
+        penalty_text = _leave_policy_clean_text(penalty_raw)
 
-        allowed_days = str(
-            _row_value(row, "Chỉ nhập được cuối tuần", 6, "") or ""
-        ).strip()
-        allowed_roles = str(
-            _row_value(row, "User có quyền được nhập", 7, "") or ""
-        ).strip()
-        register_notice = str(
-            _row_value(row, "Số ngày đăng ký trước", 8, "") or ""
-        ).strip()
-        cancel_notice = str(
-            _row_value(row, "Số ngày hủy trước", 9, "") or ""
-        ).strip()
-        note = str(
-            _row_value(row, "Ghi chú", 10, "") or ""
-        ).strip()
-
-        catalog[normalize_leave_reason(name)] = {
+        item = {
             "name": name,
+            "leave_type": _leave_policy_clean_text(
+                _leave_policy_row_value(row, "Loại nghỉ", 2, "")
+            ),
             "detail": detail,
             "days": float(days),
             "penalty": float(penalty),
-            "penalty_configured": bool(penalty_configured),
-            "allowed_days": allowed_days,
-            "allowed_roles": allowed_roles,
-            "register_notice": register_notice,
-            "cancel_notice": cancel_notice,
-            "note": note,
+            "penalty_configured": penalty_text.casefold() not in {"", "-", "nan", "none", "nat"},
+            "allowed_days": _leave_policy_clean_text(
+                _leave_policy_row_value(
+                    row,
+                    ["Chỉ nhập được cuối tuần", "Ngày được phép nhập", "Ngày được nhập"],
+                    6,
+                    "",
+                )
+            ),
+            "allowed_roles": _leave_policy_clean_text(
+                _leave_policy_row_value(row, "User có quyền được nhập", 7, "")
+            ),
+            "register_type": _leave_policy_clean_text(
+                _leave_policy_row_value(row, ["Kiểu đăng ký", "Kiều đăng ký"], 8, "")
+            ),
+            "register_value": _leave_policy_clean_text(
+                _leave_policy_row_value(row, ["Giá trị", "Giá trị đăng ký"], 9, "")
+            ),
+            "register_exceptions": _leave_policy_clean_text(
+                _leave_policy_row_value(row, "Ngoại trừ đăng ký", 10, "")
+            ),
+            "cancel_type": _leave_policy_clean_text(
+                _leave_policy_row_value(row, "Kiểu hủy", 11, "")
+            ),
+            "cancel_value": _leave_policy_clean_text(
+                _leave_policy_row_value(row, ["Số ngày hủy trước", "Giá trị hủy"], 12, "")
+            ),
+            "cancel_exceptions": _leave_policy_clean_text(
+                _leave_policy_row_value(row, "Ngoại trừ hủy", 13, "")
+            ),
         }
+
+        # Alias tương thích cho các đoạn code/caption cũ nếu còn gọi.
+        item["register_notice"] = item["register_type"]
+        item["cancel_notice"] = item["cancel_type"]
+        catalog[normalize_leave_reason(name)] = item
     return catalog
 
 
@@ -8122,102 +8195,145 @@ def _leave_notice_policy_item(reason, source_df=None):
     return None
 
 
-def _parse_leave_notice_rule(raw_value, rule_kind="register"):
-    """
-    Chuẩn hóa giá trị I/J thành rule machine-readable.
+def _leave_policy_number(value):
+    text = _leave_policy_clean_text(value).replace(",", ".")
+    m = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except Exception:
+        return None
 
-    Hỗ trợ:
-    - số nguyên, ví dụ 3
-    - Không giới hạn
-    - Ngày hiện tại từ 09:00
-    - Không được hủy ngày hiện tại, ngoại letan, quanly, admin
-    - rỗng: chưa cấu hình
-    """
-    raw = str(raw_value or "").strip()
-    norm = normalize_login_name(raw)
 
-    if not raw or norm in {"nan", "none", "nat"}:
-        return {"mode": "blank", "raw": ""}
+def _leave_policy_time(value):
+    """Đọc 9:00, 09:00, 9h00; trả (hour, minute) hoặc None."""
+    text = normalize_login_name(_leave_policy_clean_text(value))
+    m = re.search(r"\b(\d{1,2})\s*(?::|h)\s*(\d{1,2})?\b", text)
+    if not m:
+        # Cho phép chỉ nhập 9 / 09 ở cột Giá trị.
+        m2 = re.fullmatch(r"\s*(\d{1,2})\s*", text)
+        if not m2:
+            return None
+        hour, minute = int(m2.group(1)), 0
+    else:
+        hour, minute = int(m.group(1)), int(m.group(2) or 0)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
 
-    # Chấp nhận 3, 3.0, "3 ngày".
-    m_num = re.fullmatch(r"\s*(\d+(?:[.,]0+)?)\s*(?:ngay)?\s*", normalize_login_name(raw))
-    if m_num:
-        try:
-            days = int(float(m_num.group(1).replace(",", ".")))
-            return {"mode": "days_before", "days": max(0, days), "raw": raw}
-        except Exception:
-            pass
+
+def _parse_leave_policy_rule(rule_type, rule_value="", rule_kind="register"):
+    """Biến I/J hoặc L/M thành rule machine-readable, không phụ thuộc tên Lý do nghỉ."""
+    raw_type = _leave_policy_clean_text(rule_type)
+    raw_value = _leave_policy_clean_text(rule_value)
+    norm = normalize_login_name(raw_type)
+
+    if not raw_type:
+        return {"mode": "blank", "raw_type": "", "raw_value": raw_value}
 
     if "khong gioi han" in norm:
-        return {"mode": "unlimited", "raw": raw}
+        return {"mode": "unlimited", "raw_type": raw_type, "raw_value": raw_value}
 
-    if rule_kind == "register" and "ngay hien tai" in norm and "tu" in norm:
-        m_time = re.search(r"(\d{1,2})\s*[:h]\s*(\d{1,2})?", norm)
-        hour = int(m_time.group(1)) if m_time else 9
-        minute = int(m_time.group(2) or 0) if m_time else 0
+    if "truoc n ngay" in norm or norm in {"truoc ngay", "before days"}:
+        num = _leave_policy_number(raw_value)
+        if num is None:
+            return {"mode": "invalid", "raw_type": raw_type, "raw_value": raw_value}
+        return {
+            "mode": "days_before",
+            "days": max(0, int(num)),
+            "raw_type": raw_type,
+            "raw_value": raw_value,
+        }
+
+    if rule_kind == "register" and "ngay hien tai tu gio" in norm:
+        hm = _leave_policy_time(raw_value)
+        if hm is None:
+            return {"mode": "invalid", "raw_type": raw_type, "raw_value": raw_value}
         return {
             "mode": "same_day_after",
-            "hour": max(0, min(23, hour)),
-            "minute": max(0, min(59, minute)),
-            "raw": raw,
+            "hour": hm[0],
+            "minute": hm[1],
+            "raw_type": raw_type,
+            "raw_value": raw_value,
         }
 
     if rule_kind == "cancel" and "khong duoc huy ngay hien tai" in norm:
-        exceptions = set()
-        if "ngoai" in norm:
-            suffix = norm.split("ngoai", 1)[1]
-            for role in ["letan", "quanly", "admin", "leader", "nhanvien"]:
-                if role in suffix:
-                    exceptions.add(role)
+        return {"mode": "no_same_day", "raw_type": raw_type, "raw_value": raw_value}
+
+    if (
+        "khong cho phep" in norm
+        or (rule_kind == "register" and "khong duoc dang ky" in norm)
+        or (rule_kind == "cancel" and "khong duoc huy" in norm)
+    ):
+        return {"mode": "deny", "raw_type": raw_type, "raw_value": raw_value}
+
+    # Tương thích dữ liệu cũ nếu trước đây ô rule chỉ chứa số hoặc câu gộp.
+    numeric = _leave_policy_number(raw_type)
+    if numeric is not None and re.fullmatch(r"\s*\d+(?:[.,]\d+)?\s*(?:ngay)?\s*", norm):
         return {
-            "mode": "no_same_day_except",
-            "except_roles": exceptions,
-            "raw": raw,
+            "mode": "days_before",
+            "days": max(0, int(numeric)),
+            "raw_type": raw_type,
+            "raw_value": raw_value,
         }
+    if rule_kind == "register" and "ngay hien tai" in norm and "tu" in norm:
+        hm = _leave_policy_time(raw_type)
+        if hm is not None:
+            return {
+                "mode": "same_day_after",
+                "hour": hm[0],
+                "minute": hm[1],
+                "raw_type": raw_type,
+                "raw_value": raw_value,
+            }
 
-    if rule_kind == "cancel" and "khong duoc huy" in norm:
-        return {"mode": "deny", "raw": raw}
-
-    return {"mode": "unknown", "raw": raw}
+    return {"mode": "unknown", "raw_type": raw_type, "raw_value": raw_value}
 
 
 def leave_notice_policy_text(reason):
-    """Chuỗi mô tả rule I/J để hiển thị ngay dưới Lý do nghỉ."""
     item = _leave_notice_policy_item(reason)
     if not item:
         return ""
-    reg = str(item.get("register_notice", "") or "").strip() or "(chưa cấu hình)"
-    cancel = str(item.get("cancel_notice", "") or "").strip() or "(chưa cấu hình)"
-    return f"Đăng ký trước: **{reg}** · Hủy trước: **{cancel}**"
 
+    def _fmt(kind):
+        if kind == "register":
+            typ = item.get("register_type", "") or "(chưa cấu hình)"
+            val = item.get("register_value", "")
+            exc = item.get("register_exceptions", "")
+        else:
+            typ = item.get("cancel_type", "") or "(chưa cấu hình)"
+            val = item.get("cancel_value", "")
+            exc = item.get("cancel_exceptions", "")
+        out = typ
+        if val:
+            out += f" · {val}"
+        if exc:
+            out += f" · ngoại lệ: {exc}"
+        return out
+
+    return f"Đăng ký: **{_fmt('register')}** · Hủy: **{_fmt('cancel')}**"
 
 
 def _leave_allowed_role_tokens(raw_value):
-    norm = normalize_login_name(raw_value)
-    if not norm or norm in {"nan", "none", "tat ca", "all"}:
-        return set()
-    roles = set()
-    for role in ["admin", "quanly", "letan", "leader", "nhanvien", "locker", "tapvu", "auto update"]:
-        if role in norm:
-            roles.add(role)
-    return roles
+    # Giữ tên hàm cũ cho các call hiện hữu.
+    return _leave_policy_role_tokens(raw_value)
 
 
 def _leave_day_rule_matches(raw_value, target_date):
-    """Kiểm cột G của LoaiNghi theo đúng ngày thực tế."""
+    """Kiểm cột G của LoaiNghi theo đúng thứ/ngày thực tế."""
     norm = normalize_login_name(raw_value)
     if not norm or norm in {"nan", "none", "tat ca", "all"}:
         return True
     if not isinstance(target_date, date):
         return False
-
     weekday_tokens = {
         0: ["thu hai", "t2"],
         1: ["thu ba", "t3"],
         2: ["thu tu", "t4"],
         3: ["thu nam", "t5"],
         4: ["thu sau", "t6"],
-        5: ["thu bay", "thu bay", "t7", "cuoi tuan"],
+        5: ["thu bay", "t7", "cuoi tuan"],
         6: ["chu nhat", "cn", "cuoi tuan"],
     }
     return any(token in norm for token in weekday_tokens.get(target_date.weekday(), []))
@@ -8225,11 +8341,10 @@ def _leave_day_rule_matches(raw_value, target_date):
 
 def validate_leave_reason_catalog_access(reason, target_date, role=None):
     """
-    Rule gốc từ LoaiNghi:
+    Quyền nền từ LoaiNghi:
       G = ngày được phép nhập
       H = role được phép nhập
-
-    Admin vẫn có quyền override dữ liệu. Các role khác phải thỏa cả G và H.
+    Ngoại trừ K/N chỉ miễn RULE THỜI GIAN, không tự cấp quyền H và không bỏ rule G.
     """
     role = str(
         role if role is not None else st.session_state.get("current_role", "")
@@ -8241,49 +8356,51 @@ def validate_leave_reason_catalog_access(reason, target_date, role=None):
     if not item:
         return False, f"Không tìm thấy Lý do nghỉ '{clean_leave_reason_display(reason)}' trong LoaiNghi."
 
-    allowed_roles = _leave_allowed_role_tokens(item.get("allowed_roles", ""))
+    allowed_roles = _leave_policy_role_tokens(item.get("allowed_roles", ""))
     if allowed_roles and role not in allowed_roles:
         return False, (
-            f"Tài khoản {role} không được phép nhập lý do "
-            f"'{item.get('name', reason)}' theo cột 'User có quyền được nhập' của LoaiNghi."
+            f"Tài khoản {role} không được phép nhập lý do '{item.get('name', reason)}' "
+            "theo cột 'User có quyền được nhập'."
         )
 
     if not _leave_day_rule_matches(item.get("allowed_days", ""), target_date):
         return False, (
             f"'{item.get('name', reason)}' không được nhập vào "
             f"{_vn_weekday_label(target_date)} {target_date.strftime('%d/%m/%Y')} "
-            "theo quy định ngày của LoaiNghi."
+            "theo cột quy định ngày của LoaiNghi."
         )
     return True, ""
 
 
 def validate_leave_registration_notice(reason, target_date, role=None, now_vn=None):
-    """
-    Kiểm tra CỘT I cho một ngày đăng ký.
-
-    Admin giữ quyền override hệ thống để sửa dữ liệu đặc biệt/backfill.
-    Auto Update không đi qua form này.
-    """
+    """Kiểm đăng ký động theo G/H + I/J/K của LoaiNghi."""
     role = str(role if role is not None else st.session_state.get("current_role", "")).strip().lower()
     if role == "admin":
         return True, ""
-
     if not isinstance(target_date, date):
         return False, "Ngày đăng ký không hợp lệ."
 
-    access_ok, access_msg = validate_leave_reason_catalog_access(
-        reason, target_date, role=role
-    )
+    access_ok, access_msg = validate_leave_reason_catalog_access(reason, target_date, role=role)
     if not access_ok:
         return False, access_msg
 
     now_vn = now_vn or datetime.now(VN_TZ)
     today = now_vn.date()
+    if target_date < today:
+        return False, "Không được đăng ký lịch ở ngày quá khứ."
+
     item = _leave_notice_policy_item(reason)
     if not item:
         return False, f"Không tìm thấy cấu hình LoaiNghi cho '{clean_leave_reason_display(reason)}'."
 
-    rule = _parse_leave_notice_rule(item.get("register_notice", ""), "register")
+    # K = ngoại trừ đăng ký: miễn rule I/J nhưng vẫn phải thỏa G/H và không đăng ký quá khứ.
+    register_exceptions = _leave_policy_role_tokens(item.get("register_exceptions", ""))
+    if role in register_exceptions:
+        return True, ""
+
+    rule = _parse_leave_policy_rule(
+        item.get("register_type", ""), item.get("register_value", ""), "register"
+    )
     mode = rule.get("mode")
 
     if mode == "days_before":
@@ -8292,69 +8409,58 @@ def validate_leave_registration_notice(reason, target_date, role=None, now_vn=No
         if target_date < min_date:
             return False, (
                 f"'{item.get('name', reason)}' phải đăng ký trước ít nhất {days} ngày. "
-                f"Hôm nay {today.strftime('%d/%m/%Y')}, ngày sớm nhất được đăng ký là "
-                f"{min_date.strftime('%d/%m/%Y')}."
+                f"Ngày sớm nhất được đăng ký là {min_date.strftime('%d/%m/%Y')}."
             )
-        return True, ""
-
-    if mode == "unlimited":
-        if target_date < today:
-            return False, "Không được đăng ký lịch ở ngày quá khứ."
         return True, ""
 
     if mode == "same_day_after":
+        hh, mm = int(rule.get("hour", 0)), int(rule.get("minute", 0))
         if target_date != today:
             return False, (
-                f"'{item.get('name', reason)}' chỉ được đăng ký cho NGÀY HIỆN TẠI "
-                f"từ {int(rule.get('hour', 9)):02d}:{int(rule.get('minute', 0)):02d}."
+                f"'{item.get('name', reason)}' chỉ được đăng ký cho ngày hiện tại từ "
+                f"{hh:02d}:{mm:02d}."
             )
-        cutoff = now_vn.replace(
-            hour=int(rule.get("hour", 9)),
-            minute=int(rule.get("minute", 0)),
-            second=0,
-            microsecond=0,
-        )
+        cutoff = now_vn.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if now_vn < cutoff:
-            return False, (
-                f"'{item.get('name', reason)}' chỉ được đăng ký từ "
-                f"{cutoff.strftime('%H:%M')} trong ngày hiện tại."
-            )
+            return False, f"'{item.get('name', reason)}' chỉ được đăng ký từ {cutoff.strftime('%H:%M')} hôm nay."
         return True, ""
 
+    if mode == "unlimited":
+        return True, ""
+    if mode == "deny":
+        return False, f"'{item.get('name', reason)}' đang được cấu hình không cho phép đăng ký."
     if mode == "blank":
-        return False, (
-            f"LoaiNghi chưa cấu hình 'Số ngày đăng ký trước' cho "
-            f"'{item.get('name', reason)}'."
-        )
+        return False, f"LoaiNghi chưa cấu hình 'Kiểu đăng ký' cho '{item.get('name', reason)}'."
 
     return False, (
-        f"Không nhận diện được quy định đăng ký '{rule.get('raw', '')}' "
-        f"của '{item.get('name', reason)}'."
+        f"Không nhận diện được Kiểu đăng ký '{rule.get('raw_type', '')}' / "
+        f"Giá trị '{rule.get('raw_value', '')}' của '{item.get('name', reason)}'."
     )
 
 
 def validate_leave_cancel_notice(reason, target_date, role=None, today=None):
-    """
-    Kiểm tra CỘT J cho Hủy/Sửa bản ghi cũ.
-
-    - Admin: override toàn quyền.
-    - J rỗng: Nhân viên/Leader không được hủy; Lễ tân/Quản lý được xử lý
-      nếu có quyền chức năng, nhưng không được xóa quá khứ.
-    - 'Không giới hạn': bỏ giới hạn báo trước, nhưng non-admin vẫn không xóa quá khứ.
-    """
+    """Kiểm hủy/sửa động theo L/M/N của LoaiNghi."""
     role = str(role if role is not None else st.session_state.get("current_role", "")).strip().lower()
     if role == "admin":
         return True, ""
-
     today = today or get_vn_today()
     if not isinstance(target_date, date):
         return False, "Ngày lịch nghỉ không hợp lệ."
+    if target_date < today:
+        return False, "Không được hủy/thay đổi lịch trong quá khứ."
 
     item = _leave_notice_policy_item(reason)
     if not item:
         return False, f"Không tìm thấy cấu hình LoaiNghi cho '{clean_leave_reason_display(reason)}'."
 
-    rule = _parse_leave_notice_rule(item.get("cancel_notice", ""), "cancel")
+    # N = ngoại trừ hủy: miễn rule L/M nhưng không bỏ quyền chức năng và không cho xóa quá khứ.
+    cancel_exceptions = _leave_policy_role_tokens(item.get("cancel_exceptions", ""))
+    if role in cancel_exceptions:
+        return True, ""
+
+    rule = _parse_leave_policy_rule(
+        item.get("cancel_type", ""), item.get("cancel_value", ""), "cancel"
+    )
     mode = rule.get("mode")
 
     if mode == "days_before":
@@ -8367,37 +8473,29 @@ def validate_leave_cancel_notice(reason, target_date, role=None, today=None):
             )
         return True, ""
 
-    if mode == "no_same_day_except":
-        if target_date < today:
-            return False, "Không được hủy/thay đổi lịch trong quá khứ."
-        if target_date == today and role not in set(rule.get("except_roles") or set()):
-            return False, (
-                f"'{item.get('name', reason)}' không được hủy/thay đổi trong ngày hiện tại "
-                "đối với tài khoản này."
-            )
+    if mode == "no_same_day":
+        if target_date == today:
+            return False, f"'{item.get('name', reason)}' không được hủy/thay đổi trong ngày hiện tại."
         return True, ""
 
     if mode == "unlimited":
-        if target_date < today:
-            return False, "Không được hủy/thay đổi lịch trong quá khứ."
         return True, ""
+    if mode == "deny":
+        return False, f"'{item.get('name', reason)}' đang được cấu hình không cho phép hủy."
 
     if mode == "blank":
+        # Tương thích an toàn với các dòng Phát sinh hiện đang để trống Kiểu hủy:
+        # Leader/Nhân viên không được tự hủy; Lễ tân/Quản lý vẫn có thể xử lý nếu đã có quyền chức năng.
         if role in {"letan", "quanly"}:
-            if target_date < today:
-                return False, "Lễ tân/Quản lý không được hủy/thay đổi lịch trong quá khứ."
             return True, ""
         return False, (
-            f"'{item.get('name', reason)}' chưa cấu hình Số ngày hủy trước. "
-            "Nhân viên/Leader không được hủy/thay đổi lý do này."
+            f"'{item.get('name', reason)}' chưa cấu hình 'Kiểu hủy'. "
+            "Nhân viên/Leader không được tự hủy/thay đổi lý do này."
         )
 
-    if mode == "deny":
-        return False, f"'{item.get('name', reason)}' được cấu hình không cho phép hủy."
-
     return False, (
-        f"Không nhận diện được quy định hủy '{rule.get('raw', '')}' "
-        f"của '{item.get('name', reason)}'."
+        f"Không nhận diện được Kiểu hủy '{rule.get('raw_type', '')}' / "
+        f"Giá trị '{rule.get('raw_value', '')}' của '{item.get('name', reason)}'."
     )
 
 
@@ -9661,8 +9759,8 @@ def validate_employee_leave_change_permission(
     """
     Nhân viên/Leader:
     - chỉ thao tác lịch của chính mình;
-    - thời hạn HỦY/SỬA bản ghi cũ lấy từ LoaiNghi!J theo đúng Lý do nghỉ;
-    - khi sửa sang ngày/lý do mới, thời hạn ĐĂNG KÝ mới lấy từ LoaiNghi!I;
+    - rule HỦY/SỬA bản ghi cũ lấy từ LoaiNghi!L/M/N theo đúng Lý do nghỉ;
+    - khi sửa sang ngày/lý do mới, rule ĐĂNG KÝ mới lấy từ LoaiNghi!I/J/K;
     - vẫn giữ các giới hạn nghiệp vụ về nhóm lý do và ownership.
     """
     today = today or get_vn_today()
@@ -9749,7 +9847,7 @@ def validate_employee_leave_change_permission(
     return True, ""
 
 def validate_schedule_delete_permission(original_row, role, current_user=None, today=None):
-    """Quyền xóa = quyền chức năng + rule LoaiNghi!J + rule sở hữu/nghiệp vụ."""
+    """Quyền xóa = quyền chức năng + rule LoaiNghi!L/M/N + rule sở hữu/nghiệp vụ."""
     today = today or get_vn_today()
     role = str(role or "").strip().lower()
     if role == "admin":
@@ -9793,8 +9891,8 @@ def validate_schedule_edit_permission(original_row, edited_row, role, today=None
     """
     Sửa lịch:
     1) kiểm quyền chức năng;
-    2) bản ghi CŨ phải thỏa rule HỦY/SỬA ở LoaiNghi!J;
-    3) bản ghi MỚI phải thỏa rule ĐĂNG KÝ ở LoaiNghi!I.
+    2) bản ghi CŨ phải thỏa rule HỦY/SỬA ở LoaiNghi!L/M/N;
+    3) bản ghi MỚI phải thỏa rule ĐĂNG KÝ ở LoaiNghi!I/J/K.
     """
     today = today or get_vn_today()
     old_dt = pd.to_datetime(original_row.get("Ngày"), errors="coerce", dayfirst=True)
@@ -25154,8 +25252,8 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             )
         else:
             # V92.6.25: ô chọn KHOẢNG THỜI GIAN luôn hiện cho mọi role.
-            # Leader/Nhân viên vẫn bị khóa đúng tài khoản của mình và vẫn chịu G/H/I/J,
-            # quota, cuối tuần, giới hạn phạm vi tháng và rule range nhiều ngày.
+            # Leader/Nhân viên vẫn bị khóa đúng tài khoản của mình và vẫn chịu G:N,
+            # quota, cuối tuần và giới hạn phạm vi tháng.
             _registration_today = get_vn_today()
             if is_admin_letan:
                 list_nv_input = ["-- Chọn nhân viên --"] + all_users
@@ -25178,7 +25276,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     f"Leader/Nhân viên chỉ thao tác lịch của chính mình; "
                     f"ngày được chọn từ {emp_min_date.strftime('%d/%m/%Y')} đến "
                     f"{emp_max_date.strftime('%d/%m/%Y')}. "
-                    "Mỗi Lý do nghỉ vẫn phải thỏa quy định G/H/I/J trong LoaiNghi."
+                    "Mỗi Lý do nghỉ vẫn phải thỏa quy định G:N trong LoaiNghi."
                 )
 
             if isinstance(chosen_dates, tuple):
@@ -25190,86 +25288,46 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
 
             chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input, key="sb_chosen_nv", filter_mode="contains")
 
-            # --- BỘ LỌC ĐỘNG CHO LÝ DO NGHỈ ---
+            # --- BỘ LỌC ĐỘNG LÝ DO NGHỈ THEO RULE ENGINE LoaiNghi A:N ---
             list_loai_nghi = []
             loai_nghi_dict = {}
-            current_role = st.session_state.current_role.lower()
-            role_for_leave_rules = "letan" if current_role == "quanly" else current_role
+            current_role = str(st.session_state.current_role or "").strip().lower()
+            _policy_catalog = build_leave_reason_catalog(df_loai_nghi)
+            _selected_policy_dates = [
+                start_date + timedelta(days=_d)
+                for _d in range(max(0, (end_date - start_date).days) + 1)
+            ]
 
-            if not df_loai_nghi.empty:
-                for idx, row in df_loai_nghi.iterrows():
-                    row_vals = row.tolist()
-                    l_name = str(row_vals[1]).strip() if len(row_vals) > 1 else ""
-                    if not l_name or l_name.lower() in ["nan", "none"]:
-                        l_name = str(row.get('Lý do nghỉ', row.get('Loại nghỉ', ''))).strip()
+            for _item in _policy_catalog.values():
+                _name = str(_item.get("name", "") or "").strip()
+                if not _name:
+                    continue
 
-                    if l_name and l_name.lower() not in ["nan", "loại nghỉ", "lý do nghỉ", "none", ""]:
-                        dk_ngay = str(row_vals[6]).strip().lower() if len(row_vals) > 6 else ""
-                        dk_role = str(row_vals[7]).strip().lower() if len(row_vals) > 7 else ""
+                _role_ok = True
+                _day_ok = True
+                if current_role != "admin":
+                    _allowed_roles = _leave_policy_role_tokens(_item.get("allowed_roles", ""))
+                    if _allowed_roles and current_role not in _allowed_roles:
+                        _role_ok = False
+                    if _role_ok:
+                        _day_ok = all(
+                            _leave_day_rule_matches(_item.get("allowed_days", ""), _d)
+                            for _d in _selected_policy_dates
+                        )
 
-                        role_allowed = True
-                        if dk_role and dk_role not in ["nan", "none", "tất cả", "all", ""]:
-                            if role_for_leave_rules not in dk_role: role_allowed = False
+                if not (_role_ok and _day_ok):
+                    continue
 
-                        day_allowed = True
-                        special_day_exempt = is_special_day_rule_exempt(current_role, l_name)
-                        if (not special_day_exempt) and dk_ngay and dk_ngay not in ["nan", "none", "tất cả", "all", ""]:
-                            wd = start_date.weekday()
-                            wd_map = {
-                                0: ["hai", "t2"], 1: ["ba", "t3"], 2: ["tư", "tu", "t4"],
-                                3: ["năm", "nam", "t5"], 4: ["sáu", "sau", "t6"],
-                                5: ["bảy", "bẩy", "t7", "cuối tuần"], 6: ["chủ nhật", "chu nhat", "cn", "cuối tuần"]
-                            }
-                            day_allowed = any(k in dk_ngay for k in wd_map[wd])
-
-                        if day_allowed and role_allowed:
-                            if "không phép" in l_name.lower(): l_name = f"🔴 {l_name}"
-                            list_loai_nghi.append(l_name)
-                            try:
-                                s_ngay_str = str(row_vals[4]).replace(',', '').strip() if len(row_vals) > 4 else ""
-                                s_ngay = float(s_ngay_str) if s_ngay_str != "" else 0.0
-                            except: s_ngay = 0.0
-
-                            try:
-                                p_str = str(row_vals[5] if len(row_vals)>5 else "0").replace('.', '').replace(',', '').replace(' ', '').replace('đ', '').replace('VNĐ', '').replace('VND', '')
-                                p_val = 0.0 if p_str.lower() in ["", "-", "nan", "none"] else float(p_str)
-                            except: p_val = 0.0
-
-                            # V91.5:
-                            # B=Lý do, C=Loại nghỉ, D=Chi tiết vi phạm, E=Số ngày, F=Phạt.
-                            loai_type = str(row_vals[2]).strip() if len(row_vals) > 2 else ""
-                            configured_detail = (
-                                str(row_vals[3]).strip()
-                                if len(row_vals) > 3 and not pd.isna(row_vals[3])
-                                else ""
-                            )
-                            penalty_raw = row_vals[5] if len(row_vals) > 5 else ""
-                            penalty_raw_text = (
-                                str(penalty_raw).strip()
-                                if not pd.isna(penalty_raw)
-                                else ""
-                            )
-                            penalty_configured = (
-                                penalty_raw_text.casefold()
-                                not in {"", "-", "nan", "none", "nat"}
-                            )
-                            register_notice = str(row_vals[8]).strip() if len(row_vals) > 8 and not pd.isna(row_vals[8]) else ""
-                            cancel_notice = str(row_vals[9]).strip() if len(row_vals) > 9 and not pd.isna(row_vals[9]) else ""
-                            loai_nghi_dict[l_name.lower()] = [
-                                s_ngay, p_val, loai_type,
-                                configured_detail, penalty_configured,
-                                register_notice, cancel_notice
-                            ]
+                _display_name = _name
+                if "khong phep" in normalize_login_name(_item.get("leave_type", "")) or "khong phep" in normalize_login_name(_name):
+                    _display_name = f"🔴 {_name}"
+                list_loai_nghi.append(_display_name)
+                loai_nghi_dict[_display_name.lower()] = _item
 
             if not list_loai_nghi:
-                # Không fallback sang danh mục cứng vì có thể làm Leader/Nhân viên
-                # nhìn thấy lý do không được cấp ở LoaiNghi!H.
-                list_loai_nghi = []
-                loai_nghi_dict = {}
                 st.warning(
-                    "⚠️ Không có Lý do nghỉ phù hợp với tài khoản/ngày đang chọn "
-                    "hoặc chưa tải được sheet LoaiNghi. Hệ thống không dùng danh mục dự phòng "
-                    "để tránh bỏ qua phân quyền."
+                    "⚠️ Không có Lý do nghỉ phù hợp với tài khoản và toàn bộ khoảng ngày đang chọn. "
+                    "Hệ thống đọc trực tiếp G/H của LoaiNghi và không dùng danh mục dự phòng."
                 )
 
             with st.container():
@@ -25278,11 +25336,14 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     "Lý do nghỉ:",
                     ["-- Chọn lý do nghỉ --"] + list_loai_nghi,
                     key="sb_loai_nghi_live",
-                    filter_mode="contains"
+                    filter_mode="contains",
                 )
             render_leave_reason_selectbox_color(
                 chosen_loai,
-                reason_type_map={normalize_login_name(k): (v[2] if len(v) > 2 else "") for k, v in loai_nghi_dict.items()},
+                reason_type_map={
+                    normalize_login_name(k): str(v.get("leave_type", "") or "")
+                    for k, v in loai_nghi_dict.items()
+                },
                 marker_id="vera-leave-reason-selectbox",
             )
 
@@ -25291,19 +25352,18 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             chosen_leave_type = ""
             configured_violation_detail = ""
             penalty_configured_from_sheet = False
-            if chosen_loai and chosen_loai != "-- Chọn lý do nghỉ --" and chosen_loai.lower() in loai_nghi_dict:
+            if (
+                chosen_loai
+                and chosen_loai != "-- Chọn lý do nghỉ --"
+                and chosen_loai.lower() in loai_nghi_dict
+            ):
                 _reason_meta = loai_nghi_dict[chosen_loai.lower()]
-                default_songay = _reason_meta[0]
-                default_phat = _reason_meta[1]
-                chosen_leave_type = _reason_meta[2] if len(_reason_meta) > 2 else ""
-                configured_violation_detail = _reason_meta[3] if len(_reason_meta) > 3 else ""
-                penalty_configured_from_sheet = bool(_reason_meta[4]) if len(_reason_meta) > 4 else False
-                _register_notice_display = _reason_meta[5] if len(_reason_meta) > 5 else ""
-                _cancel_notice_display = _reason_meta[6] if len(_reason_meta) > 6 else ""
-                st.caption(
-                    f"⏳ Quy định: Đăng ký trước **{_register_notice_display or '(chưa cấu hình)'}**"
-                    f" · Hủy trước **{_cancel_notice_display or '(chưa cấu hình)'}**"
-                )
+                default_songay = float(_reason_meta.get("days", 0) or 0)
+                default_phat = float(_reason_meta.get("penalty", 0) or 0)
+                chosen_leave_type = str(_reason_meta.get("leave_type", "") or "")
+                configured_violation_detail = str(_reason_meta.get("detail", "") or "")
+                penalty_configured_from_sheet = bool(_reason_meta.get("penalty_configured", False))
+                st.caption("⏳ " + leave_notice_policy_text(chosen_loai))
 
             _configured_detail_norm = normalize_login_name(configured_violation_detail)
             requires_manual_penalty = "can nhap so tien" in _configured_detail_norm
@@ -25330,25 +25390,18 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 [df_backup]
             )
 
-            # --- CẢNH BÁO SỚM SỐ NGƯỜI NGHỈ ---
+            # --- CẢNH BÁO SỚM: RULE ENGINE + QUOTA ---
             early_warning = ""
             norm_loai_temp = chosen_loai.strip().lower() if chosen_loai else ""
             is_video_leave_temp = is_video_leave_reason(chosen_loai)
             is_special_day_exempt_temp = is_special_day_rule_exempt(current_role, chosen_loai)
             if chosen_loai and chosen_loai != "-- Chọn lý do nghỉ --":
                 num_days_temp = (end_date - start_date).days + 1
-                if num_days_temp > 1 and "phép năm" not in norm_loai_temp:
-                    early_warning = "❌ Chọn Khoảng thời gian nhiều ngày chỉ áp dụng cho 'Nghỉ Phép năm'."
-                elif (not is_special_day_exempt_temp and not is_nghi_ly_do_khac
-                      and "phép năm" not in norm_loai_temp and not is_loi_vi_pham):
-                    # V88.3: quota CÓ phép và PHÁT SINH độc lập.
-                    # Không còn chặn bằng "tổng số người nghỉ chung/ngày".
-                    _early_all_sources = _registration_live_df
-                    _chosen_group_temp = _daily_leave_group(chosen_loai)
+                _early_all_sources = _registration_live_df
+                for _i in range(num_days_temp):
+                    chk_d = start_date + timedelta(days=_i)
 
-                    for i in range(num_days_temp):
-                        chk_d = start_date + timedelta(days=i)
-
+                    if not is_admin_leave_registration:
                         _notice_ok, _notice_msg = validate_leave_registration_notice(
                             chosen_loai,
                             chk_d,
@@ -25359,6 +25412,13 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                             early_warning = f"❌ {_notice_msg}"
                             break
 
+                    # Các ngoại lệ quota cũ vẫn giữ, nhưng KHÔNG còn miễn rule G:N.
+                    if (
+                        not is_special_day_exempt_temp
+                        and not is_nghi_ly_do_khac
+                        and "phép năm" not in norm_loai_temp
+                        and not is_loi_vi_pham
+                    ):
                         _quota_ok, _quota_msg = _validate_daily_group_quota(
                             _early_all_sources,
                             chk_d,
@@ -25518,7 +25578,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     today = get_vn_today()
                     can_proceed = True
 
-                    # V92.6.24: thời hạn đăng ký lấy từ LoaiNghi!I cho TỪNG ngày.
+                    # V92.6.24: thời hạn đăng ký lấy từ LoaiNghi!I/J/K cho TỪNG ngày.
                     if not is_admin_leave_registration:
                         _notice_dates = [
                             start_date + timedelta(days=_i)
@@ -25672,6 +25732,17 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                                         )
 
                                         if not is_admin_leave_registration:
+                                            _notice_ok, _notice_msg = validate_leave_registration_notice(
+                                                chosen_loai,
+                                                curr_date_iter,
+                                                role=current_role,
+                                                now_vn=datetime.now(VN_TZ),
+                                            )
+                                            if not _notice_ok:
+                                                st.error(f"❌ {_notice_msg}")
+                                                all_saved = False
+                                                break
+
                                             daily_rule_ok, daily_rule_msg = _validate_daily_employee_registration_rule(
                                                 latest_registration_df,
                                                 curr_date_iter,
@@ -25700,21 +25771,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                                             and not special_day_exempt_save and not is_nghi_ly_do_khac
                                             and "phép năm" not in norm_loai and not is_loi_vi_pham):
 
-                                            # V92.6.24: rule thời gian đã được kiểm theo LoaiNghi!I.
-                                            # Không còn hard-code 09:00-17:00 cho Nghỉ phát sinh.
-
-                                            # V88.3: luôn đọc dữ liệu mới nhất của cả các nguồn để kiểm quota.
-                                            _notice_ok, _notice_msg = validate_leave_registration_notice(
-                                                chosen_loai,
-                                                curr_date_iter,
-                                                role=current_role,
-                                                now_vn=datetime.now(VN_TZ),
-                                            )
-                                            if not _notice_ok:
-                                                st.error(f"❌ {_notice_msg}")
-                                                all_saved = False
-                                                break
-
+                                            # Rule G:N đã được kiểm ngay đầu vòng lặp cho mọi Lý do nghỉ.
                                             latest_quota_df = latest_registration_df
                                             quota_ok, quota_msg = _validate_daily_group_quota(
                                                 latest_quota_df,

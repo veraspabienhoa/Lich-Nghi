@@ -1,4 +1,4 @@
-# V92.6.38 - Fix thống kê CÓ phép, Excel download, Admin sửa trực tiếp toàn bộ cột (2026-08-21)
+# V92.6.41 - Đổi nhãn nút Xóa lịch nghỉ đã chọn (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -13478,9 +13478,20 @@ def render_daily_summary_ui_editor():
         preview = _daily_summary_apply_column_editor(current, col_edit)
 
         def _edit_style(device, prefix):
-            out = dict(preview["style"][device])
+            # V92.6.39:
+            # Style bảng thống kê dùng 3 key font riêng:
+            # header_font / body_font / pill_font.
+            # Bản UI editor cũ gọi nhầm "font_size" nên gây KeyError.
+            defaults = _daily_summary_default_config()["style"][device]
+            out = dict(defaults)
+            incoming = preview.get("style", {}).get(device, {})
+            if isinstance(incoming, dict):
+                out.update(incoming)
+
             settings = [
-                ("font_size", "Cỡ chữ", 8, 30),
+                ("header_font", "Cỡ chữ tiêu đề cột", 6, 30),
+                ("body_font", "Cỡ chữ nội dung", 6, 30),
+                ("pill_font", "Cỡ chữ ô số", 6, 30),
                 ("padding_x", "Padding ngang", 0, 30),
                 ("padding_y", "Padding dọc", 0, 30),
                 ("pill_padding_y", "Padding dọc ô số", 0, 30),
@@ -13488,9 +13499,19 @@ def render_daily_summary_ui_editor():
                 ("row_gap", "Khoảng cách hàng", 0, 30),
             ]
             for field, label, lo, hi in settings:
+                fallback = int(defaults.get(field, lo))
+                try:
+                    current_value = int(float(out.get(field, fallback)))
+                except Exception:
+                    current_value = fallback
+                current_value = max(lo, min(hi, current_value))
                 out[field] = st.number_input(
-                    label, min_value=lo, max_value=hi, value=int(out[field]),
-                    step=1, key=f"{prefix}_{field}",
+                    label,
+                    min_value=lo,
+                    max_value=hi,
+                    value=current_value,
+                    step=1,
+                    key=f"{prefix}_{field}",
                 )
             return out
 
@@ -14467,6 +14488,18 @@ def _transient_drag_layout(table_key, available_columns):
         return None
 
 
+def _pin_select_column_first(order):
+    """
+    V92.6.40:
+    Nếu bảng có cột 'Chọn' thì cột này luôn đứng đầu tiên.
+    Áp dụng toàn hệ thống, bất kể thứ tự đã lưu hoặc người dùng kéo cột.
+    """
+    cols = [str(c) for c in (order or [])]
+    if "Chọn" not in cols:
+        return cols
+    return ["Chọn"] + [c for c in cols if c != "Chọn"]
+
+
 def get_table_layout(table_key, available_columns, device=None):
     available = [str(c) for c in available_columns]
     device = str(device or _ui_runtime_device())
@@ -14476,7 +14509,8 @@ def get_table_layout(table_key, available_columns, device=None):
     if device == _ui_runtime_device():
         captured = _transient_drag_layout(table_key, available)
         if captured:
-            return captured
+            _captured_order, _captured_widths = captured
+            return _pin_select_column_first(_captured_order), _captured_widths
 
     layouts, _ = load_table_layouts()
     cfg = layouts.get(str(table_key), {})
@@ -14490,6 +14524,9 @@ def get_table_layout(table_key, available_columns, device=None):
     if str(table_key) in {"leave_detail", "leave_manage"} and "Loại nghỉ" in order and "Lý do nghỉ" in order:
         order = [c for c in order if c != "Loại nghỉ"]
         order.insert(order.index("Lý do nghỉ") + 1, "Loại nghỉ")
+
+    # V92.6.40: 'Chọn' là cột thao tác, luôn khóa ở vị trí đầu tiên.
+    order = _pin_select_column_first(order)
 
     saved_widths = device_cfg.get("widths", {}) if isinstance(device_cfg.get("widths", {}), dict) else {}
     widths = {}
@@ -14699,6 +14736,7 @@ def apply_table_layout_df(df, table_key):
     if not isinstance(df, pd.DataFrame):
         return df, {}
     order, widths = get_table_layout(table_key, list(df.columns))
+    order = _pin_select_column_first(order)
     return df[order].copy(), widths
 
 
@@ -27171,7 +27209,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                         and bool(system_status.get("lock_nv", False))
                     )
                     submit_detail_delete = st.form_submit_button(
-                        "🗑️ Xóa các dòng đã chọn",
+                        "🗑️ Xóa lịch nghỉ đã chọn",
                         use_container_width=True,
                         disabled=(_detail_delete_locked or not _can_leave_detail_delete),
                     )
@@ -27533,7 +27571,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             with _m_save:
                 manage_submit_save = st.form_submit_button('💾 Lưu tất cả thay đổi', use_container_width=True, disabled=manage_edit_locked)
             with _m_delete:
-                manage_submit_delete = st.form_submit_button('🗑️ Xóa các dòng đã chọn', use_container_width=True, disabled=manage_delete_locked)
+                manage_submit_delete = st.form_submit_button('🗑️ Xóa lịch nghỉ đã chọn', use_container_width=True, disabled=manage_delete_locked)
 
         # V86.3: Quản lý lịch nghỉ không dùng bất kỳ conditional formatting nào.
         # Chỉ dùng st.data_editor mặc định + cấu hình kiểu cột, không tô màu theo Lý do/Loại nghỉ.

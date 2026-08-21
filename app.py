@@ -1,4 +1,4 @@
-# V92.6.69 - Khôi phục Auto Update 15:00 + 20:00 + 21:00; 21:00 chuyên nghỉ giữa ca (2026-08-22)
+# V92.6.72 - Snapshot chấm công số phút +/- + Auto Update theo khoảng ngày + ẩn nhân sự không hoạt động (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -835,6 +835,58 @@ def _timesoft_background_status_row():
     return {}
 
 
+def _timesoft_signed_arrival_minutes_v92672(row):
+    """
+    Chênh lệch giờ vào ca theo quy ước hiển thị V92.6.72:
+    - số ÂM = vào muộn;
+    - số DƯƠNG = vào sớm;
+    - 0 = đúng giờ.
+
+    Tính trực tiếp từ Check-in và Giờ bắt đầu ca để không phụ thuộc cách TimeSoft
+    mã hóa TotalMinuteInGoLate. Có xử lý ca qua nửa đêm.
+    """
+    def _value(candidates):
+        try:
+            for c in candidates:
+                if c in row.index:
+                    v = row.get(c)
+                    if v is not None and str(v).strip().casefold() not in {"", "nan", "none", "nat", "<na>"}:
+                        return v
+        except Exception:
+            pass
+        return ""
+
+    def _minutes(v):
+        m = re.search(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", str(v or "").strip())
+        if not m:
+            return None
+        return int(m.group(1)) * 60 + int(m.group(2)) + int(m.group(3) or 0) / 60.0
+
+    start = _minutes(_value(["StartWorkTime", "WorkTimeStart", "ShiftStartTime"]))
+    checkin = _minutes(_value(["MachineTimeCheckInStr", "CheckInTimeStr", "CheckInTime"]))
+    if start is None or checkin is None:
+        # Fallback: TimeSoft có thể chỉ trả tổng số phút đi trễ. Khi đó vẫn biểu diễn
+        # đúng quy ước dấu âm; trường hợp vào sớm cần đủ giờ ca + check-in để tính.
+        late_raw = _value([
+            "TotalMinuteInGoLate", "TotalMinuteGoLate", "MinuteInGoLate",
+            "GoLateMinute", "LateMinute"
+        ])
+        try:
+            if str(late_raw).strip() != "":
+                late = max(0.0, float(str(late_raw).replace(",", ".").strip()))
+                return -int(round(late))
+        except Exception:
+            pass
+        return ""
+
+    diff = checkin - start  # dương = thực tế muộn hơn ca
+    if diff < -12 * 60:
+        diff += 24 * 60
+    elif diff > 12 * 60:
+        diff -= 24 * 60
+    return int(round(-diff))
+
+
 def _timesoft_checkin_display_df(
     df,
     include_midshift_break=True,
@@ -844,11 +896,12 @@ def _timesoft_checkin_display_df(
     """
     V92.6.67 - Bảng chấm công Snapshot + theo dõi nghỉ giữa ca.
 
-    Bổ sung 4 cột:
+    Bổ sung theo dõi nghỉ giữa ca và chênh lệch giờ vào:
       - Giờ ra nghỉ giữa ca
       - Giờ vào lại
       - Số phút nghỉ giữa ca
       - Trạng thái nghỉ giữa ca
+      - Số phút (âm = vào muộn, dương = vào sớm)
 
     Nguồn xác định:
       1) FaceID chi tiết TimeSoft (nếu Admin đã nạp file `lich-su-checkin`);
@@ -860,6 +913,25 @@ def _timesoft_checkin_display_df(
     """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
+
+    # V92.6.72: mọi danh sách vận hành chỉ hiển thị nhân sự Đang làm việc.
+    # Dữ liệu nguồn không bị xóa; chỉ lọc lớp hiển thị.
+    try:
+        _status_map_v92672 = load_employment_status_map()
+        _name_col_v92672 = next((c for c in [
+            "employeeInfo.Name", "EmployeeName", "Tên nhân viên", "Nhân viên", "Name"
+        ] if c in df.columns), None)
+        if _name_col_v92672 and _status_map_v92672:
+            _active_v92672 = globals().get("EMPLOYMENT_STATUS_ACTIVE", "Đang làm việc")
+            _mask_v92672 = df[_name_col_v92672].astype(str).apply(
+                lambda x: _status_map_v92672.get(normalize_login_name(x), _active_v92672) == _active_v92672
+            )
+            df = df[_mask_v92672].copy()
+            if df.empty:
+                return pd.DataFrame()
+    except Exception:
+        pass
+
     preferred = [
         "WorkDateStr",
         "employeeInfo.EmployeeCode",
@@ -1015,6 +1087,14 @@ def _timesoft_checkin_display_df(
         except Exception:
             # Chấm công chính vẫn phải hiển thị khi nguồn đối chiếu tạm lỗi.
             pass
+
+    # V92.6.72: cột cuối cùng theo quy ước Âm = vào muộn, Dương = vào sớm.
+    try:
+        out["Số phút"] = [
+            _timesoft_signed_arrival_minutes_v92672(row) for _, row in df.iterrows()
+        ]
+    except Exception:
+        out["Số phút"] = ""
 
     return out
 
@@ -1452,9 +1532,9 @@ def render_timesoft_snapshot_history_admin():
         key="export_snapshot_history_xlsx",
     )
 
-    tab_summary, tab_chk = st.tabs([
-        "📊 Tổng hợp theo ngày",
+    tab_chk, tab_summary = st.tabs([
         "🕒 Chấm công",
+        "📊 Tổng hợp theo ngày",
     ])
 
     with tab_summary:
@@ -1496,7 +1576,8 @@ def render_timesoft_snapshot_history_admin():
                     chk_view = chk_view[chk_view[employee_col].astype(str).eq(selected_employee)].copy()
             st.caption(
                 "☕ Nghỉ giữa ca: Giờ ra / Giờ vào lại / Trạng thái được tính từ các cụm FaceID "
-                "theo cùng quy tắc đang dùng cho Auto Update."
+                "theo cùng quy tắc đang dùng cho Auto Update. · Số phút: số âm = vào muộn, "
+                "số dương = vào sớm."
             )
             st.dataframe(chk_view, hide_index=True, width="stretch", height=520)
 
@@ -1537,6 +1618,16 @@ def render_timesoft_background_snapshot_today(show_status=True):
     bg_date = get_vn_today()
     bg_snap = _timesoft_read_background_snapshot(bg_date)
 
+    # V92.6.72: Snapshot ưu tiên Chấm công trước.
+    bg_chk = bg_snap.get("employee_checkin") if isinstance(bg_snap, dict) else None
+    bg_chk_view = _timesoft_checkin_display_df(bg_chk)
+    if isinstance(bg_chk_view, pd.DataFrame) and not bg_chk_view.empty:
+        st.caption("Chấm công Snapshot")
+        st.dataframe(bg_chk_view, width="stretch", hide_index=True, height=420)
+        st.caption("Số phút: số âm = vào muộn · số dương = vào sớm.")
+    else:
+        st.info("Chưa có dữ liệu chấm công Snapshot.")
+
     bg_tot = bg_snap.get("summary_totals") if isinstance(bg_snap, dict) else None
     if isinstance(bg_tot, pd.DataFrame) and not bg_tot.empty:
         tr = bg_tot.iloc[0].to_dict()
@@ -1547,18 +1638,10 @@ def render_timesoft_background_snapshot_today(show_status=True):
 
     bg_inv = bg_snap.get("summary_invoice") if isinstance(bg_snap, dict) else None
     if isinstance(bg_inv, pd.DataFrame) and not bg_inv.empty:
-        st.caption("Doanh thu nền hôm nay")
+        st.caption("Doanh thu Snapshot")
         st.dataframe(bg_inv, width="stretch", hide_index=True, height=300)
     else:
-        st.info("Chưa có dữ liệu doanh thu nền hôm nay.")
-
-    bg_chk = bg_snap.get("employee_checkin") if isinstance(bg_snap, dict) else None
-    bg_chk_view = _timesoft_checkin_display_df(bg_chk)
-    if isinstance(bg_chk_view, pd.DataFrame) and not bg_chk_view.empty:
-        st.caption("Chấm công nền hôm nay")
-        st.dataframe(bg_chk_view, width="stretch", hide_index=True, height=420)
-    else:
-        st.info("Chưa có dữ liệu chấm công nền hôm nay.")
+        st.info("Chưa có dữ liệu doanh thu Snapshot.")
 
 
 def _timesoft_export_workbook(sync_result):
@@ -1612,8 +1695,15 @@ def clean_employee_match_name(value):
 def normalize_employee_match_name(value):
     return normalize_login_name(clean_employee_match_name(value))
 
-def sort_employee_names(values):
-    """Sắp xếp tên nhân viên A→Z, bỏ trùng theo chuẩn không dấu/không phân biệt hoa thường."""
+def sort_employee_names(values, include_inactive=False):
+    """
+    Sắp xếp tên nhân viên A→Z, bỏ trùng.
+
+    V92.6.72: mặc định chỉ trả nhân sự ``Đang làm việc`` để mọi dropdown/danh sách
+    vận hành tự ẩn người ``Tạm thời nghỉ việc`` hoặc ``Đã nghỉ việc``.
+    ``include_inactive=True`` chỉ dành cho màn hình quản trị trạng thái để Admin còn
+    có thể đưa một nhân sự trở lại trạng thái Đang làm việc.
+    """
     by_key = {}
     for value in values or []:
         name = str(value or "").strip()
@@ -1622,6 +1712,18 @@ def sort_employee_names(values):
         key = normalize_login_name(name)
         if key and key not in by_key:
             by_key[key] = name
+
+    if not include_inactive and by_key:
+        try:
+            status_map = load_employment_status_map()
+            active_status = globals().get("EMPLOYMENT_STATUS_ACTIVE", "Đang làm việc")
+            by_key = {
+                key: name for key, name in by_key.items()
+                if status_map.get(key, active_status) == active_status
+            }
+        except Exception:
+            pass
+
     return sorted(by_key.values(), key=lambda x: normalize_login_name(x))
 
 def password_matches(input_password, stored_password):
@@ -2288,8 +2390,8 @@ st.set_page_config(page_title="Vera Spa Tam Hiệp Đồng Nai", page_icon="📅
 
 
 # ==========================================================
-# V92.6.45 - MÀU NÚT LƯU / GHI DỮ LIỆU
-# Áp dụng cho các nút submit/lưu ghi dữ liệu chính.
+# V92.6.70 - MÀU CHỮ NÚT LƯU / GHI DỮ LIỆU
+# Chữ nút Ghi/Lưu/Save dùng màu đen; nền fallback giữ nguyên.
 # ==========================================================
 st.markdown(
     """
@@ -2300,7 +2402,7 @@ st.markdown(
     div[data-testid="stFormSubmitButton"] button[kind="secondary"] {
         background: #1890FF !important;
         background-color: #1890FF !important;
-        color: #FFFFFF !important;
+        color: #000000 !important;
         border-color: #1890FF !important;
     }
     </style>
@@ -2795,7 +2897,7 @@ FEATURE_DEFINITIONS = {
     "account_lock": "🔒 Vào trang Khóa đăng nhập",
     "registration_lock": "🔐 Vào trang Khóa quyền đăng ký",
     "auto_penalty": "⏸️ Xem Auto Update phạt",
-    "snapshot_today": "📦 Xem Snapshot nền / lịch sử",
+    "snapshot_today": "📦 Xem Snapshot",
     "sync": "🔄 Xem Đồng bộ dữ liệu",
     "column_config": "⚙️ Xem Giao diện tùy chỉnh",
     "profile": "👤 Xem Hồ sơ cá nhân",
@@ -4620,9 +4722,8 @@ def render_leave_activity_log_admin():
         [str(x).strip() for x in d["Tài khoản thao tác"].dropna().unique().tolist() if str(x).strip()],
         key=normalize_login_name,
     )
-    employee_values = sorted(
-        [str(x).strip() for x in d["Tên nhân viên"].dropna().unique().tolist() if str(x).strip()],
-        key=normalize_login_name,
+    employee_values = sort_employee_names(
+        [str(x).strip() for x in d["Tên nhân viên"].dropna().unique().tolist() if str(x).strip()]
     )
 
     with f3:
@@ -7585,7 +7686,7 @@ def calculate_midshift_break_from_timesoft(
             if isinstance(tour_out, datetime) and not isinstance(tour_in, datetime):
                 face_warning = face_warning or "TourVera có Giờ ra nhưng chưa có Giờ vào"
             status = (
-                f"⚠️ {face_warning}" if face_warning
+                f"{face_warning}" if face_warning
                 else (
                     "Không ghi nhận nghỉ giữa ca" if len(clusters) <= 1
                     else "Chưa đủ dữ liệu xác định nghỉ giữa ca"
@@ -7620,16 +7721,16 @@ def calculate_midshift_break_from_timesoft(
 
         if is_outside_late:
             violation = "Ra ngoài vào muộn"
-            core_status = f"🔴 Ra ngoài vào muộn {late_minutes} phút"
+            core_status = f"Ra ngoài vào muộn {late_minutes} phút"
         elif duration_diff > 0:
             violation = "Nghỉ giữa ca quá thời gian"
-            core_status = f"❌ Nghỉ quá {duration_diff} phút"
+            core_status = f"Nghỉ quá {duration_diff} phút"
         else:
             violation = ""
-            core_status = "✅ Đúng quy định"
+            core_status = "Đúng quy định"
 
         if face_warning:
-            status = f"⚠️ {face_warning} · {core_status}"
+            status = f"{face_warning} · {core_status}"
         else:
             status = core_status
 
@@ -8415,6 +8516,8 @@ def build_staff_list_dataframe(credentials_df):
     d['Trạng thái làm việc'] = d['Tên nhân viên'].astype(str).apply(
         lambda name: employment_map.get(normalize_login_name(name), EMPLOYMENT_STATUS_ACTIVE)
     )
+    # V92.6.72: Danh sách nhân sự vận hành chỉ liệt kê người đang làm việc.
+    d = d[d['Trạng thái làm việc'].eq(EMPLOYMENT_STATUS_ACTIVE)].copy()
     for col in STAFF_EXPORT_COLUMNS:
         if col not in d.columns:
             d[col] = ''
@@ -10070,8 +10173,15 @@ def _canonical_system_employee_name(raw_name):
     creds = globals().get('df_credentials', pd.DataFrame())
     if isinstance(creds, pd.DataFrame) and not creds.empty and 'Tên nhân viên' in creds.columns:
         target = normalize_employee_match_name(cleaned)
+        _status_map_v92672 = load_employment_status_map()
         for name in creds['Tên nhân viên'].dropna().astype(str).tolist():
             if normalize_employee_match_name(name) == target:
+                # V92.6.72: nhân sự tạm nghỉ/đã nghỉ không xuất hiện trong danh sách vận hành
+                # và cũng không nhận Auto Update phạt mới.
+                if _status_map_v92672.get(
+                    normalize_login_name(name), EMPLOYMENT_STATUS_ACTIVE
+                ) != EMPLOYMENT_STATUS_ACTIVE:
+                    return ""
                 # Luôn ghi tên chuẩn đang lưu trong hệ thống, không ghi dấu * từ Bảng tour.
                 return str(name).strip()
         # Có danh sách nhân sự nhưng không khớp -> không tự tạo bản ghi phạt sai tên.
@@ -10207,7 +10317,7 @@ def _credential_effective_shift_for_week(cred_row, target_date=None):
     return base if periods % 2 == 0 else (2 if base == 1 else 1)
 
 
-def auto_update_ca1_cleaning_from_leave_data(actor="AUTO UPDATE - CA1"):
+def auto_update_ca1_cleaning_from_leave_data(actor="AUTO UPDATE - CA1", target_date=None):
     """Auto ghi 'KHÔNG dọn vệ sinh ca 1' cho dữ liệu hôm nay theo quy tắc V84.7.
 
     Điều kiện đồng thời:
@@ -10232,7 +10342,7 @@ def auto_update_ca1_cleaning_from_leave_data(actor="AUTO UPDATE - CA1"):
     if leave_df.empty:
         return result
 
-    today = get_vn_today()
+    today = target_date if isinstance(target_date, date) else get_vn_today()
     day_key = today.strftime("%d/%m/%Y")
     d = leave_df.copy()
     d["__date"] = pd.to_datetime(d.get("Ngày"), dayfirst=True, errors="coerce").dt.date
@@ -10267,6 +10377,7 @@ def auto_update_ca1_cleaning_from_leave_data(actor="AUTO UPDATE - CA1"):
         result["messages"].append("Không đọc được cấu hình ca nhân viên.")
         return result
 
+    _status_map_ca1_v92672 = load_employment_status_map()
     catalog = build_leave_reason_catalog(globals().get("df_loai_nghi", pd.DataFrame()))
     reason_item = _auto_penalty_catalog_item(CA1_CLEANING_REASON, catalog)
     if not reason_item:
@@ -10279,6 +10390,8 @@ def auto_update_ca1_cleaning_from_leave_data(actor="AUTO UPDATE - CA1"):
             continue
         employee = str(cred.get("Tên nhân viên", "") or "").strip()
         ekey = normalize_login_name(employee)
+        if _status_map_ca1_v92672.get(ekey, EMPLOYMENT_STATUS_ACTIVE) != EMPLOYMENT_STATUS_ACTIVE:
+            continue
         if ekey not in late_by_emp:
             continue
         if _credential_effective_shift_for_week(cred, today) != 1:
@@ -10955,6 +11068,126 @@ def auto_update_midshift_late_from_timesoft(
         f"Hoàn tất: đủ điều kiện {result.get('eligible',0)}; thêm {result.get('added',0)}; lỗi {result.get('errors',0)}",
     )
     return result
+
+def _merge_auto_result_v92672(target, source):
+    """Cộng kết quả nhiều ngày cho Auto Update chạy tay theo khoảng thời gian."""
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return target
+    for key in ["eligible", "added", "skipped", "errors"]:
+        target[key] = int(target.get(key, 0) or 0) + int(source.get(key, 0) or 0)
+    target["paused"] = bool(target.get("paused")) or bool(source.get("paused"))
+    target.setdefault("messages", []).extend(source.get("messages") or [])
+    target.setdefault("unmatched", []).extend(source.get("unmatched") or [])
+    return target
+
+
+def run_auto_penalty_range_v92672(start_date, end_date, actor="AUTO UPDATE - ADMIN RANGE"):
+    """
+    Chạy Auto Update thủ công theo bộ lọc thời gian.
+
+    - Chỉ xử lý những ngày có Snapshot TimeSoft trong PostgreSQL; riêng hôm nay có thể
+      ưu tiên dữ liệu TimeSoft trực tiếp đang nằm trong session.
+    - Bảng Tour chỉ chạy cho hôm nay vì TourVera là bảng vận hành hiện tại, không phải
+      kho lịch sử theo ngày.
+    - Nghỉ giữa ca lịch sử chỉ chạy khi đã nạp FaceID chi tiết trong phiên; nếu không,
+      bỏ qua để tránh suy diễn từ SearchElastic tổng hợp.
+    - Cloud Scheduler không dùng hàm này, nên lịch 15:00/20:00/21:00 không đổi.
+    """
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    today = get_vn_today()
+    available = [d for d in _timesoft_available_snapshot_dates() if start_date <= d <= end_date]
+
+    direct = st.session_state.get("timesoft_direct_result_v81") or {}
+    direct_checkin = direct.get("employee_checkin_df") if isinstance(direct, dict) else None
+    if start_date <= today <= end_date and isinstance(direct_checkin, pd.DataFrame) and not direct_checkin.empty:
+        if today not in available:
+            available.append(today)
+    available = sorted(set(available))
+
+    totals = {
+        "tour": _auto_result("Bảng tour"),
+        "timesoft": _auto_result("TimeSoft"),
+        "midshift": _auto_result("TimeSoft nghỉ giữa ca"),
+        "absence": _auto_result("TimeSoft nghỉ không phép"),
+        "ca1": _auto_result("Ca 1"),
+        "processed_dates": [],
+        "schedule_slot": "manual-range",
+    }
+
+    if not available:
+        totals["timesoft"]["messages"].append(
+            "Không có Snapshot TimeSoft trong khoảng đã chọn nên không chạy Auto Update lịch sử."
+        )
+        return totals
+
+    raw_faceid = st.session_state.get(TIMESOFT_RAW_FACEID_SESSION_KEY_V92667)
+    has_raw_faceid = isinstance(raw_faceid, pd.DataFrame) and not raw_faceid.empty
+
+    tour_today = pd.DataFrame()
+    if today in available:
+        try:
+            load_bang_tour_input.clear()
+            tour_today, _ = load_bang_tour_input()
+        except Exception:
+            tour_today = pd.DataFrame()
+
+    for work_date in available:
+        if work_date == today and isinstance(direct_checkin, pd.DataFrame) and not direct_checkin.empty:
+            checkin = direct_checkin.copy()
+        else:
+            snap = _timesoft_read_background_snapshot(work_date)
+            checkin = snap.get("employee_checkin") if isinstance(snap, dict) else None
+
+        if not isinstance(checkin, pd.DataFrame) or checkin.empty:
+            totals["timesoft"]["messages"].append(
+                f"{work_date.strftime('%d/%m/%Y')}: Snapshot chấm công rỗng, bỏ qua."
+            )
+            continue
+
+        totals["processed_dates"].append(work_date)
+
+        r_ts = auto_update_checkin_late_from_timesoft(
+            checkin, actor=f"{actor} - {work_date.strftime('%d/%m/%Y')} - TIMESOFT"
+        )
+        _merge_auto_result_v92672(totals["timesoft"], r_ts)
+
+        r_abs = auto_update_absence_without_checkin_from_timesoft(
+            checkin, target_date=work_date,
+            actor=f"{actor} - {work_date.strftime('%d/%m/%Y')} - NGHỈ KHÔNG PHÉP",
+        )
+        _merge_auto_result_v92672(totals["absence"], r_abs)
+
+        r_ca1 = auto_update_ca1_cleaning_from_leave_data(
+            actor=f"{actor} - {work_date.strftime('%d/%m/%Y')} - CA1",
+            target_date=work_date,
+        )
+        _merge_auto_result_v92672(totals["ca1"], r_ca1)
+
+        if work_date == today:
+            r_tour = auto_update_outside_late_from_tour(
+                tour_today, actor=f"{actor} - {work_date.strftime('%d/%m/%Y')} - BẢNG TOUR"
+            )
+            _merge_auto_result_v92672(totals["tour"], r_tour)
+
+        if work_date == today or has_raw_faceid:
+            r_mid = auto_update_midshift_late_from_timesoft(
+                checkin,
+                actor=f"{actor} - {work_date.strftime('%d/%m/%Y')} - NGHỈ GIỮA CA",
+                raw_punch_df=raw_faceid if has_raw_faceid else None,
+                tour_df=tour_today if work_date == today else pd.DataFrame(),
+                force_daily_run=True,
+            )
+            _merge_auto_result_v92672(totals["midshift"], r_mid)
+        else:
+            totals["midshift"]["skipped"] += 1
+            totals["midshift"]["messages"].append(
+                f"{work_date.strftime('%d/%m/%Y')}: bỏ qua nghỉ giữa ca lịch sử vì chưa nạp FaceID chi tiết."
+            )
+
+    return totals
+
 
 def run_auto_penalty_now(
     tour_df=None, checkin_df=None, raw_punch_df=None, actor="AUTO UPDATE",
@@ -15619,14 +15852,14 @@ def _save_button_default_labels():
 
 
 def _save_button_default_config():
-    # V92.6.66 - preset Ghi/Save theo mẫu nút SAVE xanh bóng:
-    # chữ trắng đậm, nền xanh nhạt có highlight kính và bóng nổi.
+    # V92.6.70 - nút Ghi/Lưu/Save:
+    # Roboto 14px, Bold 700, chữ đen; nền xanh nhạt bóng kính + shadow giữ nguyên.
     def one():
         return {
-            "font_family":"Arial", "font_size":16, "font_weight":"800", "font_style":"Thường",
-            "text_color":"#FFFFFF", "bg_color":"#9DDEFF", "border_color":"#4EA9E7",
+            "font_family":"Roboto", "font_size":14, "font_weight":"700", "font_style":"Thường",
+            "text_color":"#000000", "bg_color":"#9DDEFF", "border_color":"#4EA9E7",
             "border_width":1, "radius":12, "width_px":0, "height_px":44, "shadow":"Đậm",
-            "hover_bg":"#78D0FF", "hover_text":"#FFFFFF",
+            "hover_bg":"#78D0FF", "hover_text":"#000000",
         }
     labels = _save_button_default_labels()
     return {
@@ -20929,9 +21162,9 @@ table tbody tr:hover td {{
 </style>
 """, unsafe_allow_html=True)
 
-# V92.6.66 - Nút Ghi / Lưu / Save dùng chung phong cách SAVE xanh bóng.
-# Giữ UI Builder để Admin vẫn chỉnh kích thước/bo góc, nhưng preset hình ảnh cốt lõi
-# (chữ trắng đậm + nền xanh nhạt bóng kính + shadow) được áp dụng đồng nhất toàn hệ thống.
+# V92.6.71 - Nút Ghi / Lưu / Save + Cập nhật dữ liệu dùng chung phong cách SAVE xanh bóng.
+# Chữ cố định Roboto 14px / Bold 700 / màu đen trên Web + Mobile;
+# nền xanh nhạt bóng kính + shadow giữ nguyên đồng nhất toàn hệ thống.
 try:
     _save_btn_cfg, _save_btn_err = load_save_button_ui_config()
 except Exception:
@@ -20940,12 +21173,12 @@ _sbd = _save_btn_cfg["desktop"]; _sbm = _save_btn_cfg["mobile"]
 _sbd_width = f"width:{int(_sbd.get('width_px',0))}px!important;max-width:100%!important;" if int(_sbd.get("width_px",0) or 0)>0 else ""
 _sbm_width = f"width:{int(_sbm.get('width_px',0))}px!important;max-width:100%!important;" if int(_sbm.get("width_px",0) or 0)>0 else ""
 st.markdown(f"""
-<style id="vera-save-action-style-v92666">
+<style id="vera-save-action-style-v92671">
 button.vera-save-action-v89 {{
  position:relative!important;overflow:hidden!important;isolation:isolate!important;
- font-family:'Arial','Roboto',sans-serif!important;
- font-size:16px!important;font-weight:800!important;font-style:normal!important;
- color:#FFFFFF!important;
+ font-family:'Roboto',Arial,sans-serif!important;
+ font-size:14px!important;font-weight:700!important;font-style:normal!important;
+ color:#000000!important;
  background:linear-gradient(180deg,#E9F9FF 0%,#BCEBFF 30%,#92DAFB 62%,#72C7F2 100%)!important;
  border:1px solid #4EA9E7!important;
  border-radius:{max(10,int(_sbd.get("radius",12)))}px!important;
@@ -20953,7 +21186,7 @@ button.vera-save-action-v89 {{
  height:{max(42,int(_sbd.get("height_px",44)))}px!important;
  {_sbd_width}
  box-shadow:0 6px 14px rgba(17,111,181,.28),0 2px 4px rgba(0,82,155,.18),inset 0 1px 0 rgba(255,255,255,.98),inset 0 -2px 0 rgba(0,94,166,.14)!important;
- text-shadow:0 1px 1px rgba(0,71,143,.95),0 0 2px rgba(0,91,180,.45)!important;
+ text-shadow:none!important;
  transition:transform .14s ease,box-shadow .14s ease,filter .14s ease!important;
 }}
 button.vera-save-action-v89::before {{
@@ -20966,13 +21199,13 @@ button.vera-save-action-v89 > * {{position:relative!important;z-index:1!importan
 button.vera-save-action-v89 p,
 button.vera-save-action-v89 span,
 button.vera-save-action-v89 div {{
- color:#FFFFFF!important;font-family:'Arial','Roboto',sans-serif!important;
- font-size:16px!important;font-weight:800!important;font-style:normal!important;
- text-shadow:0 1px 1px rgba(0,71,143,.95),0 0 2px rgba(0,91,180,.45)!important;
+ color:#000000!important;font-family:'Roboto',Arial,sans-serif!important;
+ font-size:14px!important;font-weight:700!important;font-style:normal!important;
+ text-shadow:none!important;
 }}
-button.vera-save-action-v89 svg {{color:#FFFFFF!important;fill:currentColor!important;filter:drop-shadow(0 1px 1px rgba(0,71,143,.55));}}
+button.vera-save-action-v89 svg {{color:#000000!important;fill:currentColor!important;filter:none!important;}}
 button.vera-save-action-v89:hover:not(:disabled) {{
- color:#FFFFFF!important;
+ color:#000000!important;
  background:linear-gradient(180deg,#F2FCFF 0%,#C9F0FF 28%,#9DE1FF 60%,#65C3F2 100%)!important;
  box-shadow:0 8px 18px rgba(17,111,181,.34),0 3px 6px rgba(0,82,155,.20),inset 0 1px 0 rgba(255,255,255,1),inset 0 -2px 0 rgba(0,94,166,.16)!important;
  transform:translateY(-1px)!important;filter:saturate(1.04)!important;
@@ -20981,7 +21214,7 @@ button.vera-save-action-v89:active:not(:disabled) {{transform:translateY(1px)!im
 button.vera-save-action-v89:disabled {{opacity:.55!important;filter:grayscale(.08)!important;}}
 @media (max-width:768px) {{
  button.vera-save-action-v89 {{
-  font-size:16px!important;font-weight:800!important;
+  font-size:14px!important;font-weight:700!important;
   border-radius:{max(10,int(_sbm.get("radius",12)))}px!important;
   min-height:{max(42,int(_sbm.get("height_px",44)))}px!important;
   height:{max(42,int(_sbm.get("height_px",44)))}px!important;
@@ -20989,7 +21222,7 @@ button.vera-save-action-v89:disabled {{opacity:.55!important;filter:grayscale(.0
  }}
  button.vera-save-action-v89 p,
  button.vera-save-action-v89 span,
- button.vera-save-action-v89 div {{font-size:16px!important;font-weight:800!important;color:#FFFFFF!important;}}
+ button.vera-save-action-v89 div {{font-size:14px!important;font-weight:700!important;color:#000000!important;}}
 }}
 </style>
 """,unsafe_allow_html=True)
@@ -21002,8 +21235,8 @@ components.html(f"""
   const labels=(W.matchMedia&&W.matchMedia('(max-width:768px)').matches)
     ? (labelSets.mobile||labelSets.desktop||{{}})
     : (labelSets.desktop||labelSets.mobile||{{}});
-  // V92.6.66: mọi button có nghĩa GHI / LƯU / SAVE đều nhận cùng style.
-  const rx=/(^|\\s)(lưu|save|ghi)(\\s|$)/i;
+  // V92.6.71: mọi button GHI / LƯU / SAVE và nút CẬP NHẬT DỮ LIỆU đều nhận cùng style, chữ đen Roboto 14/700.
+  const rx=/(^|\\s)(lưu|save|ghi)(\\s|$)|cập\\s*nhật\\s*dữ\\s*liệu|cap\\s*nhat\\s*du\\s*lieu|update\\s*data/i;
   function chooseLabel(original){{
     const clean=String(original||'').replace(/\\s+/g,' ').trim();
     const low=clean.toLowerCase();
@@ -21029,10 +21262,10 @@ components.html(f"""
     }});
   }}
   mark();
-  if(!W.__veraSaveButtonObserverV92666){{
+  if(!W.__veraSaveButtonObserverV92671){{
     const ob=new MutationObserver(function(){{setTimeout(mark,20);}});
     ob.observe(D.body,{{childList:true,subtree:true,characterData:true}});
-    W.__veraSaveButtonObserverV92666=ob;
+    W.__veraSaveButtonObserverV92671=ob;
   }}
   setTimeout(mark,100);setTimeout(mark,400);setTimeout(mark,1000);
  }}catch(e){{}}
@@ -21660,7 +21893,7 @@ PAGE_SLUGS = {
     "🔒 Khóa đăng nhập": "khoa-dang-nhap",
     "🔐 Khóa quyền đăng ký": "khoa-quyen-dang-ky",
     "⏸️ Auto Update phạt": "auto-update-phat",
-    "📦 Snapshot nền hôm nay": "snapshot-nen-hom-nay",
+    "📦 Snapshot": "snapshot-nen-hom-nay",
     "📘 Hướng dẫn sử dụng": "huong-dan-su-dung",
     "🔄 Đồng bộ dữ liệu": "dong-bo-du-lieu",
     "⚙️ Giao diện tùy chỉnh": "cau-hinh-cot",
@@ -21685,7 +21918,7 @@ PAGE_FEATURE_KEYS = {
     "🔒 Khóa đăng nhập": "account_lock",
     "🔐 Khóa quyền đăng ký": "registration_lock",
     "⏸️ Auto Update phạt": "auto_penalty",
-    "📦 Snapshot nền hôm nay": "snapshot_today",
+    "📦 Snapshot": "snapshot_today",
     "📘 Hướng dẫn sử dụng": "guide",
     "🔄 Đồng bộ dữ liệu": "sync",
     "⚙️ Giao diện tùy chỉnh": "column_config",
@@ -25708,7 +25941,7 @@ elif selected_page == "✏️ Sửa / Xóa nhân viên" and has_page_access("✏
             ].copy()
         else:
             nhanvien_df_status = pd.DataFrame(columns=df_credentials.columns)
-        status_emp_options = sort_employee_names(nhanvien_df_status['Tên nhân viên'].dropna().astype(str).tolist()) if not nhanvien_df_status.empty else []
+        status_emp_options = sort_employee_names(nhanvien_df_status['Tên nhân viên'].dropna().astype(str).tolist(), include_inactive=True) if not nhanvien_df_status.empty else []
         if not status_emp_options:
             st.info("Hiện không có tài khoản phù hợp để cập nhật trạng thái.")
         else:
@@ -25898,6 +26131,56 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
     if cfg.get('error'):
         st.warning(f"Không đọc được cấu hình Auto Update đầy đủ: {cfg.get('error')}")
 
+    st.markdown("#### 🔎 Phạm vi chạy Auto Update thủ công")
+    _auto_today_v92672 = get_vn_today()
+    _auto_dates_v92672 = _timesoft_available_snapshot_dates()
+    _auto_earliest_v92672 = min(_auto_dates_v92672) if _auto_dates_v92672 else _auto_today_v92672
+    _auto_latest_v92672 = max(_auto_dates_v92672) if _auto_dates_v92672 else _auto_today_v92672
+
+    _af1_v92672, _af2_v92672 = st.columns([1.35, 3.65])
+    with _af1_v92672:
+        _auto_preset_v92672 = st.selectbox(
+            "Lọc thời gian",
+            SNAPSHOT_RANGE_PRESETS_V92657,
+            index=1,
+            key="auto_update_time_preset_v92672",
+        )
+
+    _auto_start_v92672, _auto_end_v92672 = _snapshot_preset_range_v92657(
+        _auto_preset_v92672, _auto_today_v92672,
+        earliest=_auto_earliest_v92672, latest=_auto_latest_v92672,
+    )
+    with _af2_v92672:
+        if _auto_preset_v92672 == "Tùy chỉnh":
+            _auto_custom_v92672 = st.date_input(
+                "📅 Khoảng thời gian Auto Update",
+                value=(_auto_today_v92672, _auto_today_v92672),
+                max_value=_auto_today_v92672,
+                format="DD/MM/YYYY",
+                key="auto_update_custom_range_v92672",
+            )
+            if isinstance(_auto_custom_v92672, (tuple, list)) and len(_auto_custom_v92672) >= 2:
+                _auto_start_v92672, _auto_end_v92672 = _auto_custom_v92672[0], _auto_custom_v92672[1]
+            elif isinstance(_auto_custom_v92672, (tuple, list)) and len(_auto_custom_v92672) == 1:
+                _auto_start_v92672 = _auto_end_v92672 = _auto_custom_v92672[0]
+            else:
+                _auto_start_v92672 = _auto_end_v92672 = _auto_custom_v92672 or _auto_today_v92672
+        else:
+            st.caption(
+                f"📅 {_auto_start_v92672.strftime('%d/%m/%Y')} → {_auto_end_v92672.strftime('%d/%m/%Y')}"
+            )
+
+    if _auto_start_v92672 > _auto_end_v92672:
+        _auto_start_v92672, _auto_end_v92672 = _auto_end_v92672, _auto_start_v92672
+
+    _auto_days_v92672 = [
+        d for d in _auto_dates_v92672 if _auto_start_v92672 <= d <= _auto_end_v92672
+    ]
+    st.caption(
+        f"Chạy tay sẽ đối soát {len(_auto_days_v92672)} ngày có Snapshot trong khoảng đã chọn. "
+        "Scheduler 15:00/20:00/21:00 vẫn chỉ chạy ngày hiện tại."
+    )
+
     c_auto1, c_auto2 = st.columns(2)
     with c_auto1:
         if paused:
@@ -25916,40 +26199,27 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         run_now = st.button(
             "▶️ Chạy Auto Update ngay", use_container_width=True,
             disabled=paused or (not _can_auto_run), key="run_auto_penalty_now_v84",
-            help="Đọc Bảng tour hiện tại và dữ liệu TimeSoft gần nhất đang có trong phiên/snapshot."
+            help="Chạy theo bộ lọc thời gian phía trên. Lịch sử chỉ xử lý ngày có Snapshot TimeSoft; Bảng tour chỉ áp dụng cho hôm nay."
         )
 
     if run_now:
-        load_bang_tour_input.clear()
-        _tour_now, _tour_err = load_bang_tour_input()
-        _checkin_now = None
-        _direct = st.session_state.get('timesoft_direct_result_v81') or {}
-        if isinstance(_direct.get('employee_checkin_df'), pd.DataFrame):
-            _checkin_now = _direct.get('employee_checkin_df')
-        elif vpg is not None and _vpg_is_enabled():
-            _snap = _timesoft_read_background_snapshot(get_vn_today())
-            if isinstance(_snap.get('employee_checkin'), pd.DataFrame):
-                _checkin_now = _snap.get('employee_checkin')
-        with st.spinner("Đang kiểm tra Bảng tour và TimeSoft theo ngưỡng 5 phút..."):
-            _raw_faceid_now_v92667 = st.session_state.get(
-                TIMESOFT_RAW_FACEID_SESSION_KEY_V92667
-            )
-            _auto_res = run_auto_penalty_now(
-                tour_df=_tour_now,
-                checkin_df=_checkin_now,
-                raw_punch_df=(
-                    _raw_faceid_now_v92667
-                    if isinstance(_raw_faceid_now_v92667, pd.DataFrame)
-                    else None
-                ),
+        with st.spinner(
+            f"Đang chạy Auto Update {_auto_start_v92672.strftime('%d/%m/%Y')} → {_auto_end_v92672.strftime('%d/%m/%Y')}..."
+        ):
+            _auto_res = run_auto_penalty_range_v92672(
+                _auto_start_v92672,
+                _auto_end_v92672,
                 actor=f"AUTO UPDATE - {st.session_state.current_user}",
-                force_midshift_daily=True,
             )
         rt = _auto_res['tour']
         rs = _auto_res['timesoft']
         rm = _auto_res.get('midshift', _auto_result("TimeSoft nghỉ giữa ca"))
         ra = _auto_res.get('absence', _auto_result("TimeSoft nghỉ không phép"))
         rc = _auto_res['ca1']
+        _processed_v92672 = _auto_res.get('processed_dates') or []
+        st.success(
+            f"Đã đối soát {len(_processed_v92672)} ngày có Snapshot trong khoảng đã chọn."
+        )
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Tour đã thêm", rt.get('added',0))
         m2.metric("Đi trễ đã thêm", rs.get('added',0))
@@ -25968,11 +26238,11 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
             + (rc.get('messages') or [])
         )
         if all_msgs:
-            st.caption(" | ".join(all_msgs[:10]))
+            st.caption(" | ".join(all_msgs[:15]))
 
     st.markdown("#### Quy tắc V84.7")
     st.write(
-        "• **Lịch Cloud Scheduler: 15:00 + 20:00 + 21:00 hằng ngày**. Lượt **15:00** chạy Auto ban ngày; lượt **20:00** giữ Auto tối và Auto Nghỉ không phép; lượt **21:00 chuyên kiểm tra nghỉ giữa ca** và tác vụ này chỉ chạy **1 lần/ngày**. Mở Bảng tour hoặc lấy TimeSoft thủ công không tự ghi phạt.  \n"
+        "• **Lịch Cloud Scheduler: 15:00 + 20:00 + 21:00 hằng ngày**. Lượt **15:00** chạy Auto ban ngày; lượt **20:00** giữ Auto tối và Auto Nghỉ không phép; lượt **21:00 chuyên kiểm tra nghỉ giữa ca** và tác vụ này chỉ chạy **1 lần/ngày**. Scheduler luôn xử lý ngày hiện tại. Nút **Chạy Auto Update ngay** của Admin chạy theo bộ lọc Hôm qua/Hôm nay/Tuần/Tháng/Tất cả/Tùy chỉnh.  \n"
         "• Ra ngoài vào muộn: chỉ Auto Update khi cột **Vào trễ >= 5 phút**. "
         "Tên như **Cẩm Nhung *** được đối chiếu như **Cẩm Nhung**.  \n"
         "• TimeSoft: check-in được so trực tiếp với giờ bắt đầu ca. **Hỗ trợ Ca 1 2 tiếng = 120 phút; Ca 1 sau 0:0H 3 tiếng = 180 phút; Ca 2 sau 0:0H 1 tiếng = 60 phút**. Chỉ Auto phạt khi vượt mức Hỗ trợ; nếu không có Hỗ trợ thì ngưỡng là **>= 5 phút**.  \n"
@@ -25984,8 +26254,8 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         "• **Email bắt buộc cho mọi Auto Update có Phạt vi phạm > 0**: gửi từ `veraspabienhoa@gmail.com` đến nhân viên bị phạt; CC `veraspabienhoa@gmail.com + quanly + letan`. Email lỗi sẽ được Job kế tiếp tự thử gửi lại."
     )
 
-elif selected_page == "📦 Snapshot nền hôm nay" and has_feature_access("snapshot_today"):
-    st.subheader("📦 Snapshot nền · Lịch sử dữ liệu")
+elif selected_page == "📦 Snapshot" and has_feature_access("snapshot_today"):
+    st.subheader("📦 Snapshot")
     st.caption(
         "Theo dõi snapshot TimeSoft đã lưu trong PostgreSQL theo khoảng thời gian. "
         "Trang này chỉ đọc dữ liệu đã lưu, không gọi TimeSoft trực tiếp."
@@ -26081,7 +26351,7 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
                 # V85.2: vẫn giữ Snapshot hiện tại trong trang Đồng bộ dữ liệu,
                 # nhưng tuyệt đối chỉ hiển thị với tài khoản Admin.
                 if st.session_state.current_role == "admin":
-                    with st.expander("📦 Xem snapshot nền hôm nay", expanded=False):
+                    with st.expander("📦 Xem Snapshot", expanded=False):
                         render_timesoft_background_snapshot_today(show_status=False)
             else:
                 st.info("PostgreSQL đã bật nhưng chưa có snapshot TimeSoft nền. Sau khi Cloud Scheduler gọi Cloud Run Job thành công lần đầu, trạng thái sẽ xuất hiện tại đây.")

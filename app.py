@@ -1,4 +1,4 @@
-# V92.6.60 - Fix marker_id cho render_leave_reason_selectbox_color (2026-08-21)
+# V92.6.58 - Căn giữa cột Tổng nghỉ trong bảng thống kê theo ngày (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -8006,156 +8006,54 @@ def _daily_leave_group(reason, reason_type_map=None):
 
 def render_leave_reason_selectbox_color(selected_reason, reason_type_map=None, marker_id="vera-leave-reason-selectbox"):
     """
-    V92.6.59 - Màu dropdown Lý do nghỉ:
-    - KHÔNG phép: đỏ (giữ nguyên)
-    - Có chữ CÓ phép: xanh
-    - Còn lại: vàng
-
-    Áp dụng cho cả giá trị đang chọn và từng option trong popover.
+    Tô màu ô selectbox 'Lý do nghỉ' theo nhóm:
+    - CÓ phép     -> xanh
+    - KHÔNG phép  -> đỏ
+    - còn lại     -> vàng
+    Chỉ áp dụng cho phần hiển thị giá trị đang chọn của selectbox.
     """
-    reason_type_map = reason_type_map if isinstance(reason_type_map, dict) else {}
-
     selected_text = str(selected_reason or "").strip()
-    selected_norm = normalize_login_name(selected_text)
+    if not selected_text or selected_text == "-- Chọn lý do nghỉ --":
+        group = "other"
+    else:
+        raw_group = _daily_leave_group(selected_text, reason_type_map=reason_type_map)
+        if raw_group == "co_phep":
+            group = "co_phep"
+        elif raw_group == "khong_phep":
+            group = "khong_phep"
+        else:
+            group = "other"
 
-    def _reason_color_class_v92659(label):
-        label_norm = normalize_login_name(label)
-
-        # Đỏ ưu tiên cao nhất để giữ nguyên nhóm KHÔNG phép.
-        if "khong phep" in label_norm:
-            return "vera-leave-reason-red"
-
-        # Bất kỳ lý do nào có chữ CÓ phép -> xanh.
-        if "co phep" in label_norm:
-            return "vera-leave-reason-green"
-
-        # Còn lại -> vàng.
-        return "vera-leave-reason-yellow"
-
-    selected_class = _reason_color_class_v92659(selected_text)
-
-    # Màu nền/chữ dùng mã cố định để hiển thị rõ trên mobile và desktop.
-    color_css = """
-    <style>
-    /* Giá trị đang chọn */
-    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div.vera-leave-reason-green,
-    .vera-leave-reason-green {
-        background-color: #D9F7BE !important;
-        color: #135200 !important;
+    palette = {
+        "co_phep": {"bg": "#E8F5E9", "border": "#2E7D32", "text": "#1B5E20"},
+        "khong_phep": {"bg": "#FDECEC", "border": "#D32F2F", "text": "#8B1E1E"},
+        "other": {"bg": "#FFF8E1", "border": "#E6B800", "text": "#6B5A00"},
     }
+    c = palette[group]
 
-    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div.vera-leave-reason-yellow,
-    .vera-leave-reason-yellow {
-        background-color: #FFF1B8 !important;
-        color: #614700 !important;
-    }
-
-    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div.vera-leave-reason-red,
-    .vera-leave-reason-red {
-        background-color: #FFD6D6 !important;
-        color: #A8071A !important;
-    }
-    </style>
-    """
-    st.markdown(color_css, unsafe_allow_html=True)
-
-    # JS gắn màu động cho option trong dropdown và ô đang chọn.
-    selected_json = json.dumps(selected_text, ensure_ascii=False)
-    selected_class_json = json.dumps(selected_class)
-    marker_json = json.dumps(str(marker_id or "vera-leave-reason-selectbox"), ensure_ascii=False)
-
-    components.html(
+    st.markdown(
         f"""
-        <script>
-        (function() {{
-            try {{
-                const D = window.parent.document;
-                const selectedText = {selected_json};
-                const selectedClass = {selected_class_json};
-                const markerId = {marker_json};
-
-                function norm(s) {{
-                    return (s || '')
-                        .normalize('NFD')
-                        .replace(/[\\u0300-\\u036f]/g, '')
-                        .replace(/đ/g, 'd')
-                        .replace(/Đ/g, 'D')
-                        .toLowerCase()
-                        .trim();
-                }}
-
-                function clsFor(txt) {{
-                    const n = norm(txt);
-                    if (n.includes('khong phep')) return 'vera-leave-reason-red';
-                    if (n.includes('co phep')) return 'vera-leave-reason-green';
-                    return 'vera-leave-reason-yellow';
-                }}
-
-                function applyOptionColors() {{
-                    // Options trong dropdown/popover.
-                    const options = Array.from(
-                        D.querySelectorAll('[role="option"], li[role="option"]')
-                    );
-                    for (const opt of options) {{
-                        const txt = (opt.innerText || '').trim();
-                        if (!txt) continue;
-
-                        opt.classList.remove(
-                            'vera-leave-reason-red',
-                            'vera-leave-reason-green',
-                            'vera-leave-reason-yellow'
-                        );
-
-                        // Placeholder không tô màu.
-                        if (txt.includes('-- Chọn lý do nghỉ --')) continue;
-
-                        opt.classList.add(clsFor(txt));
-                    }}
-
-                    // Ô selectbox Lý do nghỉ đang chọn.
-                    const marker = D.getElementById(markerId);
-                    if (marker) {{
-                        let host = marker.parentElement;
-                        let selectWrap = null;
-                        for (let i = 0; i < 8 && host; i++, host = host.parentElement) {{
-                            selectWrap = host.querySelector('[data-testid="stSelectbox"] [data-baseweb="select"] > div');
-                            if (selectWrap) break;
-                        }}
-                        if (selectWrap) {{
-                            selectWrap.classList.remove(
-                                'vera-leave-reason-red',
-                                'vera-leave-reason-green',
-                                'vera-leave-reason-yellow'
-                            );
-                            if (selectedText && !selectedText.includes('-- Chọn lý do nghỉ --')) {{
-                                selectWrap.classList.add(selectedClass);
-                            }}
-                        }}
-                    }}
-                }}
-
-                applyOptionColors();
-
-                if (!window.parent.__veraLeaveReasonColorObserverV92659) {{
-                    const ob = new MutationObserver(function() {{
-                        setTimeout(applyOptionColors, 20);
-                    }});
-                    ob.observe(D.body, {{childList:true, subtree:true}});
-                    window.parent.__veraLeaveReasonColorObserverV92659 = ob;
-                }}
-
-                setTimeout(applyOptionColors, 100);
-                setTimeout(applyOptionColors, 350);
-            }} catch(e) {{}}
-        }})();
-        </script>
+        <style>
+        div[data-testid="stVerticalBlock"]:has(#{marker_id}) div[data-testid="stSelectbox"] [data-baseweb="select"] > div {{
+            background: {c['bg']} !important;
+            border: 2px solid {c['border']} !important;
+            border-radius: 12px !important;
+            box-shadow: none !important;
+        }}
+        div[data-testid="stVerticalBlock"]:has(#{marker_id}) div[data-testid="stSelectbox"] [data-baseweb="select"] * {{
+            color: {c['text']} !important;
+            font-weight: 700 !important;
+        }}
+        div[data-testid="stVerticalBlock"]:has(#{marker_id}) div[data-testid="stSelectbox"] svg {{
+            fill: {c['text']} !important;
+        }}
+        </style>
         """,
-        height=0,
-        width=0,
+        unsafe_allow_html=True,
     )
 
 
-
+@st.cache_data(ttl=300, show_spinner=False)
 def load_leave_daily_quota_config():
     """
     Đọc sheet Config của file lịch nghỉ:

@@ -1,4 +1,4 @@
-# V92.6.75 - Chặn Auto Nghỉ KP khi MainData G có 0.5/1 + tạm dừng email Auto + nhãn xanh (2026-08-22)
+# V92.6.76 - Fix Auto Ra ngoài vào muộn theo đúng LoaiNghi dòng 30-33; 0.5/1 chỉ chặn Nghỉ KP (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1769,6 +1769,12 @@ PROGRESSIVE_PENALTY_REASONS = {
 # Các loại này tuyệt đối KHÔNG tham gia xếp hạng Người Thứ 1/2/3... dù tên danh mục
 # sau này có bị chỉnh gần giống một nhóm phạt lũy tiến.
 PROGRESSIVE_PENALTY_EXCLUDED_REASONS = {
+    # Tên hiện tại trong LoaiNghi (STT 30-33).
+    normalize_login_name("Ra ngoài vào muộn nhỏ hơn hoặc bằng 30 phút"),
+    normalize_login_name("Ra ngoài vào muộn nhỏ hơn hoặc bằng 60 phút"),
+    normalize_login_name("Ra ngoài vào muộn nhỏ hơn hoặc bằng 120 phút"),
+    normalize_login_name("Ra ngoài vào muộn trên 120 phút"),
+    # Tương thích tên lịch sử.
     normalize_login_name("Ra ngoài vào muộn dưới 30 phút"),
     normalize_login_name("Ra ngoài vào muộn dưới 60 phút"),
     normalize_login_name("Ra ngoài vào muộn dưới 120 phút"),
@@ -10545,30 +10551,67 @@ def _tour_late_minutes(value):
     return None
 
 def _outside_late_reason_for_minutes(minutes, catalog=None):
-    """Chọn đúng bậc Ra ngoài vào muộn theo số phút và ưu tiên tên đang cấu hình trong LoaiNghi."""
+    """
+    Chọn đúng bậc ``Ra ngoài vào muộn`` theo LoaiNghi hiện tại.
+
+    V92.6.76:
+    - STT 30: <= 30 phút;
+    - STT 31: <= 60 phút;
+    - STT 32: <= 120 phút;
+    - STT 33: > 120 phút.
+
+    Ưu tiên tên hiện tại ``nhỏ hơn hoặc bằng``; vẫn chấp nhận tên lịch sử
+    ``dưới ... phút`` để không làm mất tương thích dữ liệu cũ.
+    """
     try:
         m = float(minutes)
     except Exception:
         return None
     if m < AUTO_PENALTY_MINUTES:
         return None
-    if m < 30:
-        candidates = ["Ra ngoài vào muộn dưới 30 phút"]
-    elif m < 60:
-        candidates = ["Ra ngoài vào muộn dưới 60 phút"]
-    elif m < 120:
-        candidates = ["Ra ngoài vào muộn dưới 120 phút"]
-    else:
-        # Nếu danh mục có bậc >=120 thì dùng đúng bậc đó; nếu chưa có, dùng bậc cao nhất hiện tại.
+
+    if m <= 30:
         candidates = [
-            "Ra ngoài vào muộn từ 120 phút trở lên",
-            "Ra ngoài vào muộn trên 120 phút",
+            "Ra ngoài vào muộn nhỏ hơn hoặc bằng 30 phút",
+            "Ra ngoài vào muộn dưới 30 phút",
+        ]
+    elif m <= 60:
+        candidates = [
+            "Ra ngoài vào muộn nhỏ hơn hoặc bằng 60 phút",
+            "Ra ngoài vào muộn dưới 60 phút",
+        ]
+    elif m <= 120:
+        candidates = [
+            "Ra ngoài vào muộn nhỏ hơn hoặc bằng 120 phút",
             "Ra ngoài vào muộn dưới 120 phút",
         ]
+    else:
+        candidates = [
+            "Ra ngoài vào muộn trên 120 phút",
+            "Ra ngoài vào muộn từ 120 phút trở lên",
+        ]
+
     for reason in candidates:
         item = _auto_penalty_catalog_item(reason, catalog)
         if item:
             return item.get('name', reason)
+
+    # Fallback linh hoạt: nếu Admin đổi nhẹ cách viết tên nhưng vẫn giữ mốc số phút,
+    # tìm trong catalog theo cụm ``ra ngoài vào muộn`` + ngưỡng tương ứng.
+    cat = catalog if catalog is not None else build_leave_reason_catalog(
+        globals().get('df_loai_nghi', pd.DataFrame())
+    )
+    target_limit = 30 if m <= 30 else 60 if m <= 60 else 120 if m <= 120 else None
+    for item in (cat or {}).values():
+        name = clean_leave_reason_display(item.get('name', ''))
+        key = normalize_login_name(name)
+        if 'ra ngoai vao muon' not in key:
+            continue
+        nums = [int(x) for x in re.findall(r'\d+', key)]
+        if target_limit is not None and target_limit in nums and 'tren 120' not in key:
+            return name
+        if target_limit is None and ('tren 120' in key or ('120' in key and 'tro len' in key)):
+            return name
     return None
 
 def _auto_result(source):
@@ -26966,7 +27009,7 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         "• Ra ngoài vào muộn: chỉ Auto Update khi cột **Vào trễ >= 5 phút**. "
         "Tên như **Cẩm Nhung *** được đối chiếu như **Cẩm Nhung**.  \n"
         "• TimeSoft: check-in được so trực tiếp với giờ bắt đầu ca. **Hỗ trợ Ca 1 2 tiếng = 120 phút; Ca 1 sau 0:0H 3 tiếng = 180 phút; Ca 2 sau 0:0H 1 tiếng = 60 phút**. Chỉ Auto phạt khi vượt mức Hỗ trợ; nếu không có Hỗ trợ thì ngưỡng là **>= 5 phút**.  \n"
-        "• **Auto Nghỉ không phép**: từ **20:00**, chỉ xét `nhanvien + leader` đang **Đang làm việc** và **đã phân ca**. Nếu người đó không có check-in TimeSoft trong ngày và MainData LIVE không có dòng cùng ngày với **cột G · Số ngày tính = 0.5 hoặc 1**, hệ thống tự ghi **Nghỉ không phép**; Thứ ngày lấy theo ngày thực tế và tiền phạt lấy từ `LoaiNghi` + phạt lũy tiến của đúng ngày. Snapshot TimeSoft rỗng sẽ không phạt để tránh lỗi hàng loạt.  \n"
+        "• **Auto Nghỉ không phép**: từ **20:00**, chỉ xét `nhanvien + leader` đang **Đang làm việc** và **đã phân ca**. Nếu người đó không có check-in TimeSoft trong ngày và MainData LIVE không có dòng cùng ngày với **cột G · Số ngày tính = 0.5 hoặc 1**, hệ thống tự ghi **Nghỉ không phép**; Thứ ngày lấy theo ngày thực tế và tiền phạt lấy từ `LoaiNghi` + phạt lũy tiến của đúng ngày. Snapshot TimeSoft rỗng sẽ không phạt để tránh lỗi hàng loạt. **Quy tắc cột G=0.5/1 chỉ áp dụng cho Auto Nghỉ không phép, không áp dụng cho Ra ngoài vào muộn/Đi trễ/vi phạm khác.**  \n"
         "• **KHÔNG dọn vệ sinh ca 1**: chỉ áp dụng cho role `nhanvien` đang làm **Ca 1 trong tuần hiện tại**, "
         "không có **Hỗ trợ Ca 1 đi trễ 2 tiếng / Hỗ trợ Ca 1 đi trễ 3 tiếng / Hỗ trợ Ca 2 đi trễ 1 tiếng**, "
         "và hôm đó có **Đi trễ <=30 / <=60 / >60 đến <=120 phút** theo đúng loại nghỉ đã cấu hình.  \n"

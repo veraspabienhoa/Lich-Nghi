@@ -1,4 +1,4 @@
-# V92.6.32 - Đăng ký nghỉ 2 bước, không đối chiếu LIVE khi nhập liệu (2026-08-21)
+# V92.6.31 - LoaiNghi embedded + chỉ đọc Google Sheet khi bấm Cập nhật qui định (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -10028,338 +10028,6 @@ def is_employee_co_phep_leave_reason(value):
         "ra som", "vao muon", "di tua", "ngung nhan", "ho tro ca"
     ]
     return not any(kw in key for kw in excluded_keywords)
-
-
-
-def _validate_leave_registration_request_live(payload, live_df, credentials_df):
-    """
-    V92.6.32 - Đối chiếu tập trung SAU khi bấm Ghi Lịch Nghỉ.
-
-    Không tự đọc Google Sheet / PostgreSQL.
-    Caller truyền vào MỘT snapshot LIVE đã đọc đúng lúc bấm nút.
-
-    Trả:
-      {
-        "ok": bool,
-        "errors": [...],
-        "warnings": [...],
-        "accumulated_month": float,
-      }
-    """
-    result = {
-        "ok": False,
-        "errors": [],
-        "warnings": [],
-        "accumulated_month": 0.0,
-    }
-
-    role = str(payload.get("role", "") or "").strip().lower()
-    is_admin = role == "admin"
-    employee = str(payload.get("employee", "") or "").strip()
-    reason = clean_leave_reason_display(payload.get("reason", ""))
-    detail = str(payload.get("detail", "") or "").strip()
-
-    start_date = payload.get("start_date")
-    end_date = payload.get("end_date")
-    if not isinstance(start_date, date) or not isinstance(end_date, date):
-        result["errors"].append("Ngày đăng ký không hợp lệ.")
-        return result
-    if end_date < start_date:
-        result["errors"].append("Ngày kết thúc phải lớn hơn hoặc bằng ngày bắt đầu.")
-        return result
-
-    if not employee or employee == "-- Chọn nhân viên --":
-        result["errors"].append("Vui lòng chọn nhân viên cần nhập lịch nghỉ.")
-    if not reason or reason == "-- Chọn lý do nghỉ --":
-        result["errors"].append("Vui lòng chọn lý do nghỉ.")
-
-    try:
-        val_songay = float(payload.get("days", 0) or 0)
-    except Exception:
-        val_songay = 0.0
-
-    val_phat = payload.get("penalty")
-    requires_manual_penalty = bool(payload.get("requires_manual_penalty", False))
-    is_loi_vi_pham = bool(payload.get("is_loi_vi_pham", False))
-    is_nghi_ly_do_khac = bool(payload.get("is_nghi_ly_do_khac", False))
-    is_zero_day_co_phep = bool(payload.get("is_zero_day_co_phep", False))
-    default_phat = float(payload.get("default_penalty", 0) or 0)
-
-    if is_loi_vi_pham:
-        val_songay = 0.0
-        if not detail:
-            result["errors"].append(
-                "Chưa có Chi tiết vi phạm cho 'Lỗi vi phạm khác'."
-            )
-    if is_nghi_ly_do_khac and not detail:
-        result["errors"].append(
-            "Bắt buộc nhập Chi tiết vi phạm / Ghi chú đối với 'Nghỉ lý do khác'."
-        )
-    if requires_manual_penalty and val_phat is None:
-        result["errors"].append("Bắt buộc nhập Mức phạt vi phạm.")
-
-    if result["errors"]:
-        return result
-
-    now_vn = datetime.now(VN_TZ)
-    today = now_vn.date()
-    selected_dates = [
-        start_date + timedelta(days=i)
-        for i in range((end_date - start_date).days + 1)
-    ]
-
-    # Rule G/H/I/J/K chỉ dùng rule đang nằm trong bộ nhớ, không đọc nguồn ngoài.
-    if not is_admin:
-        for target_date in selected_dates:
-            ok, msg = validate_leave_registration_notice(
-                reason,
-                target_date,
-                role=role,
-                now_vn=now_vn,
-            )
-            if not ok:
-                result["errors"].append(msg)
-                return result
-
-    if role in EMPLOYEE_LIKE_ROLES:
-        _, emp_max_date = employee_registration_window(today)
-        if end_date > emp_max_date:
-            result["errors"].append(
-                f"Nhân viên chỉ được đăng ký đến hết {emp_max_date.strftime('%d/%m/%Y')}."
-            )
-            return result
-
-    source_df = (
-        live_df.copy()
-        if isinstance(live_df, pd.DataFrame)
-        else pd.DataFrame(columns=LEAVE_DATA_COLUMNS)
-    )
-
-    # KHÔNG phép không chịu giới hạn số lần cuối tuần theo V92.6.29.
-    weekend_ok, weekend_msg = _validate_monthly_weekend_registration_limit(
-        source_df,
-        employee,
-        start_date,
-        end_date,
-        reason=reason,
-        max_weekend_dates=2,
-    )
-    if not weekend_ok:
-        result["errors"].append(weekend_msg)
-        return result
-
-    norm_reason = normalize_leave_reason(reason)
-    is_video_leave = is_video_leave_reason(reason)
-    num_days_selected = len(selected_dates)
-
-    # Hạn mức cá nhân.
-    nv_info = pd.DataFrame()
-    if isinstance(credentials_df, pd.DataFrame) and not credentials_df.empty:
-        if "Tên nhân viên" in credentials_df.columns:
-            nv_info = credentials_df[
-                credentials_df["Tên nhân viên"].astype(str)
-                .apply(normalize_login_name)
-                .eq(normalize_login_name(employee))
-            ]
-
-    def _cred_limit(col):
-        if nv_info.empty or col not in nv_info.columns:
-            return 0.0
-        v = pd.to_numeric(nv_info.iloc[0].get(col, 0), errors="coerce")
-        return 0.0 if pd.isna(v) else float(v)
-
-    limit_ps = _cred_limit("Phát sinh tháng")
-    limit_cp = _cred_limit("Có phép tháng")
-    limit_pn = _cred_limit("Phép năm")
-
-    if (
-        isinstance(source_df, pd.DataFrame)
-        and not source_df.empty
-        and "Tên nhân viên" in source_df.columns
-    ):
-        user_hist = source_df[
-            source_df["Tên nhân viên"].astype(str)
-            .apply(normalize_login_name)
-            .eq(normalize_login_name(employee))
-        ].copy()
-    else:
-        user_hist = pd.DataFrame(columns=["Ngày", "Lý do nghỉ", "Số ngày tính"])
-
-    user_hist_quota = _leave_rows_counting_toward_quota(user_hist)
-
-    for frame in (user_hist, user_hist_quota):
-        if "Ngày" not in frame.columns:
-            frame["Ngày"] = pd.Series(dtype="object")
-        frame["Ngày_DT"] = pd.to_datetime(frame["Ngày"], errors="coerce", dayfirst=True)
-        frame["M"] = frame["Ngày_DT"].dt.month
-        frame["Y"] = frame["Ngày_DT"].dt.year
-        if "Số ngày tính" in frame.columns:
-            frame["Số ngày tính"] = pd.to_numeric(
-                frame["Số ngày tính"], errors="coerce"
-            ).fillna(0.0)
-
-    curr_m = start_date.month
-    curr_y = start_date.year
-    total_phep_required = val_songay * num_days_selected
-
-    month_hist = user_hist_quota[
-        (user_hist_quota["M"] == curr_m)
-        & (user_hist_quota["Y"] == curr_y)
-    ]
-    accumulated_month = (
-        float(pd.to_numeric(month_hist.get("Số ngày tính", 0), errors="coerce").fillna(0).sum())
-        if not month_hist.empty and "Số ngày tính" in month_hist.columns
-        else 0.0
-    )
-    result["accumulated_month"] = accumulated_month
-
-    if not is_admin and not is_video_leave:
-        if "phép năm" in norm_reason:
-            year_hist = user_hist_quota[user_hist_quota["Y"] == curr_y]
-            used_pn = (
-                float(
-                    pd.to_numeric(
-                        year_hist[
-                            year_hist["Lý do nghỉ"].astype(str)
-                            .str.lower()
-                            .str.contains("phép năm", na=False)
-                        ].get("Số ngày tính", 0),
-                        errors="coerce",
-                    ).fillna(0).sum()
-                )
-                if not year_hist.empty and "Lý do nghỉ" in year_hist.columns
-                else 0.0
-            )
-            if limit_pn > 0 and used_pn + total_phep_required > limit_pn:
-                result["errors"].append(
-                    f"Vượt quá số ngày Phép năm. Cần {total_phep_required:g} ngày, "
-                    f"quỹ còn {max(0.0, limit_pn - used_pn):g} ngày trong năm {curr_y}."
-                )
-                return result
-
-        elif "phát sinh" in norm_reason:
-            month_user = user_hist_quota[
-                (user_hist_quota["M"] == curr_m)
-                & (user_hist_quota["Y"] == curr_y)
-            ]
-            used_ps = (
-                int(
-                    month_user["Lý do nghỉ"].astype(str)
-                    .str.lower()
-                    .str.contains("phát sinh", na=False)
-                    .sum()
-                )
-                if not month_user.empty and "Lý do nghỉ" in month_user.columns
-                else 0
-            )
-            if limit_ps > 0 and used_ps >= limit_ps:
-                result["errors"].append(
-                    f"Vượt giới hạn Phát sinh. Nhân viên này chỉ được đăng ký "
-                    f"{limit_ps:g} lần phát sinh/tháng."
-                )
-                return result
-
-        elif (
-            not is_nghi_ly_do_khac
-            and "không phép" not in norm_reason
-            and val_songay > 0
-        ):
-            month_user = user_hist_quota[
-                (user_hist_quota["M"] == curr_m)
-                & (user_hist_quota["Y"] == curr_y)
-            ]
-            if not month_user.empty and "Lý do nghỉ" in month_user.columns:
-                cp_mask = ~month_user["Lý do nghỉ"].astype(str).str.lower().str.contains(
-                    "không phép|phát sinh|lý do khác",
-                    na=False,
-                    regex=True,
-                )
-                used_cp = float(
-                    pd.to_numeric(
-                        month_user.loc[cp_mask, "Số ngày tính"],
-                        errors="coerce",
-                    ).fillna(0).sum()
-                )
-            else:
-                used_cp = 0.0
-
-            if limit_cp > 0 and used_cp + total_phep_required > limit_cp:
-                result["errors"].append(
-                    f"Vượt số ngày Có phép trong tháng. Nhân viên này chỉ được nghỉ "
-                    f"tối đa {limit_cp:g} ngày/tháng."
-                )
-                return result
-
-    # Đối chiếu từng ngày bằng CÙNG một snapshot live vừa tải.
-    special_day_exempt = is_special_day_rule_exempt(role, reason)
-    for target_date in selected_dates:
-        # Save function luôn chống trùng đúng lý do, nên báo trước cho cả Admin.
-        if _leave_exists_in_sources(source_df, target_date, employee, reason):
-            result["errors"].append(
-                f"{employee} đã có đúng lý do '{reason}' ngày "
-                f"{target_date.strftime('%d/%m/%Y')}."
-            )
-            return result
-
-        if not is_admin:
-            daily_ok, daily_msg = _validate_daily_employee_registration_rule(
-                source_df,
-                target_date,
-                employee,
-                reason,
-                val_songay,
-            )
-            if not daily_ok:
-                result["errors"].append(
-                    f"{employee} · {target_date.strftime('%d/%m/%Y')}: {daily_msg}"
-                )
-                return result
-
-            if (
-                not special_day_exempt
-                and not is_nghi_ly_do_khac
-                and "phép năm" not in norm_reason
-                and not is_loi_vi_pham
-            ):
-                quota_ok, quota_msg = _validate_daily_group_quota(
-                    source_df,
-                    target_date,
-                    reason,
-                    is_zero_day_co_phep=is_zero_day_co_phep,
-                )
-                if not quota_ok:
-                    result["errors"].append(quota_msg)
-                    return result
-
-        progressive_reason = get_progressive_penalty_reason(reason)
-        if progressive_reason:
-            ordinal, extra_penalty = _progressive_ordinal_and_bonus(
-                source_df, target_date, reason
-            )
-            preview_total = default_phat + float(extra_penalty)
-            result["warnings"].append(
-                f"{target_date.strftime('%d/%m/%Y')}: Người Thứ {ordinal} "
-                f"{progressive_reason.lower()} · tổng phạt dự kiến {preview_total:,.0f} VNĐ."
-            )
-
-    result["ok"] = True
-    return result
-
-
-def _leave_registration_pending_matches_current(
-    pending, start_date, end_date, employee, reason
-):
-    """Không cho nút Xác nhận cũ tồn tại sau khi user đổi Ngày/NV/Lý do."""
-    if not isinstance(pending, dict):
-        return False
-    return (
-        pending.get("start_date") == start_date
-        and pending.get("end_date") == end_date
-        and normalize_login_name(pending.get("employee", ""))
-            == normalize_login_name(employee)
-        and normalize_leave_reason(pending.get("reason", ""))
-            == normalize_leave_reason(reason)
-    )
 
 
 def validate_employee_leave_change_permission(
@@ -25883,19 +25551,11 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 "và Chi tiết danh sách bên dưới."
             )
         else:
-            # V92.6.32:
-            # Admin chỉ chọn 1 ngày. Lễ tân/Quản lý có thể chọn khoảng thời gian.
-            # Leader/Nhân viên giữ phạm vi hiện tại.
-            # KHÔNG có truy vấn dữ liệu đối chiếu LIVE tại bước chọn ngày.
+            # V92.6.25: ô chọn KHOẢNG THỜI GIAN luôn hiện cho mọi role.
+            # Leader/Nhân viên vẫn bị khóa đúng tài khoản của mình và vẫn chịu G:N,
+            # quota, cuối tuần và giới hạn phạm vi tháng.
             _registration_today = get_vn_today()
-            if is_admin_leave_registration:
-                list_nv_input = ["-- Chọn nhân viên --"] + all_users
-                chosen_dates = st.date_input(
-                    "📅 Chọn ngày nghỉ:",
-                    value=_registration_today,
-                    key="sb_chosen_date",
-                )
-            elif is_admin_letan:
+            if is_admin_letan:
                 list_nv_input = ["-- Chọn nhân viên --"] + all_users
                 chosen_dates = st.date_input(
                     "📅 Chọn khoảng thời gian nghỉ:",
@@ -26025,20 +25685,89 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             is_nghi_ly_do_khac = "nghỉ lý do khác" in chosen_loai.lower() if chosen_loai else False
             if is_loi_vi_pham: default_songay = 0.0
 
-            # V92.6.32 - FAST INPUT MODE:
-            # Từ đây đến khi bấm "Ghi Lịch Nghỉ" KHÔNG đọc dữ liệu LIVE để đối chiếu.
-            # Chỉ dùng dữ liệu LoaiNghi đã nằm trong memory để dựng form.
+            # V91.5: mọi kiểm quota/trùng trong form dùng dữ liệu LIVE Google Sheet.
+            _registration_live_df = _load_live_leave_registration_for_validation(
+                [df_backup]
+            )
+
+            # --- CẢNH BÁO SỚM: RULE ENGINE + QUOTA ---
+            early_warning = ""
+            norm_loai_temp = chosen_loai.strip().lower() if chosen_loai else ""
+            is_video_leave_temp = is_video_leave_reason(chosen_loai)
+            is_special_day_exempt_temp = is_special_day_rule_exempt(current_role, chosen_loai)
+            if chosen_loai and chosen_loai != "-- Chọn lý do nghỉ --":
+                num_days_temp = (end_date - start_date).days + 1
+                _early_all_sources = _registration_live_df
+                for _i in range(num_days_temp):
+                    chk_d = start_date + timedelta(days=_i)
+
+                    if not is_admin_leave_registration:
+                        _notice_ok, _notice_msg = validate_leave_registration_notice(
+                            chosen_loai,
+                            chk_d,
+                            role=current_role,
+                            now_vn=datetime.now(VN_TZ),
+                        )
+                        if not _notice_ok:
+                            early_warning = f"❌ {_notice_msg}"
+                            break
+
+                    # Các ngoại lệ quota cũ vẫn giữ, nhưng KHÔNG còn miễn rule G:N.
+                    if (
+                        not is_special_day_exempt_temp
+                        and not is_nghi_ly_do_khac
+                        and "phép năm" not in norm_loai_temp
+                        and not is_loi_vi_pham
+                    ):
+                        _quota_ok, _quota_msg = _validate_daily_group_quota(
+                            _early_all_sources,
+                            chk_d,
+                            chosen_loai,
+                            is_zero_day_co_phep=is_zero_day_co_phep,
+                        )
+                        if not _quota_ok:
+                            early_warning = f"❌ {_quota_msg}"
+                            break
+
+            if early_warning:
+                st.error(early_warning)
+
+            # Không hiện cảnh báo hạn mức người nghỉ cho Có phép + Số ngày tính = 0.
+            # Trường hợp này vẫn được phép ghi dù ngày đã đủ 5/3 người.
+            if is_zero_day_co_phep:
+                st.caption("ℹ️ Lý do này là Có phép và Số ngày tính = 0 nên không tính vào giới hạn người nghỉ trong ngày.")
+
+            # Kiểm tra lịch đã có từ CẢ HAI nguồn để chặn đăng ký trùng ngay trên giao diện.
+            registration_all_df = _registration_live_df
+            existing_today = []
+            if not registration_all_df.empty and chosen_nv != "-- Chọn nhân viên --":
+                ex_df = registration_all_df[
+                    (registration_all_df['Tên nhân viên'].astype(str).apply(normalize_login_name) == normalize_login_name(chosen_nv)) &
+                    (registration_all_df['Ngày'] == start_date)
+                ]
+                existing_today = ex_df['Lý do nghỉ'].astype(str).str.strip().tolist()
+
             dyn_key_suffix = f"{chosen_loai}_{start_date}_{chosen_nv}"
 
-            if is_zero_day_co_phep:
-                st.caption(
-                    "ℹ️ Lý do này là Có phép và Số ngày tính = 0 nên không tính vào "
-                    "giới hạn người nghỉ trong ngày."
+            # Hiển thị trước thứ tự và mức cộng phạt cho 3 nhóm vi phạm lũy tiến.
+            progressive_preview_reason = get_progressive_penalty_reason(chosen_loai)
+            if progressive_preview_reason:
+                preview_ordinal, preview_extra = _progressive_ordinal_and_bonus(
+                    registration_all_df, start_date, chosen_loai
+                )
+                preview_total = float(default_phat) + float(preview_extra)
+                st.warning(
+                    f"⚠️ {progressive_preview_reason} ngày {start_date.strftime('%d/%m/%Y')}: Người Thứ {preview_ordinal}. "
+                    f"Phạt theo quy định {float(default_phat):,.0f} VNĐ"
+                    + (f" + lũy tiến {preview_extra:,.0f} VNĐ" if preview_extra > 0 else "")
+                    + f" = {preview_total:,.0f} VNĐ."
                 )
 
             with st.form("form_nhap_lich_inner"):
+                # V91.5: Chi tiết vi phạm lấy tự động từ cột D của sheet LoaiNghi theo Lý do nghỉ.
+                # Khi Google Sheet có nội dung, khóa ô này để người dùng không sửa sai cấu hình.
                 txt_chitiet_label = (
-                    "Chi tiết vi phạm / Ghi chú (tự động từ qui định):"
+                    "Chi tiết vi phạm / Ghi chú (tự động từ Google Sheet):"
                     if configured_violation_detail
                     else (
                         "Chi tiết vi phạm / Ghi chú (🔴 **Bắt buộc**):"
@@ -26053,7 +25782,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     key=_detail_key,
                     disabled=bool(configured_violation_detail),
                     help=(
-                        "Nội dung lấy từ qui định LoaiNghi đang chạy và không cho sửa."
+                        "Nội dung lấy từ sheet LoaiNghi theo Lý do nghỉ và không cho sửa."
                         if configured_violation_detail else None
                     ),
                 ).strip()
@@ -26078,24 +25807,28 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                             step=0.5,
                             key=f"num_songay_{dyn_key_suffix}",
                             disabled=(is_loi_vi_pham or is_zero_day_co_phep),
-                            help=(
-                                "Mỗi dòng chỉ được 0, 0.5 hoặc 1 ngày. Quy tắc trùng/quota "
-                                "chỉ được kiểm sau khi bấm Ghi Lịch Nghỉ."
-                                if not is_zero_day_co_phep
-                                else "Theo cấu hình LoaiNghi: Có phép + Số ngày tính = 0."
-                            ),
-                        )
+                        help=(
+                            "Mỗi dòng chỉ được 0, 0.5 hoặc 1 ngày. Trong cùng ngày không được có thêm "
+                            "một dòng Số ngày tính > 0 khác."
+                            if not is_zero_day_co_phep
+                            else "Theo cấu hình LoaiNghi: Có phép + Số ngày tính = 0 nên không chiếm suất nghỉ trong ngày."
+                        ),
+                    )
 
                 with col_p2:
+                    # 1) Phạt lấy/tính từ Google Sheet -> khóa với mọi user, Admin được sửa.
+                    # 2) Nếu Chi tiết = "Cần nhập số tiền" -> mở ô phạt, bắt buộc nhập;
+                    #    giá trị < 50 sẽ tự nâng thành 50 khi lưu, không hiện cảnh báo.
                     if requires_manual_penalty:
+                        txt_phat_label = "Mức phạt vi phạm (VNĐ) (🔴 **Bắt buộc nhập**):"
                         val_phat = st.number_input(
-                            "Mức phạt vi phạm (VNĐ) (🔴 **Bắt buộc nhập**):",
+                            txt_phat_label,
                             value=None,
                             step=50.0,
                             key=f"num_phat_{dyn_key_suffix}",
                             disabled=False,
                             placeholder="Nhập số tiền",
-                            help="Nếu nhập dưới 50, hệ thống tự lưu tối thiểu là 50.",
+                            help="Bắt buộc nhập. Nếu nhập dưới 50, hệ thống tự lưu tối thiểu là 50.",
                         )
                     else:
                         txt_phat_label = (
@@ -26113,273 +25846,310 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                                 and not is_admin_leave_registration
                             ),
                             help=(
-                                "Tiền phạt lấy từ qui định đang chạy. Chỉ Admin được sửa."
+                                "Tiền phạt lấy/tính từ cấu hình Google Sheet. Chỉ Admin được sửa."
                                 if system_calculated_penalty else None
                             ),
                         )
 
+                # V88.4: không hiện cảnh báo khi nhân viên đã có một lịch KHÁC loại trong cùng ngày.
+                # Chỉ tiếp tục chặn đúng Lý do nghỉ bị trùng đối với non-admin.
+                confirm_multiple = True
+                if existing_today and not is_admin_leave_registration:
+                    normalized_existing = {normalize_leave_reason(x) for x in existing_today}
+                    if normalize_leave_reason(chosen_loai) in normalized_existing:
+                        st.error(
+                            f"❌ Nhân viên này đã có Lý do nghỉ: "
+                            f"'{clean_leave_reason_display(chosen_loai)}' vào ngày này rồi. "
+                            "KHÔNG THỂ trùng cùng 1 loại nghỉ!"
+                        )
+                        confirm_multiple = False
+
                 submit_lich = st.form_submit_button(
-                    "💾 Ghi Lịch Nghỉ",
+                    "💾 Xác Nhận Ghi Lịch Nghỉ",
                     disabled=(requires_manual_penalty and val_phat is None),
                     help=(
-                        "Sau khi bấm, hệ thống mới tải dữ liệu mới nhất để đối chiếu. "
-                        "Chưa ghi dữ liệu cho đến khi bạn bấm Xác nhận."
+                        "Cần nhập Mức phạt trước khi lưu."
+                        if requires_manual_penalty and val_phat is None
+                        else None
                     ),
-                    use_container_width=True,
                 )
 
-            # Nếu đổi Ngày / Nhân viên / Lý do sau một lượt kiểm tra thì bỏ xác nhận cũ.
-            _pending_key_v92632 = "_leave_registration_pending_v92632"
-            _pending_v92632 = st.session_state.get(_pending_key_v92632)
-            if _pending_v92632 and not _leave_registration_pending_matches_current(
-                _pending_v92632,
-                start_date,
-                end_date,
-                chosen_nv,
-                chosen_loai,
-            ):
-                st.session_state.pop(_pending_key_v92632, None)
-                _pending_v92632 = None
+                if submit_lich:
+                    today = get_vn_today()
+                    can_proceed = True
 
-            if submit_lich:
-                # Snapshot toàn bộ input để bước Xác nhận không phụ thuộc widget thay đổi sau đó.
-                _request_payload_v92632 = {
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "employee": chosen_nv,
-                    "reason": chosen_loai,
-                    "detail": input_chitiet,
-                    "days": float(val_songay or 0.0),
-                    "penalty": val_phat,
-                    "default_penalty": float(default_phat or 0.0),
-                    "requires_manual_penalty": bool(requires_manual_penalty),
-                    "system_calculated_penalty": bool(system_calculated_penalty),
-                    "is_zero_day_co_phep": bool(is_zero_day_co_phep),
-                    "is_loi_vi_pham": bool(is_loi_vi_pham),
-                    "is_nghi_ly_do_khac": bool(is_nghi_ly_do_khac),
-                    "role": current_role,
-                    "actor": str(st.session_state.get("current_user", "") or ""),
-                }
-
-                # Đây là lần ĐẦU TIÊN trong quy trình nhập form có tải dữ liệu đối chiếu LIVE.
-                with st.spinner("Đang tải dữ liệu mới nhất và đối chiếu qui định..."):
-                    _live_check_df_v92632 = _load_live_leave_registration_for_validation(
-                        [df_backup]
-                    )
-                    _check_v92632 = _validate_leave_registration_request_live(
-                        _request_payload_v92632,
-                        _live_check_df_v92632,
-                        df_credentials,
-                    )
-
-                if not _check_v92632.get("ok"):
-                    st.session_state.pop(_pending_key_v92632, None)
-                    st.error("❌ Không được phép ghi lịch nghỉ.")
-                    for _err_v92632 in _check_v92632.get("errors", []):
-                        st.error(f"• {_err_v92632}")
-                else:
-                    _request_payload_v92632["checked_accumulated_month"] = float(
-                        _check_v92632.get("accumulated_month", 0.0) or 0.0
-                    )
-                    _request_payload_v92632["check_warnings"] = list(
-                        _check_v92632.get("warnings", []) or []
-                    )
-                    st.session_state[_pending_key_v92632] = _request_payload_v92632
-                    _pending_v92632 = _request_payload_v92632
-
-            # BƯỚC 2: chỉ hiện sau khi dữ liệu đã được đối chiếu và được phép.
-            _pending_v92632 = st.session_state.get(_pending_key_v92632)
-            if _pending_v92632:
-                _p_start = _pending_v92632["start_date"]
-                _p_end = _pending_v92632["end_date"]
-                _p_days_count = (_p_end - _p_start).days + 1
-                _p_reason = clean_leave_reason_display(_pending_v92632["reason"])
-                _p_penalty = _pending_v92632.get("penalty")
-                _p_days = float(_pending_v92632.get("days", 0) or 0)
-
-                st.success("✅ Đối chiếu hoàn tất: lịch nghỉ hiện tại ĐƯỢC PHÉP ghi.")
-                st.markdown(
-                    f"**Nhân viên:** {_pending_v92632['employee']}  \n"
-                    f"**Ngày:** {_p_start.strftime('%d/%m/%Y')}"
-                    + (
-                        f" → {_p_end.strftime('%d/%m/%Y')}"
-                        if _p_end != _p_start else ""
-                    )
-                    + f"  \n**Lý do:** {_p_reason}"
-                    + f"  \n**Số ngày tính mỗi ngày:** {_p_days:g}"
-                    + (
-                        f"  \n**Chi tiết:** {_pending_v92632.get('detail','')}"
-                        if _pending_v92632.get("detail") else ""
-                    )
-                )
-                for _warn_v92632 in _pending_v92632.get("check_warnings", []):
-                    st.warning(f"⚠️ {_warn_v92632}")
-
-                _confirm_col_v92632, _cancel_col_v92632 = st.columns(2)
-                with _confirm_col_v92632:
-                    _final_confirm_v92632 = st.button(
-                        "✅ Xác nhận ghi",
-                        type="primary",
-                        use_container_width=True,
-                        key="confirm_leave_registration_v92632",
-                    )
-                with _cancel_col_v92632:
-                    _cancel_confirm_v92632 = st.button(
-                        "❌ Hủy",
-                        use_container_width=True,
-                        key="cancel_leave_registration_v92632",
-                    )
-
-                if _cancel_confirm_v92632:
-                    st.session_state.pop(_pending_key_v92632, None)
-                    st.info("Đã hủy yêu cầu ghi lịch nghỉ.")
-                    rerun_current_view()
-
-                if _final_confirm_v92632:
-                    # Kiểm tra lần cuối ngay trước khi ghi để tránh dữ liệu thay đổi giữa
-                    # bước Đối chiếu và bước Xác nhận. Việc này xảy ra SAU khi nhập liệu,
-                    # nên không gây lag trong quá trình chọn/nhập.
-                    with st.spinner("Đang kiểm tra lần cuối và ghi lịch nghỉ..."):
-                        _final_live_df_v92632 = _load_live_leave_registration_for_validation(
-                            [df_backup]
-                        )
-                        _final_check_v92632 = _validate_leave_registration_request_live(
-                            _pending_v92632,
-                            _final_live_df_v92632,
-                            df_credentials,
-                        )
-
-                    if not _final_check_v92632.get("ok"):
-                        st.session_state.pop(_pending_key_v92632, None)
-                        st.error(
-                            "❌ Dữ liệu đã thay đổi sau lần đối chiếu trước. "
-                            "Yêu cầu hiện không còn được phép."
-                        )
-                        for _err_v92632 in _final_check_v92632.get("errors", []):
-                            st.error(f"• {_err_v92632}")
-                    else:
-                        _save_start = _pending_v92632["start_date"]
-                        _save_end = _pending_v92632["end_date"]
-                        _save_employee = _pending_v92632["employee"]
-                        _save_reason = clean_leave_reason_display(
-                            _pending_v92632["reason"]
-                        )
-                        _save_detail = str(
-                            _pending_v92632.get("detail", "") or ""
-                        ).strip()
-                        _save_days = float(
-                            _pending_v92632.get("days", 0) or 0
-                        )
-                        _save_val_penalty = _pending_v92632.get("penalty")
-                        _save_default_penalty = float(
-                            _pending_v92632.get("default_penalty", 0) or 0
-                        )
-                        _save_requires_manual = bool(
-                            _pending_v92632.get("requires_manual_penalty", False)
-                        )
-                        _save_system_penalty = bool(
-                            _pending_v92632.get("system_calculated_penalty", False)
-                        )
-                        _save_is_video = is_video_leave_reason(_save_reason)
-                        _save_count = (_save_end - _save_start).days + 1
-                        _accumulated_month = float(
-                            _final_check_v92632.get("accumulated_month", 0.0) or 0.0
-                        )
-
-                        _all_saved_v92632 = True
-                        _save_notes_v92632 = []
-
-                        for _i_v92632 in range(_save_count):
-                            _curr_date_v92632 = _save_start + timedelta(days=_i_v92632)
-
-                            if not _save_is_video:
-                                _accumulated_month += _save_days
-
-                            if _save_requires_manual:
-                                _penalty_to_save_v92632 = max(
-                                    50.0, float(_save_val_penalty or 0.0)
-                                )
-                            elif (
-                                _save_system_penalty
-                                and str(
-                                    st.session_state.get("current_role", "") or ""
-                                ).strip().lower() != "admin"
-                            ):
-                                _penalty_to_save_v92632 = _save_default_penalty
-                            else:
-                                _penalty_to_save_v92632 = float(
-                                    _save_val_penalty or 0.0
-                                )
-
-                            _ok_save_v92632, _msg_save_v92632 = save_lich_nghi_to_backup_sheet(
-                                _curr_date_v92632.strftime("%d/%m/%Y"),
-                                _save_employee,
-                                _save_reason,
-                                _save_detail,
-                                _save_days,
-                                _accumulated_month,
-                                _penalty_to_save_v92632,
-                                st.session_state.current_user,
-                                df_main_source=_final_live_df_v92632,
+                    # V92.6.24: thời hạn đăng ký lấy từ LoaiNghi!I/J/K cho TỪNG ngày.
+                    if not is_admin_leave_registration:
+                        _notice_dates = [
+                            start_date + timedelta(days=_i)
+                            for _i in range((end_date - start_date).days + 1)
+                        ]
+                        for _notice_date in _notice_dates:
+                            _notice_ok, _notice_msg = validate_leave_registration_notice(
+                                chosen_loai,
+                                _notice_date,
+                                role=current_role,
+                                now_vn=datetime.now(VN_TZ),
                             )
-
-                            if not _ok_save_v92632:
-                                st.error(f"❌ LỖI GOOGLE SHEETS: {_msg_save_v92632}")
-                                _all_saved_v92632 = False
+                            if not _notice_ok:
+                                st.error(f"❌ {_notice_msg}")
+                                can_proceed = False
                                 break
-                            if _msg_save_v92632:
-                                _save_notes_v92632.append(_msg_save_v92632)
 
-                        if _all_saved_v92632:
-                            _flash_notes = [
-                                str(note)
-                                for note in _save_notes_v92632
-                                if note and "Người Thứ" in str(note)
-                            ]
-
-                            # Lễ tân đăng ký cho Nhân viên/Leader: email như logic cũ.
-                            _actor_role_v92632 = str(
-                                st.session_state.get("current_role", "") or ""
-                            ).strip().lower()
-                            _target_profile_v92632 = _credential_profile_by_username(
-                                _save_employee, df_credentials
+                    # Giữ phạm vi UI hiện tại của Nhân viên: tối đa hết tháng kế tiếp.
+                    if can_proceed and current_role in EMPLOYEE_LIKE_ROLES:
+                        _, emp_max_date = employee_registration_window(today)
+                        if end_date > emp_max_date:
+                            st.error(
+                                f"❌ Nhân viên chỉ được đăng ký đến hết "
+                                f"{emp_max_date.strftime('%d/%m/%Y')}."
                             )
-                            _target_role_v92632 = str(
-                                _target_profile_v92632.get("Phân quyền", "") or ""
-                            ).strip().lower()
+                            can_proceed = False
 
-                            if (
-                                _actor_role_v92632 == "letan"
-                                and _target_role_v92632 in {"nhanvien", "leader"}
-                            ):
-                                _mail_ok_v92632, _mail_msg_v92632 = (
-                                    send_reception_leave_registration_email(
-                                        st.session_state.current_user,
-                                        _save_employee,
-                                        _target_role_v92632,
-                                        _save_start,
-                                        _save_end,
-                                        _save_reason,
-                                        _save_detail,
-                                    )
-                                )
-                                _flash_notes.append(
-                                    ("📧 " if _mail_ok_v92632 else "⚠️ ")
-                                    + str(_mail_msg_v92632)
-                                )
+                    if can_proceed:
+                        if not confirm_multiple:
+                            st.error("❌ Vui lòng tick Xác nhận cảnh báo bên trên trước khi lưu.")
+                        elif chosen_nv == "-- Chọn nhân viên --" or not chosen_nv:
+                            st.error("❌ Vui lòng chọn nhân viên cần nhập lịch nghỉ!")
+                        elif chosen_loai == "-- Chọn lý do nghỉ --" or not chosen_loai:
+                            st.error("❌ Vui lòng chọn lý do nghỉ!")
+                        elif early_warning and not is_admin_leave_registration:
+                            st.error(f"❌ Không thể lưu: {early_warning}")
+                        else:
+                            norm_loai = normalize_leave_reason(chosen_loai)
+                            is_video_leave = is_video_leave_reason(chosen_loai)
+                            num_days_selected = (end_date - start_date).days + 1
 
-                            st.session_state.pop(_pending_key_v92632, None)
-                            st.session_state["_leave_registration_flash_v884"] = (
-                                f"✅ Đã ghi nhận lịch nghỉ thành công cho {_save_count} ngày!"
-                            )
-                            st.session_state[
-                                "_leave_registration_flash_notes_v884"
-                            ] = _flash_notes
-                            st.session_state[
-                                "_leave_registration_reset_pending_v884"
-                            ] = True
-                            _clear_leave_data_caches()
-                            rerun_current_view()
+                            if is_loi_vi_pham:
+                                val_songay = 0.0
+                                if not input_chitiet:
+                                    st.error("❌ Chưa có Chi tiết vi phạm cho 'Lỗi vi phạm khác'.")
+                                    can_proceed = False
+                                if requires_manual_penalty and val_phat is None:
+                                    can_proceed = False
+
+                            if is_nghi_ly_do_khac and not input_chitiet:
+                                st.error("❌ Bắt buộc nhập Chi tiết vi phạm / Ghi chú đối với 'Nghỉ lý do khác'.")
+                                can_proceed = False
+
+                            # V92.6.29 - GIỚI HẠN CUỐI TUẦN:
+                            # Mọi Lý do nghỉ có chữ KHÔNG phép: không giới hạn số lần.
+                            # Các lý do khác vẫn giữ giới hạn tối đa 2 ngày cuối tuần/tháng.
+                            if can_proceed:
+                                _weekend_all_sources = _load_live_leave_registration_for_validation(
+                                    [df_backup]
+                                )
+                                _weekend_ok, _weekend_msg = _validate_monthly_weekend_registration_limit(
+                                    _weekend_all_sources,
+                                    chosen_nv,
+                                    start_date,
+                                    end_date,
+                                    reason=chosen_loai,
+                                    max_weekend_dates=2,
+                                )
+                                if not _weekend_ok:
+                                    st.error(f"❌ {_weekend_msg}")
+                                    can_proceed = False
+
+                            # KIỂM TRA GIỚI HẠN NHÂN SỰ CÁ NHÂN
+                            # Admin vẫn bỏ qua các hạn mức phép/phát sinh khác,
+                            # nhưng quy tắc tối đa 2 lần cuối tuần/tháng là quy tắc theo NHÂN VIÊN.
+                            if can_proceed:
+                                nv_info = df_credentials[df_credentials['Tên nhân viên'].str.lower() == chosen_nv.lower()]
+                                limit_ps = pd.to_numeric(nv_info.iloc[0].get('Phát sinh tháng', 0), errors='coerce') if not nv_info.empty else 0
+                                limit_cp = pd.to_numeric(nv_info.iloc[0].get('Có phép tháng', 0), errors='coerce') if not nv_info.empty else 0
+                                limit_pn = pd.to_numeric(nv_info.iloc[0].get('Phép năm', 0), errors='coerce') if not nv_info.empty else 0
+
+                                if pd.isna(limit_ps): limit_ps = 0
+                                if pd.isna(limit_cp): limit_cp = 0
+                                if pd.isna(limit_pn): limit_pn = 0
+
+                                _personal_live = _load_live_leave_registration_for_validation(
+                                    [df_backup]
+                                )
+                                user_hist = (
+                                    _personal_live[
+                                        _personal_live['Tên nhân viên'].astype(str)
+                                        .apply(normalize_login_name)
+                                        .eq(normalize_login_name(chosen_nv))
+                                    ].copy()
+                                    if isinstance(_personal_live, pd.DataFrame) and not _personal_live.empty
+                                    else pd.DataFrame(columns=['Ngày', 'Lý do nghỉ', 'Số ngày tính'])
+                                )
+                                # Nghỉ phép quay video không tiêu hao bất kỳ hạn mức nghỉ nào.
+                                user_hist_quota = _leave_rows_counting_toward_quota(user_hist)
+                                user_hist['Ngày_DT'] = pd.to_datetime(user_hist['Ngày'], errors='coerce')
+                                user_hist_quota['Ngày_DT'] = pd.to_datetime(user_hist_quota['Ngày'], errors='coerce')
+                                user_hist['M'] = user_hist['Ngày_DT'].dt.month
+                                user_hist['Y'] = user_hist['Ngày_DT'].dt.year
+                                user_hist_quota['M'] = user_hist_quota['Ngày_DT'].dt.month
+                                user_hist_quota['Y'] = user_hist_quota['Ngày_DT'].dt.year
+
+                                curr_m = start_date.month
+                                curr_y = start_date.year
+
+                                total_phep_required = val_songay * num_days_selected
+                                accumulated_month = user_hist_quota[(user_hist_quota['M'] == curr_m) & (user_hist_quota['Y'] == curr_y)]['Số ngày tính'].sum()
+
+                                if is_admin_leave_registration or is_video_leave:
+                                    # Admin luôn miễn mọi giới hạn; Nghỉ quay video cũng miễn hạn mức cá nhân.
+                                    pass
+                                elif "phép năm" in norm_loai:
+                                    used_pn = user_hist_quota[(user_hist_quota['Y'] == curr_y) & (user_hist_quota['Lý do nghỉ'].str.lower().str.contains("phép năm", na=False))]['Số ngày tính'].sum()
+                                    if limit_pn > 0 and (used_pn + total_phep_required > limit_pn):
+                                        st.error(f"❌ Vượt quá số ngày Phép năm! Bạn cần {total_phep_required} ngày nhưng quỹ phép chỉ còn {limit_pn - used_pn} ngày trong năm {curr_y}.")
+                                        can_proceed = False
+
+                                elif "phát sinh" in norm_loai:
+                                    used_ps = len(user_hist_quota[(user_hist['M'] == curr_m) & (user_hist['Y'] == curr_y) & (user_hist['Lý do nghỉ'].str.lower().str.contains("phát sinh", na=False))])
+                                    if limit_ps > 0 and (used_ps >= limit_ps):
+                                        st.error(f"❌ Vượt giới hạn Phát sinh! Nhân viên này chỉ được đăng ký {limit_ps} lần phát sinh/tháng.")
+                                        can_proceed = False
+
+                                elif not is_nghi_ly_do_khac and "không phép" not in norm_loai and val_songay > 0:
+                                    used_cp = user_hist_quota[(user_hist['M'] == curr_m) & (user_hist['Y'] == curr_y) & (~user_hist['Lý do nghỉ'].str.lower().str.contains("không phép|phát sinh|lý do khác", na=False, regex=True))]['Số ngày tính'].sum()
+                                    if limit_cp > 0 and (used_cp + total_phep_required > limit_cp):
+                                        st.error(f"❌ Vượt số ngày Có phép trong tháng! Nhân viên này chỉ được nghỉ tối đa {limit_cp} ngày/tháng.")
+                                        can_proceed = False
+
+                                if can_proceed:
+                                    all_saved = True
+                                    save_success_notes = []
+                                    for i in range(num_days_selected):
+                                        curr_date_iter = start_date + timedelta(days=i)
+                                        is_weekend_iter = curr_date_iter.weekday() >= 5
+
+                                        if val_songay is None:
+                                            val_songay = 0.0
+                                        if not is_video_leave:
+                                            accumulated_month += val_songay
+
+                                        # V86.11: ngoài chống trùng đúng Lý do, còn áp quy tắc:
+                                        # - chỉ 1 dòng có Số ngày tính > 0 mỗi nhân viên/ngày;
+                                        # - không 0.5 + 0.5;
+                                        # - không 2 lần CÓ phép / KHÔNG phép / PHÁT SINH.
+                                        latest_registration_df = _load_live_leave_registration_for_validation(
+                                            [df_backup]
+                                        )
+
+                                        if not is_admin_leave_registration:
+                                            _notice_ok, _notice_msg = validate_leave_registration_notice(
+                                                chosen_loai,
+                                                curr_date_iter,
+                                                role=current_role,
+                                                now_vn=datetime.now(VN_TZ),
+                                            )
+                                            if not _notice_ok:
+                                                st.error(f"❌ {_notice_msg}")
+                                                all_saved = False
+                                                break
+
+                                            daily_rule_ok, daily_rule_msg = _validate_daily_employee_registration_rule(
+                                                latest_registration_df,
+                                                curr_date_iter,
+                                                chosen_nv,
+                                                chosen_loai,
+                                                val_songay,
+                                            )
+                                            if not daily_rule_ok:
+                                                st.error(
+                                                    f"❌ {chosen_nv} · {curr_date_iter.strftime('%d/%m/%Y')}: "
+                                                    f"{daily_rule_msg}"
+                                                )
+                                                all_saved = False
+                                                break
+
+                                            if _leave_exists_in_sources(latest_registration_df, curr_date_iter, chosen_nv, chosen_loai):
+                                                st.error(
+                                                    f"❌ {chosen_nv} đã có đúng lý do '{clean_leave_reason_display(chosen_loai)}' ngày "
+                                                    f"{curr_date_iter.strftime('%d/%m/%Y')}. Hãy chọn lý do khác nếu cần ghi thêm vi phạm."
+                                                )
+                                                all_saved = False
+                                                break
+
+                                        special_day_exempt_save = is_special_day_rule_exempt(current_role, chosen_loai)
+                                        if (not is_admin_leave_registration
+                                            and not special_day_exempt_save and not is_nghi_ly_do_khac
+                                            and "phép năm" not in norm_loai and not is_loi_vi_pham):
+
+                                            # Rule G:N đã được kiểm ngay đầu vòng lặp cho mọi Lý do nghỉ.
+                                            latest_quota_df = latest_registration_df
+                                            quota_ok, quota_msg = _validate_daily_group_quota(
+                                                latest_quota_df,
+                                                curr_date_iter,
+                                                chosen_loai,
+                                                is_zero_day_co_phep=is_zero_day_co_phep,
+                                            )
+                                            if not quota_ok:
+                                                st.error(f"❌ {quota_msg}")
+                                                all_saved = False
+                                                break
+
+                                        # GỌI HÀM LƯU LÊN GOOGLE SHEETS
+                                        if requires_manual_penalty:
+                                            penalty_to_save = max(50.0, float(val_phat or 0.0))
+                                        elif system_calculated_penalty and not is_admin_leave_registration:
+                                            penalty_to_save = float(default_phat)
+                                        else:
+                                            penalty_to_save = float(val_phat or 0.0)
+
+                                        success_bk, msg_bk = save_lich_nghi_to_backup_sheet(
+                                            curr_date_iter.strftime('%d/%m/%Y'), chosen_nv, clean_leave_reason_display(chosen_loai),
+                                            input_chitiet, val_songay, accumulated_month, penalty_to_save, st.session_state.current_user,
+                                            df_main_source=latest_registration_df
+                                        )
+
+                                        if not success_bk:
+                                            st.error(f"❌ LỖI GOOGLE SHEETS: {msg_bk}")
+                                            all_saved = False
+                                            break
+                                        if msg_bk:
+                                            save_success_notes.append(msg_bk)
+
+                                    # CHỈ IN THÀNH CÔNG NẾU API THỰC SỰ TRẢ VỀ SUCCESS
+                                    if all_saved:
+                                        _flash_notes = [
+                                            str(note) for note in save_success_notes
+                                            if note and "Người Thứ" in str(note)
+                                        ]
+
+                                        # V92.6.3 - Lễ tân đăng ký cho Nhân viên/Leader:
+                                        # gửi 1 email tổng hợp cho cả lượt đăng ký.
+                                        _actor_role_v9263 = str(
+                                            st.session_state.get("current_role", "") or ""
+                                        ).strip().lower()
+                                        _target_profile_v9263 = _credential_profile_by_username(
+                                            chosen_nv, df_credentials
+                                        )
+                                        _target_role_v9263 = str(
+                                            _target_profile_v9263.get("Phân quyền", "") or ""
+                                        ).strip().lower()
+
+                                        if (
+                                            _actor_role_v9263 == "letan"
+                                            and _target_role_v9263 in {"nhanvien", "leader"}
+                                        ):
+                                            _mail_ok_v9263, _mail_msg_v9263 = send_reception_leave_registration_email(
+                                                st.session_state.current_user,
+                                                chosen_nv,
+                                                _target_role_v9263,
+                                                start_date,
+                                                end_date,
+                                                chosen_loai,
+                                                input_chitiet,
+                                            )
+                                            _flash_notes.append(
+                                                ("📧 " if _mail_ok_v9263 else "⚠️ ")
+                                                + str(_mail_msg_v9263)
+                                            )
+
+                                        st.session_state["_leave_registration_flash_v884"] = (
+                                            f"✅ Đã ghi nhận lịch nghỉ thành công cho {num_days_selected} ngày!"
+                                        )
+                                        st.session_state["_leave_registration_flash_notes_v884"] = _flash_notes
+                                        st.session_state["_leave_registration_reset_pending_v884"] = True
+                                        _clear_leave_data_caches()
+                                        rerun_current_view()
 
     # V86.20: bỏ divider ở đây để tiết kiệm chiều cao hiển thị trên điện thoại.
     # Bộ lọc được đặt sát ngay dưới khối Đăng ký lịch nghỉ.

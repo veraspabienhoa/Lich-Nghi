@@ -1,4 +1,4 @@
-# V92.6.32 - Đăng ký nghỉ 2 bước, không đối chiếu LIVE khi nhập liệu (2026-08-21)
+# V92.6.34 - Toàn bộ thông báo/Xác nhận Nhập lịch nghỉ bằng popup (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1306,6 +1306,26 @@ def remove_vietnamese_accents(value):
 def normalize_login_name(value):
     """Tên đăng nhập: không phân biệt dấu, HOA/thường; không ép kiểu số."""
     return " ".join(remove_vietnamese_accents(str(value)).strip().split()).casefold()
+
+
+def filter_options_accent_insensitive(options, query, cleaner=None):
+    """
+    V92.6.33: lọc danh sách không phân biệt dấu/HOA-thường.
+    Ví dụ gõ "anh thu" vẫn tìm được "Anh Thư";
+    gõ "nghi khong phep" vẫn tìm được "Nghỉ KHÔNG phép".
+    Chỉ lọc dữ liệu đang có trong bộ nhớ, không gọi Google Sheet/PostgreSQL.
+    """
+    values = list(options or [])
+    needle = normalize_login_name(query)
+    if not needle:
+        return values
+
+    result = []
+    for value in values:
+        display = cleaner(value) if callable(cleaner) else str(value or "")
+        if needle in normalize_login_name(display):
+            result.append(value)
+    return result
 
 def clean_employee_match_name(value):
     """
@@ -21004,6 +21024,134 @@ components.html(f"""
 """, height=0, width=0)
 
 # Hồ sơ cá nhân là một trang riêng và KHÔNG hiển thị cho Admin.
+LEAVE_REG_POPUP_KEY_V92634 = "_leave_registration_popup_v92634"
+LEAVE_REG_POPUP_ACTION_KEY_V92634 = "_leave_registration_popup_action_v92634"
+
+
+def _set_leave_registration_popup_v92634(
+    kind,
+    message="",
+    *,
+    title="",
+    errors=None,
+    warnings=None,
+    notes=None,
+    force=True,
+):
+    """Lưu nội dung popup của riêng quy trình Đăng ký lịch nghỉ."""
+    if not force and st.session_state.get(LEAVE_REG_POPUP_KEY_V92634):
+        return
+    st.session_state[LEAVE_REG_POPUP_KEY_V92634] = {
+        "kind": str(kind or "info"),
+        "title": str(title or ""),
+        "message": str(message or ""),
+        "errors": [str(x) for x in (errors or []) if str(x).strip()],
+        "warnings": [str(x) for x in (warnings or []) if str(x).strip()],
+        "notes": [str(x) for x in (notes or []) if str(x).strip()],
+    }
+
+
+def _clear_leave_registration_confirm_popup_v92634():
+    popup = st.session_state.get(LEAVE_REG_POPUP_KEY_V92634)
+    if isinstance(popup, dict) and popup.get("kind") == "confirm":
+        st.session_state.pop(LEAVE_REG_POPUP_KEY_V92634, None)
+
+
+@st.dialog("📅 Lịch nghỉ")
+def show_leave_registration_popup_v92634():
+    """
+    V92.6.34: mọi thông báo của quy trình NHẬP lịch nghỉ hiện trong popup.
+    Popup xác nhận chứa nút Lưu/Hủy; thao tác thực tế được xử lý ở page sau rerun.
+    """
+    popup = st.session_state.get(LEAVE_REG_POPUP_KEY_V92634)
+    if not isinstance(popup, dict):
+        return
+
+    kind = str(popup.get("kind", "info") or "info").strip().lower()
+    title = str(popup.get("title", "") or "").strip()
+    message = str(popup.get("message", "") or "").strip()
+    errors = popup.get("errors", []) if isinstance(popup.get("errors", []), list) else []
+    warnings = popup.get("warnings", []) if isinstance(popup.get("warnings", []), list) else []
+    notes = popup.get("notes", []) if isinstance(popup.get("notes", []), list) else []
+
+    if title:
+        st.subheader(title)
+
+    if kind == "confirm":
+        pending = st.session_state.get("_leave_registration_pending_v92632")
+        if not isinstance(pending, dict):
+            st.warning("Yêu cầu xác nhận không còn hiệu lực. Vui lòng bấm Ghi Lịch Nghỉ lại.")
+            if st.button("Đóng", use_container_width=True, key="leave_popup_close_invalid_v92634"):
+                st.session_state.pop(LEAVE_REG_POPUP_KEY_V92634, None)
+                rerun_current_view()
+            return
+
+        p_start = pending.get("start_date")
+        p_end = pending.get("end_date")
+        p_reason = clean_leave_reason_display(pending.get("reason", ""))
+        p_days = float(pending.get("days", 0) or 0)
+        p_penalty = pending.get("penalty")
+        p_detail = str(pending.get("detail", "") or "").strip()
+
+        st.success(message or "✅ Đối chiếu hoàn tất: lịch nghỉ hiện tại ĐƯỢC PHÉP ghi.")
+        if isinstance(p_start, date) and isinstance(p_end, date):
+            date_text = p_start.strftime("%d/%m/%Y")
+            if p_end != p_start:
+                date_text += f" → {p_end.strftime('%d/%m/%Y')}"
+        else:
+            date_text = ""
+
+        st.markdown(
+            f"**Nhân viên:** {pending.get('employee','')}  \n"
+            f"**Ngày:** {date_text}  \n"
+            f"**Lý do:** {p_reason}  \n"
+            f"**Số ngày tính mỗi ngày:** {p_days:g}"
+            + (f"  \n**Mức phạt:** {float(p_penalty):,.0f} VNĐ" if p_penalty is not None else "")
+            + (f"  \n**Chi tiết:** {p_detail}" if p_detail else "")
+        )
+        for item in warnings:
+            st.warning(f"⚠️ {item}")
+
+        c_save, c_cancel = st.columns(2)
+        with c_save:
+            if st.button(
+                "💾 Lưu",
+                type="primary",
+                use_container_width=True,
+                key="leave_popup_save_v92634",
+            ):
+                st.session_state[LEAVE_REG_POPUP_ACTION_KEY_V92634] = "save"
+                rerun_current_view()
+        with c_cancel:
+            if st.button(
+                "❌ Hủy",
+                use_container_width=True,
+                key="leave_popup_cancel_v92634",
+            ):
+                st.session_state[LEAVE_REG_POPUP_ACTION_KEY_V92634] = "cancel"
+                rerun_current_view()
+        return
+
+    renderer = {
+        "error": st.error,
+        "warning": st.warning,
+        "success": st.success,
+        "info": st.info,
+    }.get(kind, st.info)
+    if message:
+        renderer(message)
+    for item in errors:
+        st.error(f"• {item}")
+    for item in warnings:
+        st.warning(f"⚠️ {item}")
+    for item in notes:
+        st.info(item)
+
+    if st.button("Đóng", use_container_width=True, key="leave_popup_close_v92634"):
+        st.session_state.pop(LEAVE_REG_POPUP_KEY_V92634, None)
+        rerun_current_view()
+
+
 @st.dialog("📋 Danh sách nghỉ trong ngày")
 def show_daily_leave_popup(day_label, category_label, rows_df):
     st.markdown(f"**Ngày:** {day_label}")
@@ -25842,7 +25990,13 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
     _leave_reset_pending = bool(st.session_state.pop("_leave_registration_reset_pending_v884", False))
     if _leave_reset_pending:
         for _reset_key in [
-            "sb_chosen_date", "sb_chosen_nv", "sb_loai_nghi_live",
+            "sb_chosen_date",
+            "sb_chosen_nv",
+            "sb_loai_nghi_live",
+            "leave_employee_search_v92633",
+            "leave_reason_search_v92633",
+            "_leave_registration_pending_v92632",
+            LEAVE_REG_POPUP_ACTION_KEY_V92634,
             "leave_reg_detail_input_v884",
         ]:
             st.session_state.pop(_reset_key, None)
@@ -25863,10 +26017,16 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
         _leave_flash = st.session_state.pop("_leave_registration_flash_v884", "")
         _leave_flash_notes = st.session_state.pop("_leave_registration_flash_notes_v884", [])
         if _leave_flash:
-            st.success(_leave_flash)
-            for _note in (_leave_flash_notes if isinstance(_leave_flash_notes, list) else []):
-                if _note:
-                    st.info(str(_note))
+            _set_leave_registration_popup_v92634(
+                "success",
+                _leave_flash,
+                title="Đã lưu lịch nghỉ",
+                notes=(
+                    _leave_flash_notes
+                    if isinstance(_leave_flash_notes, list)
+                    else []
+                ),
+            )
         if not is_admin_leave_registration:
             st.subheader("➕ Đăng ký lịch nghỉ")
         all_users = get_leave_eligible_employee_names(df_credentials, df_nv_excel)
@@ -25876,11 +26036,16 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
         # Không dùng st.stop(), không chặn phần Thống kê chi tiết theo từng ngày
         # và không chặn Chi tiết danh sách ở phía dưới.
         if _registration_locked and not is_admin_leave_registration:
-            st.warning(
-                f"🔒 Quyền ĐĂNG KÝ lịch nghỉ của vai trò "
-                f"{REGISTRATION_LOCK_LABELS.get(_current_registration_role, _current_registration_role)} "
-                "đang bị Admin tạm khóa. Bạn vẫn có thể xem Thống kê chi tiết theo từng ngày "
-                "và Chi tiết danh sách bên dưới."
+            _set_leave_registration_popup_v92634(
+                "warning",
+                (
+                    f"🔒 Quyền ĐĂNG KÝ lịch nghỉ của vai trò "
+                    f"{REGISTRATION_LOCK_LABELS.get(_current_registration_role, _current_registration_role)} "
+                    "đang bị Admin tạm khóa. Bạn vẫn có thể xem Thống kê chi tiết theo từng ngày "
+                    "và Chi tiết danh sách bên dưới."
+                ),
+                title="Đăng ký lịch nghỉ đang bị khóa",
+                force=False,
             )
         else:
             # V92.6.32:
@@ -25926,7 +26091,33 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             else:
                 start_date = end_date = chosen_dates
 
-            chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input, key="sb_chosen_nv", filter_mode="contains")
+            # V92.6.33: tìm Tên nhân viên có dấu hoặc không dấu.
+            # Chỉ lọc list all_users đã có trong memory; không tải dữ liệu đối chiếu LIVE.
+            if is_admin_letan:
+                _employee_search_v92633 = st.text_input(
+                    "🔎 Tìm nhân viên:",
+                    key="leave_employee_search_v92633",
+                    placeholder="Có thể gõ không dấu, ví dụ: anh thu",
+                    help="Tìm không phân biệt dấu và chữ HOA/thường.",
+                )
+                _filtered_users_v92633 = filter_options_accent_insensitive(
+                    all_users,
+                    _employee_search_v92633,
+                )
+                list_nv_input = ["-- Chọn nhân viên --"] + _filtered_users_v92633
+                _selected_nv_state_v92633 = st.session_state.get("sb_chosen_nv")
+                if (
+                    _selected_nv_state_v92633
+                    and _selected_nv_state_v92633 not in list_nv_input
+                ):
+                    st.session_state.pop("sb_chosen_nv", None)
+
+            chosen_nv = st.selectbox(
+                "Chọn nhân viên:",
+                list_nv_input,
+                key="sb_chosen_nv",
+                filter_mode="contains",
+            )
 
             # --- BỘ LỌC ĐỘNG LÝ DO NGHỈ THEO RULE ENGINE LoaiNghi A:N ---
             list_loai_nghi = []
@@ -25965,16 +26156,42 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 loai_nghi_dict[_display_name.lower()] = _item
 
             if not list_loai_nghi:
-                st.warning(
-                    "⚠️ Không có Lý do nghỉ phù hợp với tài khoản và toàn bộ khoảng ngày đang chọn. "
-                    "Hệ thống đọc trực tiếp G/H của LoaiNghi và không dùng danh mục dự phòng."
+                _set_leave_registration_popup_v92634(
+                    "warning",
+                    (
+                        "Không có Lý do nghỉ phù hợp với tài khoản và toàn bộ khoảng ngày đang chọn. "
+                        "Hệ thống dùng trực tiếp quy định G/H của LoaiNghi."
+                    ),
+                    title="Không có lý do nghỉ phù hợp",
+                    force=False,
                 )
+
+            # V92.6.33: tìm Lý do nghỉ có dấu hoặc không dấu.
+            # Ví dụ: "nghi khong phep" -> "Nghỉ KHÔNG phép".
+            _reason_search_v92633 = st.text_input(
+                "🔎 Tìm lý do nghỉ:",
+                key="leave_reason_search_v92633",
+                placeholder="Có thể gõ không dấu, ví dụ: nghi khong phep",
+                help="Tìm không phân biệt dấu và chữ HOA/thường; không đọc dữ liệu LIVE.",
+            )
+            _filtered_reasons_v92633 = filter_options_accent_insensitive(
+                list_loai_nghi,
+                _reason_search_v92633,
+                cleaner=clean_leave_reason_display,
+            )
+            _reason_options_v92633 = ["-- Chọn lý do nghỉ --"] + _filtered_reasons_v92633
+            _selected_reason_state_v92633 = st.session_state.get("sb_loai_nghi_live")
+            if (
+                _selected_reason_state_v92633
+                and _selected_reason_state_v92633 not in _reason_options_v92633
+            ):
+                st.session_state.pop("sb_loai_nghi_live", None)
 
             with st.container():
                 st.markdown('<div id="vera-leave-reason-selectbox"></div>', unsafe_allow_html=True)
                 chosen_loai = st.selectbox(
                     "Lý do nghỉ:",
-                    ["-- Chọn lý do nghỉ --"] + list_loai_nghi,
+                    _reason_options_v92633,
                     key="sb_loai_nghi_live",
                     filter_mode="contains",
                 )
@@ -26128,6 +26345,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     use_container_width=True,
                 )
 
+            # V92.6.34 - POPUP FLOW.
             # Nếu đổi Ngày / Nhân viên / Lý do sau một lượt kiểm tra thì bỏ xác nhận cũ.
             _pending_key_v92632 = "_leave_registration_pending_v92632"
             _pending_v92632 = st.session_state.get(_pending_key_v92632)
@@ -26139,11 +26357,12 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 chosen_loai,
             ):
                 st.session_state.pop(_pending_key_v92632, None)
+                _clear_leave_registration_confirm_popup_v92634()
                 _pending_v92632 = None
 
             if submit_lich:
-                # Snapshot toàn bộ input để bước Xác nhận không phụ thuộc widget thay đổi sau đó.
-                _request_payload_v92632 = {
+                # Snapshot toàn bộ input để popup Xác nhận không phụ thuộc widget thay đổi sau đó.
+                _request_payload_v92634 = {
                     "start_date": start_date,
                     "end_date": end_date,
                     "employee": chosen_nv,
@@ -26161,142 +26380,129 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     "actor": str(st.session_state.get("current_user", "") or ""),
                 }
 
-                # Đây là lần ĐẦU TIÊN trong quy trình nhập form có tải dữ liệu đối chiếu LIVE.
+                # Chỉ từ đây mới tải dữ liệu LIVE để đối chiếu.
                 with st.spinner("Đang tải dữ liệu mới nhất và đối chiếu qui định..."):
-                    _live_check_df_v92632 = _load_live_leave_registration_for_validation(
+                    _live_check_df_v92634 = _load_live_leave_registration_for_validation(
                         [df_backup]
                     )
-                    _check_v92632 = _validate_leave_registration_request_live(
-                        _request_payload_v92632,
-                        _live_check_df_v92632,
+                    _check_v92634 = _validate_leave_registration_request_live(
+                        _request_payload_v92634,
+                        _live_check_df_v92634,
                         df_credentials,
                     )
 
-                if not _check_v92632.get("ok"):
+                if not _check_v92634.get("ok"):
                     st.session_state.pop(_pending_key_v92632, None)
-                    st.error("❌ Không được phép ghi lịch nghỉ.")
-                    for _err_v92632 in _check_v92632.get("errors", []):
-                        st.error(f"• {_err_v92632}")
+                    _set_leave_registration_popup_v92634(
+                        "error",
+                        "❌ Không được phép ghi lịch nghỉ.",
+                        title="Không được phép",
+                        errors=_check_v92634.get("errors", []),
+                        warnings=_check_v92634.get("warnings", []),
+                    )
                 else:
-                    _request_payload_v92632["checked_accumulated_month"] = float(
-                        _check_v92632.get("accumulated_month", 0.0) or 0.0
+                    _request_payload_v92634["checked_accumulated_month"] = float(
+                        _check_v92634.get("accumulated_month", 0.0) or 0.0
                     )
-                    _request_payload_v92632["check_warnings"] = list(
-                        _check_v92632.get("warnings", []) or []
+                    _request_payload_v92634["check_warnings"] = list(
+                        _check_v92634.get("warnings", []) or []
                     )
-                    st.session_state[_pending_key_v92632] = _request_payload_v92632
-                    _pending_v92632 = _request_payload_v92632
+                    st.session_state[_pending_key_v92632] = _request_payload_v92634
+                    _pending_v92632 = _request_payload_v92634
+                    _set_leave_registration_popup_v92634(
+                        "confirm",
+                        "✅ Đối chiếu hoàn tất: lịch nghỉ hiện tại ĐƯỢC PHÉP ghi.",
+                        title="Xác nhận lưu lịch nghỉ",
+                        warnings=_request_payload_v92634.get("check_warnings", []),
+                    )
 
-            # BƯỚC 2: chỉ hiện sau khi dữ liệu đã được đối chiếu và được phép.
-            _pending_v92632 = st.session_state.get(_pending_key_v92632)
-            if _pending_v92632:
-                _p_start = _pending_v92632["start_date"]
-                _p_end = _pending_v92632["end_date"]
-                _p_days_count = (_p_end - _p_start).days + 1
-                _p_reason = clean_leave_reason_display(_pending_v92632["reason"])
-                _p_penalty = _pending_v92632.get("penalty")
-                _p_days = float(_pending_v92632.get("days", 0) or 0)
+            # Nút Lưu/Hủy nằm TRONG popup. Popup set action rồi rerun về đây xử lý.
+            _popup_action_v92634 = st.session_state.pop(
+                LEAVE_REG_POPUP_ACTION_KEY_V92634,
+                "",
+            )
 
-                st.success("✅ Đối chiếu hoàn tất: lịch nghỉ hiện tại ĐƯỢC PHÉP ghi.")
-                st.markdown(
-                    f"**Nhân viên:** {_pending_v92632['employee']}  \n"
-                    f"**Ngày:** {_p_start.strftime('%d/%m/%Y')}"
-                    + (
-                        f" → {_p_end.strftime('%d/%m/%Y')}"
-                        if _p_end != _p_start else ""
-                    )
-                    + f"  \n**Lý do:** {_p_reason}"
-                    + f"  \n**Số ngày tính mỗi ngày:** {_p_days:g}"
-                    + (
-                        f"  \n**Chi tiết:** {_pending_v92632.get('detail','')}"
-                        if _pending_v92632.get("detail") else ""
-                    )
+            if _popup_action_v92634 == "cancel":
+                st.session_state.pop(_pending_key_v92632, None)
+                _set_leave_registration_popup_v92634(
+                    "info",
+                    "Đã hủy yêu cầu ghi lịch nghỉ. Không có dữ liệu nào được ghi.",
+                    title="Đã hủy",
                 )
-                for _warn_v92632 in _pending_v92632.get("check_warnings", []):
-                    st.warning(f"⚠️ {_warn_v92632}")
 
-                _confirm_col_v92632, _cancel_col_v92632 = st.columns(2)
-                with _confirm_col_v92632:
-                    _final_confirm_v92632 = st.button(
-                        "✅ Xác nhận ghi",
-                        type="primary",
-                        use_container_width=True,
-                        key="confirm_leave_registration_v92632",
+            elif _popup_action_v92634 == "save":
+                _pending_v92634 = st.session_state.get(_pending_key_v92632)
+                if not isinstance(_pending_v92634, dict):
+                    _set_leave_registration_popup_v92634(
+                        "warning",
+                        "Yêu cầu xác nhận không còn hiệu lực. Vui lòng bấm Ghi Lịch Nghỉ lại.",
+                        title="Yêu cầu đã hết hiệu lực",
                     )
-                with _cancel_col_v92632:
-                    _cancel_confirm_v92632 = st.button(
-                        "❌ Hủy",
-                        use_container_width=True,
-                        key="cancel_leave_registration_v92632",
-                    )
-
-                if _cancel_confirm_v92632:
-                    st.session_state.pop(_pending_key_v92632, None)
-                    st.info("Đã hủy yêu cầu ghi lịch nghỉ.")
-                    rerun_current_view()
-
-                if _final_confirm_v92632:
-                    # Kiểm tra lần cuối ngay trước khi ghi để tránh dữ liệu thay đổi giữa
-                    # bước Đối chiếu và bước Xác nhận. Việc này xảy ra SAU khi nhập liệu,
-                    # nên không gây lag trong quá trình chọn/nhập.
+                else:
+                    # Kiểm tra LIVE lần cuối ngay sau khi user bấm LƯU trong popup.
                     with st.spinner("Đang kiểm tra lần cuối và ghi lịch nghỉ..."):
-                        _final_live_df_v92632 = _load_live_leave_registration_for_validation(
+                        _final_live_df_v92634 = _load_live_leave_registration_for_validation(
                             [df_backup]
                         )
-                        _final_check_v92632 = _validate_leave_registration_request_live(
-                            _pending_v92632,
-                            _final_live_df_v92632,
+                        _final_check_v92634 = _validate_leave_registration_request_live(
+                            _pending_v92634,
+                            _final_live_df_v92634,
                             df_credentials,
                         )
 
-                    if not _final_check_v92632.get("ok"):
+                    if not _final_check_v92634.get("ok"):
                         st.session_state.pop(_pending_key_v92632, None)
-                        st.error(
-                            "❌ Dữ liệu đã thay đổi sau lần đối chiếu trước. "
-                            "Yêu cầu hiện không còn được phép."
+                        _set_leave_registration_popup_v92634(
+                            "error",
+                            (
+                                "❌ Dữ liệu đã thay đổi sau lần đối chiếu trước. "
+                                "Yêu cầu hiện không còn được phép."
+                            ),
+                            title="Không thể lưu",
+                            errors=_final_check_v92634.get("errors", []),
+                            warnings=_final_check_v92634.get("warnings", []),
                         )
-                        for _err_v92632 in _final_check_v92632.get("errors", []):
-                            st.error(f"• {_err_v92632}")
                     else:
-                        _save_start = _pending_v92632["start_date"]
-                        _save_end = _pending_v92632["end_date"]
-                        _save_employee = _pending_v92632["employee"]
+                        _save_start = _pending_v92634["start_date"]
+                        _save_end = _pending_v92634["end_date"]
+                        _save_employee = _pending_v92634["employee"]
                         _save_reason = clean_leave_reason_display(
-                            _pending_v92632["reason"]
+                            _pending_v92634["reason"]
                         )
                         _save_detail = str(
-                            _pending_v92632.get("detail", "") or ""
+                            _pending_v92634.get("detail", "") or ""
                         ).strip()
                         _save_days = float(
-                            _pending_v92632.get("days", 0) or 0
+                            _pending_v92634.get("days", 0) or 0
                         )
-                        _save_val_penalty = _pending_v92632.get("penalty")
+                        _save_val_penalty = _pending_v92634.get("penalty")
                         _save_default_penalty = float(
-                            _pending_v92632.get("default_penalty", 0) or 0
+                            _pending_v92634.get("default_penalty", 0) or 0
                         )
                         _save_requires_manual = bool(
-                            _pending_v92632.get("requires_manual_penalty", False)
+                            _pending_v92634.get("requires_manual_penalty", False)
                         )
                         _save_system_penalty = bool(
-                            _pending_v92632.get("system_calculated_penalty", False)
+                            _pending_v92634.get("system_calculated_penalty", False)
                         )
                         _save_is_video = is_video_leave_reason(_save_reason)
                         _save_count = (_save_end - _save_start).days + 1
                         _accumulated_month = float(
-                            _final_check_v92632.get("accumulated_month", 0.0) or 0.0
+                            _final_check_v92634.get("accumulated_month", 0.0) or 0.0
                         )
 
-                        _all_saved_v92632 = True
-                        _save_notes_v92632 = []
+                        _all_saved_v92634 = True
+                        _save_notes_v92634 = []
+                        _save_error_v92634 = ""
 
-                        for _i_v92632 in range(_save_count):
-                            _curr_date_v92632 = _save_start + timedelta(days=_i_v92632)
+                        for _i_v92634 in range(_save_count):
+                            _curr_date_v92634 = _save_start + timedelta(days=_i_v92634)
 
                             if not _save_is_video:
                                 _accumulated_month += _save_days
 
                             if _save_requires_manual:
-                                _penalty_to_save_v92632 = max(
+                                _penalty_to_save_v92634 = max(
                                     50.0, float(_save_val_penalty or 0.0)
                                 )
                             elif (
@@ -26305,81 +26511,110 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                                     st.session_state.get("current_role", "") or ""
                                 ).strip().lower() != "admin"
                             ):
-                                _penalty_to_save_v92632 = _save_default_penalty
+                                _penalty_to_save_v92634 = _save_default_penalty
                             else:
-                                _penalty_to_save_v92632 = float(
+                                _penalty_to_save_v92634 = float(
                                     _save_val_penalty or 0.0
                                 )
 
-                            _ok_save_v92632, _msg_save_v92632 = save_lich_nghi_to_backup_sheet(
-                                _curr_date_v92632.strftime("%d/%m/%Y"),
+                            _ok_save_v92634, _msg_save_v92634 = save_lich_nghi_to_backup_sheet(
+                                _curr_date_v92634.strftime("%d/%m/%Y"),
                                 _save_employee,
                                 _save_reason,
                                 _save_detail,
                                 _save_days,
                                 _accumulated_month,
-                                _penalty_to_save_v92632,
+                                _penalty_to_save_v92634,
                                 st.session_state.current_user,
-                                df_main_source=_final_live_df_v92632,
+                                df_main_source=_final_live_df_v92634,
                             )
 
-                            if not _ok_save_v92632:
-                                st.error(f"❌ LỖI GOOGLE SHEETS: {_msg_save_v92632}")
-                                _all_saved_v92632 = False
+                            if not _ok_save_v92634:
+                                _save_error_v92634 = str(_msg_save_v92634 or "Không xác định")
+                                _all_saved_v92634 = False
                                 break
-                            if _msg_save_v92632:
-                                _save_notes_v92632.append(_msg_save_v92632)
+                            if _msg_save_v92634:
+                                _save_notes_v92634.append(_msg_save_v92634)
 
-                        if _all_saved_v92632:
-                            _flash_notes = [
+                        if not _all_saved_v92634:
+                            st.session_state.pop(_pending_key_v92632, None)
+                            _set_leave_registration_popup_v92634(
+                                "error",
+                                "❌ Không ghi được lịch nghỉ vào Google Sheets.",
+                                title="Lỗi khi lưu",
+                                errors=[_save_error_v92634],
+                            )
+                        else:
+                            _popup_notes_v92634 = [
                                 str(note)
-                                for note in _save_notes_v92632
+                                for note in _save_notes_v92634
                                 if note and "Người Thứ" in str(note)
                             ]
 
                             # Lễ tân đăng ký cho Nhân viên/Leader: email như logic cũ.
-                            _actor_role_v92632 = str(
+                            _actor_role_v92634 = str(
                                 st.session_state.get("current_role", "") or ""
                             ).strip().lower()
-                            _target_profile_v92632 = _credential_profile_by_username(
+                            _target_profile_v92634 = _credential_profile_by_username(
                                 _save_employee, df_credentials
                             )
-                            _target_role_v92632 = str(
-                                _target_profile_v92632.get("Phân quyền", "") or ""
+                            _target_role_v92634 = str(
+                                _target_profile_v92634.get("Phân quyền", "") or ""
                             ).strip().lower()
 
                             if (
-                                _actor_role_v92632 == "letan"
-                                and _target_role_v92632 in {"nhanvien", "leader"}
+                                _actor_role_v92634 == "letan"
+                                and _target_role_v92634 in {"nhanvien", "leader"}
                             ):
-                                _mail_ok_v92632, _mail_msg_v92632 = (
+                                _mail_ok_v92634, _mail_msg_v92634 = (
                                     send_reception_leave_registration_email(
                                         st.session_state.current_user,
                                         _save_employee,
-                                        _target_role_v92632,
+                                        _target_role_v92634,
                                         _save_start,
                                         _save_end,
                                         _save_reason,
                                         _save_detail,
                                     )
                                 )
-                                _flash_notes.append(
-                                    ("📧 " if _mail_ok_v92632 else "⚠️ ")
-                                    + str(_mail_msg_v92632)
+                                _popup_notes_v92634.append(
+                                    ("📧 " if _mail_ok_v92634 else "⚠️ ")
+                                    + str(_mail_msg_v92634)
                                 )
 
                             st.session_state.pop(_pending_key_v92632, None)
-                            st.session_state["_leave_registration_flash_v884"] = (
-                                f"✅ Đã ghi nhận lịch nghỉ thành công cho {_save_count} ngày!"
-                            )
-                            st.session_state[
-                                "_leave_registration_flash_notes_v884"
-                            ] = _flash_notes
+                            # V92.6.33: reset Tên nhân viên/Lý do/ô tìm kiếm sau Lưu.
                             st.session_state[
                                 "_leave_registration_reset_pending_v884"
                             ] = True
+                            _set_leave_registration_popup_v92634(
+                                "success",
+                                f"✅ Đã ghi nhận lịch nghỉ thành công cho {_save_count} ngày!",
+                                title="Lưu thành công",
+                                notes=_popup_notes_v92634,
+                            )
                             _clear_leave_data_caches()
+                            # Rerun để reset các widget về mặc định nhưng giữ popup thành công.
                             rerun_current_view()
+
+            # Nếu có pending hợp lệ nhưng popup đã bị đóng bằng nút X của Dialog,
+            # các lần rerun tiếp theo sẽ mở lại popup Xác nhận cho đến khi Lưu/Hủy
+            # hoặc user thay đổi Ngày/NV/Lý do.
+            _pending_v92634 = st.session_state.get(_pending_key_v92632)
+            if (
+                isinstance(_pending_v92634, dict)
+                and not st.session_state.get(LEAVE_REG_POPUP_KEY_V92634)
+            ):
+                _set_leave_registration_popup_v92634(
+                    "confirm",
+                    "✅ Đối chiếu hoàn tất: lịch nghỉ hiện tại ĐƯỢC PHÉP ghi.",
+                    title="Xác nhận lưu lịch nghỉ",
+                    warnings=_pending_v92634.get("check_warnings", []),
+                )
+
+        # Popup được gọi SAU khi xử lý form để mọi kết quả của lượt chạy hiện ngay.
+        if st.session_state.get(LEAVE_REG_POPUP_KEY_V92634):
+            show_leave_registration_popup_v92634()
 
     # V86.20: bỏ divider ở đây để tiết kiệm chiều cao hiển thị trên điện thoại.
     # Bộ lọc được đặt sát ngay dưới khối Đăng ký lịch nghỉ.

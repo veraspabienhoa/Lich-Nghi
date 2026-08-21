@@ -1,4 +1,4 @@
-"""Cloud Run Job V84: TimeSoft snapshot + Auto Update phạt 24/7.
+"""V93.1-PG1 - Cloud Run Job TimeSoft + lịch nghỉ Single Source A:M.
 
 Mỗi lần Cloud Scheduler gọi:
 1) Đồng bộ TimeSoft -> PostgreSQL (giữ nguyên chức năng V82/V83).
@@ -9,7 +9,7 @@ Mỗi lần Cloud Scheduler gọi:
    - Bảng tour: Ra ngoài vào muộn khi cột Vào trễ >= 5 phút.
    - Cẩm Nhung * được đối chiếu như Cẩm Nhung.
    - Chống trùng Ngày + Nhân viên + Lý do.
-   - Ghi đúng Sheet1 A:J tại last row.
+   - Ghi đúng Sheet1 A:M tại last row; cột E luôn trống.
 
 Google Sheets dùng Application Default Credentials của service account gắn với Cloud Run Job.
 """
@@ -52,8 +52,7 @@ API_CHECKIN = "/Report/ReportEmployeeCheckin/SearchElastic"
 # -------------------- Vera / Google --------------------
 SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"
 SHEET_DU_PHONG_ID = "1Kz0aw-JatptAN9G7YSwZ6rJO09urOPaD-rS-18eZSY0"
-SHEET_LICH_NGHI_2_ID = "1bLxn-L5gXui8pCL1b9TxshCNcykM7jg0J49Dkr5b4DI"
-BANG_TOUR_FILE_ID = "1toTjr9r2YTIou2vySWtdsdY6DB8uGvPn"
+BANG_TOUR_FILE_ID = "151d1ueCwH2KXX-HPQF1uj340uWSCS2dW"
 
 AUTO_PENALTY_CONFIG_WORKSHEET = "CauHinhAutoPhat"
 AUTO_PENALTY_CONFIG_HEADERS = [
@@ -64,11 +63,22 @@ AUTO_PENALTY_RUNNING = "RUNNING"
 AUTO_PENALTY_PAUSED = "PAUSED"
 AUTO_PENALTY_MINUTES = 5
 
-LEAVE_HEADERS = [
-    "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-    "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
-    "Giờ cập nhật", "Người cập nhật",
+# V93.1-PG1 - Sheet1 lịch nghỉ là nguồn DUY NHẤT, schema vật lý A:M.
+# A Ngày | B Thứ ngày | C Tên nhân viên | D Lý do nghỉ | E luôn trống |
+# F Loại nghỉ | G Chi tiết | H Số ngày tính | I Số ngày phép cộng dồn |
+# J Phạt vi phạm | K Ngày cập nhật | L Giờ cập nhật | M Người cập nhật.
+LEAVE_SHEET_HEADERS = [
+    "Ngày", "Thứ ngày", "Tên nhân viên", "Lý do nghỉ", "", "Loại nghỉ",
+    "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
+    "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật",
 ]
+LEAVE_DATA_COLUMNS = [
+    "Ngày", "Thứ ngày", "Tên nhân viên", "Lý do nghỉ", "Loại nghỉ",
+    "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
+    "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật",
+]
+LEAVE_SHEET_RANGE = "A:M"
+LEAVE_HEADER_RANGE = "A1:M1"
 
 PROGRESSIVE_REASONS = {
     "nghi khong phep": "Nghỉ không phép",
@@ -227,58 +237,92 @@ def load_auto_penalty_config(client: gspread.Client) -> dict:
     }
 
 
-def _sheet_rows_a_to_j(ws) -> list[dict]:
-    values = ws.get("A:J")
+def _weekday_vi(d: date | None) -> str:
+    if not isinstance(d, date):
+        return ""
+    return {
+        0: "Thứ Hai",
+        1: "Thứ Ba",
+        2: "Thứ Tư",
+        3: "Thứ Năm",
+        4: "Thứ Sáu",
+        5: "Thứ Bảy",
+        6: "Chủ Nhật",
+    }.get(d.weekday(), "")
+
+
+def _sheet_rows_a_to_m(ws) -> list[dict]:
+    """Đọc duy nhất Sheet1 A:M; bỏ qua cột E vật lý vì cột này bắt buộc để trống."""
+    values = ws.get(LEAVE_SHEET_RANGE)
     if not values or len(values) < 2:
         return []
-    header = [str(x).strip() for x in values[0][:10]]
-    if len(header) < 10 or not header[0]:
-        header = LEAVE_HEADERS[:]
-    # Tương thích tiêu đề cũ Loại nghỉ.
-    header = ["Lý do nghỉ" if x == "Loại nghỉ" else x for x in header]
-    rows = []
+
+    rows: list[dict] = []
     for sheet_row, row in enumerate(values[1:], start=2):
-        vals = list(row[:10]) + [""] * max(0, 10 - len(row))
+        vals = list(row[:13]) + [""] * max(0, 13 - len(row))
         if not any(str(v).strip() for v in vals):
             continue
-        item = {header[i] if i < len(header) and header[i] else LEAVE_HEADERS[i]: vals[i] for i in range(10)}
-        for c in LEAVE_HEADERS:
-            item.setdefault(c, "")
-        item["__row"] = sheet_row
+        item = {
+            "Ngày": vals[0],
+            "Thứ ngày": vals[1],
+            "Tên nhân viên": vals[2],
+            "Lý do nghỉ": vals[3],
+            "Loại nghỉ": vals[5],
+            "Chi tiết": vals[6],
+            "Số ngày tính": vals[7],
+            "Số ngày phép cộng dồn": vals[8],
+            "Phạt vi phạm": vals[9],
+            "Ngày cập nhật": vals[10],
+            "Giờ cập nhật": vals[11],
+            "Người cập nhật": vals[12],
+            "__row": sheet_row,
+            "__source": SHEET_DU_PHONG_ID,
+        }
         rows.append(item)
     return rows
 
 
 def _ensure_leave_header(ws) -> None:
-    current = ws.get("A1:J1")
-    row = current[0] if current else []
-    if not any(str(v).strip() for v in row):
-        ws.update(range_name="A1:J1", values=[LEAVE_HEADERS], value_input_option="USER_ENTERED")
+    """Ép đúng header A:M; cột E có header rỗng theo thiết kế."""
+    current = ws.get(LEAVE_HEADER_RANGE)
+    row = list(current[0]) if current else []
+    row += [""] * max(0, 13 - len(row))
+    normalized = [str(x).strip() for x in row[:13]]
+    expected = [str(x).strip() for x in LEAVE_SHEET_HEADERS]
+    if normalized != expected:
+        ws.update(
+            range_name=LEAVE_HEADER_RANGE,
+            values=[LEAVE_SHEET_HEADERS],
+            value_input_option="USER_ENTERED",
+        )
 
 
 def _next_data_row(ws) -> int:
-    values = ws.get("A:J")
+    values = ws.get(LEAVE_SHEET_RANGE)
     last = 0
     for idx, row in enumerate(values, start=1):
-        if any(str(v).strip() for v in row[:10]):
+        vals = list(row[:13]) + [""] * max(0, 13 - len(row))
+        if any(str(v).strip() for v in vals):
             last = idx
     return max(2, last + 1)
 
 
 def load_all_leave_rows(client: gspread.Client) -> list[dict]:
-    rows: list[dict] = []
-    for sheet_id in (SHEET_DU_PHONG_ID, SHEET_LICH_NGHI_2_ID):
-        try:
-            ws = client.open_by_key(sheet_id).get_worksheet(0)
-            for item in _sheet_rows_a_to_j(ws):
-                item["__source"] = sheet_id
-                rows.append(item)
-        except Exception as exc:
-            _log(f"WARN: không đọc được nguồn lịch {sheet_id[:8]}...: {type(exc).__name__}")
-    # Loại trùng logic giữa 2 nguồn.
+    """V93.1-PG1: chỉ đọc Sheet1 của SHEET_DU_PHONG_ID; không còn nguồn lịch thứ hai."""
+    try:
+        ws = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        rows = _sheet_rows_a_to_m(ws)
+    except Exception as exc:
+        _log(f"WARN: không đọc được Sheet1 lịch nghỉ chính: {type(exc).__name__}: {exc}")
+        return []
+
     logical: dict[tuple[str, str, str], dict] = {}
     for item in rows:
-        key = (_date_key(item.get("Ngày")), _employee_key(item.get("Tên nhân viên")), _reason_key(item.get("Lý do nghỉ")))
+        key = (
+            _date_key(item.get("Ngày")),
+            _employee_key(item.get("Tên nhân viên")),
+            _reason_key(item.get("Lý do nghỉ")),
+        )
         if all(key):
             logical[key] = item
     return list(logical.values())
@@ -329,6 +373,7 @@ def load_leave_catalog(client: gspread.Client) -> dict[str, dict]:
         clean = _clean_reason(name)
         catalog[_reason_key(clean)] = {
             "name": clean,
+            "type": str(vals[2] if len(vals) > 2 else "").strip(),
             "days": _number(vals[4] if len(vals) > 4 else 0, 0.0),
             "penalty": _number(vals[5] if len(vals) > 5 else 0, 0.0, money=True),
         }
@@ -418,8 +463,9 @@ def save_auto_violation(
     detail: str,
     actor: str,
 ) -> tuple[bool, str]:
-    """Ghi 1 vi phạm vào Sheet1 A:J; chống trùng LIVE ngay trước khi ghi."""
+    """Ghi 1 vi phạm vào Sheet1 A:M duy nhất; chống trùng theo A+C+D ngay trước khi ghi."""
     reason = _clean_reason(reason_item.get("name", ""))
+    leave_type = str(reason_item.get("type", "") or "").strip()
     days = float(reason_item.get("days", 0) or 0)
     base_penalty = float(reason_item.get("penalty", 0) or 0)
     if not employee or not reason:
@@ -427,6 +473,7 @@ def save_auto_violation(
 
     primary_ws = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
     _ensure_leave_header(primary_ws)
+
     live_rows = load_all_leave_rows(client)
     if _same_leave_exists(live_rows, d, employee, reason):
         return True, "SKIP_DUPLICATE"
@@ -442,20 +489,23 @@ def save_auto_violation(
 
     now = datetime.now(VN_TZ)
     row = [
-        d.strftime("%d/%m/%Y"),
-        employee,
-        reason,
-        str(detail or "").strip(),
-        days,
-        accumulated,
-        penalty,
-        now.strftime("%d/%m/%Y"),
-        now.strftime("%H:%M:%S"),
-        actor,
+        d.strftime("%d/%m/%Y"),          # A Ngày
+        _weekday_vi(d),                  # B Thứ ngày
+        employee,                        # C Tên nhân viên
+        reason,                          # D Lý do nghỉ
+        "",                              # E luôn trống
+        leave_type,                      # F Loại nghỉ
+        str(detail or "").strip(),       # G Chi tiết
+        days,                            # H Số ngày tính
+        accumulated,                     # I Số ngày phép cộng dồn
+        penalty,                         # J Phạt vi phạm
+        now.strftime("%d/%m/%Y"),        # K Ngày cập nhật
+        now.strftime("%H:%M:%S"),        # L Giờ cập nhật
+        actor,                           # M Người cập nhật
     ]
     target = _next_data_row(primary_ws)
     primary_ws.update(
-        range_name=f"A{target}:J{target}",
+        range_name=f"A{target}:M{target}",
         values=[row],
         value_input_option="USER_ENTERED",
     )
@@ -1033,7 +1083,7 @@ def write_status(status: str, started_at: datetime, details: list[dict], error: 
 # ==========================================================
 def run_sync() -> int:
     started_at = datetime.now(VN_TZ)
-    _log(f"Bắt đầu TimeSoft background sync V84; days={SYNC_DAYS}")
+    _log(f"Bắt đầu TimeSoft background sync V93.1-PG1; days={SYNC_DAYS}")
     if not vpg.is_enabled():
         _log("ERROR: PostgreSQL chưa được bật.")
         return 2
@@ -1104,7 +1154,7 @@ def run_sync() -> int:
             tour_result=tour_result,
             timesoft_result=timesoft_result,
         )
-        _log(f"Hoàn tất Job V84 trong {(datetime.now(VN_TZ)-started_at).total_seconds():.1f}s")
+        _log(f"Hoàn tất Job V93.1-PG1 trong {(datetime.now(VN_TZ)-started_at).total_seconds():.1f}s")
         return 0
     except Exception as exc:
         safe_error = f"{type(exc).__name__}: {exc}"

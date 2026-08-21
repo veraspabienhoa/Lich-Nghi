@@ -1,4 +1,4 @@
-"""V93.1-PG1 - Cloud Run Job TimeSoft + lịch nghỉ Single Source A:M.
+"""V93.1-PG2 - Cloud Run Job TimeSoft + lịch nghỉ Single Source A:M.
 
 Mỗi lần Cloud Scheduler gọi:
 1) Đồng bộ TimeSoft -> PostgreSQL (giữ nguyên chức năng V82/V83).
@@ -16,6 +16,7 @@ Google Sheets dùng Application Default Credentials của service account gắn 
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import sys
@@ -42,6 +43,12 @@ PASSWORD = str(os.getenv("TIMESOFT_PASSWORD", "") or "")
 SYNC_DAYS = max(1, min(7, int(os.getenv("TIMESOFT_SYNC_DAYS", "2") or 2)))
 CHECKIN_PAGE_SIZE = max(20, min(500, int(os.getenv("TIMESOFT_CHECKIN_PAGE_SIZE", "100") or 100)))
 MAX_CHECKIN_PAGES = 500
+# V93.1-PG2: snapshot theo ngày là dữ liệu lịch sử, không còn TTL 24 giờ.
+# Có thể đổi bằng env TIMESOFT_HISTORY_RETENTION_DAYS; mặc định giữ 10 năm.
+TIMESOFT_HISTORY_RETENTION_DAYS = max(
+    30, min(36500, int(os.getenv("TIMESOFT_HISTORY_RETENTION_DAYS", "3650") or 3650))
+)
+TIMESOFT_HISTORY_TTL_SECONDS = TIMESOFT_HISTORY_RETENTION_DAYS * 86400
 LOCK_NAME = "vera-timesoft-background-sync-v84"
 
 REPORT_SUMMARY_PAGE = "/Report/ReportSummaryInvoice/Index"
@@ -63,7 +70,7 @@ AUTO_PENALTY_RUNNING = "RUNNING"
 AUTO_PENALTY_PAUSED = "PAUSED"
 AUTO_PENALTY_MINUTES = 5
 
-# V93.1-PG1 - Sheet1 lịch nghỉ là nguồn DUY NHẤT, schema vật lý A:M.
+# V93.1-PG2 - Sheet1 lịch nghỉ là nguồn DUY NHẤT, schema vật lý A:M.
 # A Ngày | B Thứ ngày | C Tên nhân viên | D Lý do nghỉ | E luôn trống |
 # F Loại nghỉ | G Chi tiết | H Số ngày tính | I Số ngày phép cộng dồn |
 # J Phạt vi phạm | K Ngày cập nhật | L Giờ cập nhật | M Người cập nhật.
@@ -308,7 +315,7 @@ def _next_data_row(ws) -> int:
 
 
 def load_all_leave_rows(client: gspread.Client) -> list[dict]:
-    """V93.1-PG1: chỉ đọc Sheet1 của SHEET_DU_PHONG_ID; không còn nguồn lịch thứ hai."""
+    """V93.1-PG2: chỉ đọc Sheet1 của SHEET_DU_PHONG_ID; không còn nguồn lịch thứ hai."""
     try:
         ws = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
         rows = _sheet_rows_a_to_m(ws)
@@ -1041,9 +1048,25 @@ def _key(prefix: str, target_date: date) -> str:
 def write_snapshot(target_date: date, invoice_df: pd.DataFrame, invoice_meta: dict,
                    checkin_df: pd.DataFrame, checkin_meta: dict) -> None:
     source_version = target_date.isoformat()
-    vpg.write_dataset(_key("timesoft_summary_invoice", target_date), invoice_df, ttl_seconds=86400, source_version=source_version)
-    vpg.write_dataset(_key("timesoft_summary_totals", target_date), pd.DataFrame([invoice_meta]), ttl_seconds=86400, source_version=source_version)
-    vpg.write_dataset(_key("timesoft_employee_checkin", target_date), checkin_df, ttl_seconds=86400, source_version=source_version)
+    # Snapshot gắn ngày được giữ dài hạn để Admin xem lịch sử/export.
+    vpg.write_dataset(
+        _key("timesoft_summary_invoice", target_date),
+        invoice_df,
+        ttl_seconds=TIMESOFT_HISTORY_TTL_SECONDS,
+        source_version=source_version,
+    )
+    vpg.write_dataset(
+        _key("timesoft_summary_totals", target_date),
+        pd.DataFrame([invoice_meta]),
+        ttl_seconds=TIMESOFT_HISTORY_TTL_SECONDS,
+        source_version=source_version,
+    )
+    vpg.write_dataset(
+        _key("timesoft_employee_checkin", target_date),
+        checkin_df,
+        ttl_seconds=TIMESOFT_HISTORY_TTL_SECONDS,
+        source_version=source_version,
+    )
     if target_date == datetime.now(VN_TZ).date():
         vpg.write_dataset("timesoft_summary_invoice_today", invoice_df, ttl_seconds=1800, source_version=source_version)
         vpg.write_dataset("timesoft_summary_totals_today", pd.DataFrame([invoice_meta]), ttl_seconds=1800, source_version=source_version)
@@ -1075,7 +1098,23 @@ def write_status(status: str, started_at: datetime, details: list[dict], error: 
         "auto_timesoft_errors": int(timesoft_result.get("errors", 0) or 0),
         "error": str(error or "")[:500],
     }
-    vpg.write_dataset("timesoft_background_status", pd.DataFrame([row]), ttl_seconds=1800, source_version=now.isoformat())
+    vpg.write_dataset(
+        "timesoft_background_status",
+        pd.DataFrame([row]),
+        ttl_seconds=1800,
+        source_version=now.isoformat(),
+    )
+    # Ghi lịch sử mỗi lần Job chạy; nếu helper cũ chưa có record_event thì bỏ qua an toàn.
+    record_fn = getattr(vpg, "record_event", None)
+    if callable(record_fn):
+        try:
+            record_fn(
+                "timesoft_background_status",
+                f"job_{str(status or 'unknown').lower()}",
+                json.dumps(row, ensure_ascii=False, default=str),
+            )
+        except Exception:
+            pass
 
 
 # ==========================================================
@@ -1083,7 +1122,7 @@ def write_status(status: str, started_at: datetime, details: list[dict], error: 
 # ==========================================================
 def run_sync() -> int:
     started_at = datetime.now(VN_TZ)
-    _log(f"Bắt đầu TimeSoft background sync V93.1-PG1; days={SYNC_DAYS}")
+    _log(f"Bắt đầu TimeSoft background sync V93.1-PG2; days={SYNC_DAYS}")
     if not vpg.is_enabled():
         _log("ERROR: PostgreSQL chưa được bật.")
         return 2
@@ -1154,7 +1193,7 @@ def run_sync() -> int:
             tour_result=tour_result,
             timesoft_result=timesoft_result,
         )
-        _log(f"Hoàn tất Job V93.1-PG1 trong {(datetime.now(VN_TZ)-started_at).total_seconds():.1f}s")
+        _log(f"Hoàn tất Job V93.1-PG2 trong {(datetime.now(VN_TZ)-started_at).total_seconds():.1f}s")
         return 0
     except Exception as exc:
         safe_error = f"{type(exc).__name__}: {exc}"

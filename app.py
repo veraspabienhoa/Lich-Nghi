@@ -1,4 +1,4 @@
-# V92.6.52 - Fix toàn bộ lời gọi _period_penalty_by_employee dư tham số (2026-08-21)
+# V92.6.53 - Fix NameError tempfile trong TimeSoft Export (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -11,6 +11,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import streamlit.components.v1 as components
 import time
+import tempfile
 import smtplib
 import unicodedata
 import hashlib

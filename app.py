@@ -1,4 +1,4 @@
-# V92.6.34 - Mọi tài khoản xem thống kê nghỉ; Phạt vi phạm chỉ Admin (2026-08-21)
+# V92.6.35 - Ẩn Quyền xóa và Lý do khóa trong Chi tiết danh sách (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -27176,14 +27176,13 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     default=False,
                     width=layout_width("leave_detail", "Chọn", "small")
                 )
+            # V92.6.35: 2 cột này chỉ phục vụ kiểm tra quyền nội bộ,
+            # ẩn khỏi giao diện Chi tiết danh sách với TẤT CẢ tài khoản.
+            # Vẫn giữ cột trong editor_df/detail_editor để logic sửa/xóa phía sau không đổi.
             if "Quyền xóa" in editor_df.columns:
-                detail_col_config["Quyền xóa"] = st.column_config.TextColumn(
-                    "Quyền xóa", disabled=True, width="small"
-                )
+                detail_col_config["Quyền xóa"] = None
             if "Lý do khóa" in editor_df.columns:
-                detail_col_config["Lý do khóa"] = st.column_config.TextColumn(
-                    "Lý do khóa", disabled=True, width="large"
-                )
+                detail_col_config["Lý do khóa"] = None
             if "Ngày" in editor_df.columns:
                 detail_col_config["Ngày"] = st.column_config.DateColumn(
                     "Ngày", format="DD/MM/YYYY", width=layout_width("leave_detail", "Ngày", "small")

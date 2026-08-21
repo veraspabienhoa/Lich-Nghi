@@ -1,4 +1,4 @@
-# V92.6.27 - Admin luôn hiển thị khu Đăng ký lịch nghỉ phép (2026-08-21)
+# V92.6.31 - LoaiNghi embedded + chỉ đọc Google Sheet khi bấm Cập nhật qui định (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -7457,18 +7457,270 @@ def load_backup_sheet_data():
         )
     return _load_backup_sheet_data_from_sheets()
 
-@st.cache_data(ttl=30, show_spinner=False)
-def load_loai_nghi_from_gsheet():
+
+# ============================================================
+# V92.6.31 - LOAINGHI RUNTIME SNAPSHOT
+# Bình thường KHÔNG đọc Google Sheet LoaiNghi.
+# Nguồn ưu tiên:
+#   1) snapshot mới nhất đã lưu PostgreSQL;
+#   2) bản quy định nền được đóng sẵn trong app.py.
+# Chỉ nút "Cập nhật qui định" mới đọc Google Sheet.
+# ============================================================
+LOAI_NGHI_RULE_SETTING_CATEGORY = "leave_rules"
+LOAI_NGHI_RULE_SETTING_KEY = "loai_nghi_snapshot_v2"
+
+EMBEDDED_LOAI_NGHI_HEADERS = ['STT', 'Lý do nghỉ', 'Loại nghỉ', 'Chi tiết', 'Số ngày tính phép', 'Phạt vi phạm', 'Chỉ nhập được cuối tuần', 'User có quyền được nhập', 'Kiều đăng ký', 'Giá trị', 'Ngoại trừ đăng ký', 'Kiểu hủy', 'Số ngày hủy trước', 'Ngoại trừ hủy']
+EMBEDDED_LOAI_NGHI_ROWS = [['1', 'Nghỉ CÓ phép', 'Có phép', '', '1', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '3', '', 'Trước N ngày', '3', ''], ['2', 'Nghỉ KHÔNG phép', 'Không phép', '', '0', '500000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '1', 'ngoại trừ letan, quanly, admin', 'Không được hủy ngày hiện tại', '', 'ngoại trừ letan, quanly, admin'], ['3', 'Nghỉ CUỐI TUẦN CÓ phép', 'Có phép', '', '1', '0', 'Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '3', '', 'Trước N ngày', '3', ''], ['4', 'Nghỉ CUỐI TUẦN KHÔNG phép', 'Không phép', '', '0', '1000000', 'Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '1', 'ngoại trừ letan, quanly, admin', 'Không được hủy ngày hiện tại', '', 'ngoại trừ letan, quanly, admin'], ['5', 'Nghỉ phát sinh', 'Phát sinh', '', '1', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan, leader, nhanvien', 'Ngày hiện tại từ giờ', '9:00', '', '', '', ''], ['6', 'Đi trễ CÓ phép', 'Có phép', '', '0.5', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '3', '', 'Trước N ngày', '3', ''], ['7', 'Đi trễ KHÔNG phép', 'Không phép', '', '0', '300000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '1', 'ngoại trừ letan, quanly, admin', 'Không được hủy ngày hiện tại', '', 'ngoại trừ letan, quanly, admin'], ['8', 'Đi trễ CUỐI TUẦN CÓ phép', 'Có phép', '', '0.5', '0', 'Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '3', '', 'Trước N ngày', '3', ''], ['9', 'Đi trễ CUỐI TUẦN KHÔNG phép', 'Không phép', '', '0', '500000', 'Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '1', 'ngoại trừ letan, quanly, admin', 'Không được hủy ngày hiện tại', '', 'ngoại trừ letan, quanly, admin'], ['10', 'Đi trễ phát sinh', 'Phát sinh', '', '0.5', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan, leader, nhanvien', 'Ngày hiện tại từ giờ', '9:00', '', '', '', ''], ['11', 'Về sớm CÓ phép', 'Có phép', '', '0.5', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '3', '', 'Trước N ngày', '3', ''], ['12', 'Về sớm KHÔNG phép', 'Không phép', '', '0', '300000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '1', 'ngoại trừ letan, quanly, admin', 'Không được hủy ngày hiện tại', '', 'ngoại trừ letan, quanly, admin'], ['13', 'Về sớm CUỐI TUẦN CÓ phép', 'Có phép', '', '0.5', '0', 'Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '3', '', 'Trước N ngày', '3', ''], ['14', 'Về sớm CUỐI TUẦN KHÔNG phép', 'Không phép', '', '0', '500000', 'Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, leader, nhanvien', 'Trước N ngày', '1', 'ngoại trừ letan, quanly, admin', 'Không được hủy ngày hiện tại', '', 'ngoại trừ letan, quanly, admin'], ['15', 'Về sớm phát sinh', 'Phát sinh', '', '0.5', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan, leader, nhanvien', 'Ngày hiện tại từ giờ', '9:00', '', '', '', ''], ['16', 'Đi trễ nhỏ hơn hoặc bằng 30 phút', 'Không phép', '', '0', '50000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['17', 'Đi trễ nhỏ hơn hoặc bằng 60 phút', 'Không phép', '', '0', '100000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['18', 'Đi trễ nhỏ hơn hoặc bằng 120 phút', 'Không phép', '', '0', '200000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['19', 'Đi trễ lớn hơn 120 phút', 'Không phép', '', '0', '300000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['20', 'KHÔNG dọn vệ sinh ca 1', 'Không phép', '', '0', '100000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['21', 'Hỗ trợ Ca 1 sau 23H đi trễ 2 tiếng', '', '', '0', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['22', 'Hỗ trợ Ca 1 sau 0:0H đi trễ 3 tiếng', '', '', '0', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['23', 'Hỗ trợ Ca 2 sau 0:0H đi trễ 1 tiếng', '', '', '0', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['24', 'Xin đi tua cuối', '', '', '0', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['25', 'Lỗi vi phạm khác', 'Không phép', 'Cần nhập số tiền phạt', '0', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['26', 'Qua tour KHÔNG phép', 'Không phép', '', '0', '300000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['27', 'Qua tour CUỐI TUẦN KHÔNG phép', 'Không phép', '', '0', '500000', 'Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['28', 'Xuống phòng trễ', 'Không phép', '', '0', '100000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['29', 'Cho khách ra sớm nhiều hơn 5 phút', 'Không phép', '', '0', '100000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['30', 'Ra ngoài vào muộn nhỏ hơn hoặc bằng 30 phút', 'Không phép', '', '0', '50000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['31', 'Ra ngoài vào muộn nhỏ hơn hoặc bằng 60 phút', 'Không phép', '', '0', '100000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['32', 'Ra ngoài vào muộn nhỏ hơn hoặc bằng 120 phút', 'Không phép', '', '0', '200000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['33', 'Ra ngoài vào muộn trên 120 phút', 'Không phép', '', '0', '300000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['34', 'Ra ngoài chỉ có dữ liệu một lần', 'Không phép', '', '0', '100000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['35', 'Nghỉ bệnh có giấy khám hoặc được quản lý duyệt', '', 'Nhập tay chi tiết vi phạm', '1', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['36', 'Về sớm bệnh có giấy khám hoặc được quản lý duyệt', '', 'Nhập tay chi tiết vi phạm', '0.5', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['37', 'Đi trễ bệnh có giấy khám hoặc được quản lý duyệt', '', 'Nhập tay chi tiết vi phạm', '0.5', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['38', 'Nghỉ đám hiếu', '', '', '0', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['39', 'Leader nghỉ phép theo chính sách', '', 'Nhập tay chi tiết vi phạm', '1', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['40', 'Leader về sớm về sớm theo chính sách', '', 'Nhập tay chi tiết vi phạm', '0.5', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['41', 'Leader đi trễ sớm theo chính sách', '', 'Nhập tay chi tiết vi phạm', '0.5', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['42', 'Xin ngưng nhận khách', '', '', '0', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu', 'admin, quanly, letan', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['43', 'Nghỉ Phép năm', 'Có phép', '', '1', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['44', 'Không check mặt', 'Không phép', '', '0', '100000', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan, auto update', 'Không giới hạn', '', '', 'Không giới hạn', '', ''], ['45', 'Nghỉ phép quay video', '', '', '0', '0', 'Thứ Hai, Thứ Ba, Thứ Tư, Thứ Nam, Thứ Sáu, Thứ Bẩy, Chủ Nhật', 'admin, quanly, letan', 'Không giới hạn', '', '', 'Không giới hạn', '', '']]
+
+
+def _embedded_loai_nghi_dataframe():
+    return pd.DataFrame(
+        [list(row) for row in EMBEDDED_LOAI_NGHI_ROWS],
+        columns=list(EMBEDDED_LOAI_NGHI_HEADERS),
+    )
+
+
+def _loai_nghi_payload_to_dataframe(payload):
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+    headers = payload.get("headers")
+    rows = payload.get("rows")
+    if not isinstance(headers, list) or not isinstance(rows, list):
+        return pd.DataFrame()
     try:
-        client = get_gspread_client()
-        if client:
-            sheet = client.open_by_key(SHEET_DU_PHONG_ID).worksheet("LoaiNghi")
-            rows = _gs_call_with_backoff(sheet.get_all_values)
-            if len(rows) > 1:
-                return pd.DataFrame(rows[1:], columns=rows[0])
+        width = len(headers)
+        normalized = []
+        for raw in rows:
+            vals = list(raw) if isinstance(raw, (list, tuple)) else []
+            vals = vals[:width] + [""] * max(0, width - len(vals))
+            normalized.append(vals)
+        return pd.DataFrame(normalized, columns=[str(x) for x in headers])
     except Exception:
-        pass
-    return pd.DataFrame()
+        return pd.DataFrame()
+
+
+def _loai_nghi_dataframe_to_payload(df, updated_by=""):
+    safe_df = df.copy().fillna("")
+    return {
+        "schema": "LoaiNghi_A_N_v2",
+        "headers": [str(x) for x in safe_df.columns.tolist()],
+        "rows": [
+            [str(v) if v is not None else "" for v in row]
+            for row in safe_df.astype(str).values.tolist()
+        ],
+        "updated_at": datetime.now(VN_TZ).isoformat(),
+        "updated_by": str(updated_by or ""),
+    }
+
+
+def _loai_nghi_header_lookup(df):
+    return {normalize_login_name(c): c for c in df.columns}
+
+
+def validate_loai_nghi_runtime_dataframe(df):
+    """Kiểm tra cấu trúc/rule trước khi cho snapshot mới thay thế bản đang chạy."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return False, ["Sheet LoaiNghi không có dữ liệu."]
+
+    lookup = _loai_nghi_header_lookup(df)
+    required_any = [
+        ["ly do nghi"],
+        ["loai nghi"],
+        ["so ngay tinh phep", "so ngay tinh"],
+        ["phat vi pham"],
+        ["chi nhap duoc cuoi tuan", "ngay duoc phep nhap", "ngay duoc nhap"],
+        ["user co quyen duoc nhap"],
+        ["kieu dang ky", "kieu dang ky"],  # chấp nhận cả Kiểu/Kiều sau normalize
+        ["gia tri", "gia tri dang ky"],
+        ["ngoai tru dang ky"],
+        ["kieu huy"],
+        ["so ngay huy truoc", "gia tri huy"],
+        ["ngoai tru huy"],
+    ]
+    missing = []
+    for aliases in required_any:
+        if not any(alias in lookup for alias in aliases):
+            missing.append("/".join(aliases))
+    if missing:
+        return False, ["Thiếu header bắt buộc: " + ", ".join(missing)]
+
+    errors = []
+    catalog = build_leave_reason_catalog(df)
+    if not catalog:
+        errors.append("Không tạo được Rule Catalog từ LoaiNghi.")
+        return False, errors
+
+    for item in catalog.values():
+        name = str(item.get("name", "") or "")
+        reg = _parse_leave_policy_rule(
+            item.get("register_type", ""),
+            item.get("register_value", ""),
+            "register",
+        )
+        cancel = _parse_leave_policy_rule(
+            item.get("cancel_type", ""),
+            item.get("cancel_value", ""),
+            "cancel",
+        )
+        if reg.get("mode") == "invalid":
+            errors.append(
+                f"{name}: Kiểu đăng ký '{item.get('register_type','')}' "
+                f"có Giá trị '{item.get('register_value','')}' không hợp lệ."
+            )
+        # Kiểu hủy có thể để trống có chủ đích đối với một số lý do phát sinh.
+        if item.get("cancel_type") and cancel.get("mode") == "invalid":
+            errors.append(
+                f"{name}: Kiểu hủy '{item.get('cancel_type','')}' "
+                f"có Giá trị '{item.get('cancel_value','')}' không hợp lệ."
+            )
+
+    return len(errors) == 0, errors
+
+
+def _fetch_loai_nghi_from_gsheet_once():
+    """Chỉ gọi khi Admin bấm Cập nhật qui định."""
+    client = get_gspread_client()
+    if not client:
+        raise RuntimeError("Không tạo được kết nối Google Sheets.")
+    sheet = client.open_by_key(SHEET_DU_PHONG_ID).worksheet("LoaiNghi")
+    rows = _gs_call_with_backoff(sheet.get_all_values)
+    if not rows or len(rows) < 2:
+        raise RuntimeError("Sheet LoaiNghi đang rỗng hoặc chưa có dữ liệu.")
+    width = len(rows[0])
+    normalized = [
+        list(r[:width]) + [""] * max(0, width - len(r))
+        for r in rows[1:]
+        if any(str(v).strip() for v in r)
+    ]
+    return pd.DataFrame(normalized, columns=[str(x) for x in rows[0]])
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_persistent_loai_nghi_snapshot():
+    """
+    Đọc snapshot PostgreSQL nhỏ, không đọc Google Sheet.
+    TTL 60s chỉ để các Cloud Run instance khác tự nhận rule mới trong tối đa 1 phút.
+    """
+    if vpg is None or not _vpg_is_enabled():
+        return pd.DataFrame()
+    read_fn = getattr(vpg, "read_setting", None)
+    if not callable(read_fn):
+        return pd.DataFrame()
+    try:
+        payload = read_fn(
+            LOAI_NGHI_RULE_SETTING_CATEGORY,
+            LOAI_NGHI_RULE_SETTING_KEY,
+            default=None,
+        )
+        return _loai_nghi_payload_to_dataframe(payload)
+    except Exception:
+        return pd.DataFrame()
+
+
+def load_runtime_loai_nghi():
+    """
+    Không gọi Google Sheet.
+    Phiên vừa bấm cập nhật dùng override ngay; các phiên khác dùng PostgreSQL,
+    cuối cùng fallback về quy định đóng sẵn trong app.py.
+    """
+    session_payload = st.session_state.get("_loai_nghi_runtime_override_v92631")
+    session_df = _loai_nghi_payload_to_dataframe(session_payload)
+    if isinstance(session_df, pd.DataFrame) and not session_df.empty:
+        return session_df
+
+    pg_df = _load_persistent_loai_nghi_snapshot()
+    if isinstance(pg_df, pd.DataFrame) and not pg_df.empty:
+        return pg_df
+
+    return _embedded_loai_nghi_dataframe()
+
+
+def refresh_loai_nghi_rules_now():
+    """
+    Sửa LoaiNghi -> bấm Cập nhật qui định -> xong.
+
+    1) đọc Google Sheet đúng 1 lần;
+    2) kiểm tra cấu trúc + Rule Engine;
+    3) lưu snapshot vào PostgreSQL nếu khả dụng;
+    4) áp dụng ngay trong phiên hiện tại;
+    5) không đọc lại Google Sheet ở các thao tác bình thường.
+    """
+    if str(st.session_state.get("current_role", "") or "").strip().lower() != "admin":
+        st.error("❌ Chỉ Admin được Cập nhật qui định.")
+        return
+
+    try:
+        with st.spinner("Đang đọc LoaiNghi và kiểm tra qui định mới..."):
+            fresh_df = _fetch_loai_nghi_from_gsheet_once()
+
+        ok, errors = validate_loai_nghi_runtime_dataframe(fresh_df)
+        if not ok:
+            st.error("❌ Không cập nhật vì LoaiNghi có cấu hình chưa hợp lệ.")
+            for msg in errors[:12]:
+                st.error(f"• {msg}")
+            return
+
+        actor = str(st.session_state.get("current_user", "") or "admin").strip()
+        payload = _loai_nghi_dataframe_to_payload(fresh_df, updated_by=actor)
+
+        persisted = False
+        persist_message = ""
+        if vpg is not None and _vpg_is_enabled():
+            write_fn = getattr(vpg, "write_setting", None)
+            if callable(write_fn):
+                try:
+                    write_fn(
+                        LOAI_NGHI_RULE_SETTING_CATEGORY,
+                        LOAI_NGHI_RULE_SETTING_KEY,
+                        payload,
+                        updated_by=actor,
+                        source="google_sheet_button",
+                    )
+                    persisted = True
+                except Exception as exc:
+                    persist_message = str(exc)
+
+        # Áp dụng ngay cho phiên Admin hiện tại dù DB đang tạm lỗi.
+        st.session_state["_loai_nghi_runtime_override_v92631"] = payload
+        try:
+            _load_persistent_loai_nghi_snapshot.clear()
+        except Exception:
+            pass
+        try:
+            load_leave_daily_quota_config.clear()
+        except Exception:
+            pass
+        try:
+            _clear_leave_data_caches()
+        except Exception:
+            pass
+
+        st.session_state["_loai_nghi_refresh_result_v92631"] = {
+            "ok": True,
+            "rows": len(fresh_df),
+            "persisted": persisted,
+            "persist_message": persist_message,
+        }
+        rerun_current_view()
+    except Exception as exc:
+        st.error(f"❌ Không cập nhật được qui định: {exc}")
+
+
+def render_refresh_loai_nghi_button(key, use_container_width=True):
+    """Nút chỉ hiển thị cho Admin."""
+    if str(st.session_state.get("current_role", "") or "").strip().lower() != "admin":
+        return
+    if st.button(
+        "🔄 Cập nhật qui định",
+        use_container_width=use_container_width,
+        key=key,
+        help=(
+            "Chỉ khi bấm nút này app mới đọc sheet LoaiNghi. "
+            "Sau đó toàn hệ thống dùng snapshot đã lưu, không đọc Google Sheet mỗi lần nhập lịch."
+        ),
+    ):
+        refresh_loai_nghi_rules_now()
+
 
 # --- GHI VÀ XÓA LỊCH ---
 def _next_data_row_a_to_m(sheet):
@@ -9642,11 +9894,18 @@ def is_employee_khong_phep_leave_reason(value):
     return bool(key and "khong phep" in key)
 
 
+def _reason_is_unlimited_for_weekend_limit(reason):
+    """
+    V92.6.29:
+    Mọi Lý do nghỉ có chữ 'KHÔNG phép' không chịu giới hạn số lần nghỉ cuối tuần/tháng.
+    """
+    return is_employee_khong_phep_leave_reason(reason)
+
+
 def _weekend_registration_count_by_month(all_leave_df, employee_name, year, month):
     """
-    Đếm số NGÀY cuối tuần đã đăng ký của một nhân viên trong tháng.
-    Cuối tuần = Thứ 7 (weekday=5) + Chủ nhật (weekday=6).
-    Mỗi ngày cuối tuần = 1 lần. Không đếm trùng cùng ngày nếu dữ liệu nguồn bị lặp.
+    Đếm số ngày cuối tuần đã đăng ký của nhân viên trong tháng,
+    nhưng KHÔNG tính các lý do có chữ 'KHÔNG phép' và Nghỉ phép quay video.
     """
     if not isinstance(all_leave_df, pd.DataFrame) or all_leave_df.empty:
         return 0
@@ -9654,6 +9913,15 @@ def _weekend_registration_count_by_month(all_leave_df, employee_name, year, mont
         return 0
 
     d = all_leave_df.copy()
+    if "Lý do nghỉ" in d.columns:
+        d = d[
+            ~d["Lý do nghỉ"].astype(str).apply(_reason_is_unlimited_for_weekend_limit)
+            & ~d["Lý do nghỉ"].astype(str).apply(is_video_leave_reason)
+        ].copy()
+
+    if d.empty:
+        return 0
+
     d["__date"] = d["Ngày"].apply(_parse_vn_date)
     emp_key = normalize_login_name(employee_name)
     d["__emp"] = d["Tên nhân viên"].apply(normalize_login_name)
@@ -9673,12 +9941,19 @@ def _validate_monthly_weekend_registration_limit(
     employee_name,
     start_date,
     end_date,
+    reason="",
     max_weekend_dates=2,
 ):
     """
-    Mỗi nhân viên tối đa 2 lần/ngày cuối tuần trong MỖI tháng.
-    Nếu đăng ký nhiều ngày/range, kiểm tra riêng từng tháng.
+    Giới hạn cuối tuần theo tháng.
+
+    - Lý do nghỉ có chữ 'KHÔNG phép' => KHÔNG giới hạn số lần.
+    - Các bản ghi KHÔNG phép đã có cũng không chiếm quota cuối tuần.
+    - Các lý do khác vẫn giữ giới hạn cũ.
     """
+    if _reason_is_unlimited_for_weekend_limit(reason):
+        return True, ""
+
     selected_weekends = []
     current = start_date
     while current <= end_date:
@@ -9693,15 +9968,21 @@ def _validate_monthly_weekend_registration_limit(
     for d in selected_weekends:
         by_month.setdefault((d.year, d.month), set()).add(d)
 
+    quota_df = all_leave_df.copy() if isinstance(all_leave_df, pd.DataFrame) else pd.DataFrame()
+    if isinstance(quota_df, pd.DataFrame) and not quota_df.empty and "Lý do nghỉ" in quota_df.columns:
+        quota_df = quota_df[
+            ~quota_df["Lý do nghỉ"].astype(str).apply(_reason_is_unlimited_for_weekend_limit)
+            & ~quota_df["Lý do nghỉ"].astype(str).apply(is_video_leave_reason)
+        ].copy()
+
     for (year, month), selected_dates in sorted(by_month.items()):
         existing_count = _weekend_registration_count_by_month(
-            all_leave_df, employee_name, year, month
+            quota_df, employee_name, year, month
         )
 
-        # Không cộng lại ngày đã tồn tại; quy tắc daily duplicate sẽ xử lý chi tiết.
         existing_dates = set()
-        if isinstance(all_leave_df, pd.DataFrame) and not all_leave_df.empty:
-            tmp = all_leave_df.copy()
+        if isinstance(quota_df, pd.DataFrame) and not quota_df.empty:
+            tmp = quota_df.copy()
             if "Ngày" in tmp.columns and "Tên nhân viên" in tmp.columns:
                 tmp["__date"] = tmp["Ngày"].apply(_parse_vn_date)
                 tmp["__emp"] = tmp["Tên nhân viên"].apply(normalize_login_name)
@@ -9723,7 +10004,7 @@ def _validate_monthly_weekend_registration_limit(
             dates_txt = ", ".join(sorted(d.strftime("%d/%m/%Y") for d in selected_dates))
             return False, (
                 f"Nhân viên {employee_name} chỉ được đăng ký tối đa {max_weekend_dates} lần cuối tuần "
-                f"trong tháng {month:02d}/{year}. "
+                f"trong tháng {month:02d}/{year} đối với các lý do chịu giới hạn. "
                 f"Đã có {existing_count} lần; đăng ký này có ngày cuối tuần: {dates_txt}."
             )
 
@@ -18319,16 +18600,32 @@ if isinstance(df_credentials, pd.DataFrame) and not df_credentials.empty and 'T�
         __employee_sort=df_credentials['Tên nhân viên'].astype(str).apply(normalize_login_name)
     ).sort_values('__employee_sort', kind='stable').drop(columns='__employee_sort').reset_index(drop=True)
 df_backup = load_backup_sheet_data()
-df_loai_nghi_gsheet = load_loai_nghi_from_gsheet()
+
+# V92.6.31:
+# Không đọc Google Sheet LoaiNghi khi app chạy bình thường.
+# Dùng snapshot PostgreSQL hoặc bản embedded trong app.py.
+df_loai_nghi_runtime = load_runtime_loai_nghi()
 
 # V92.6.15: NGƯNG nguồn file LichNghi cũ và nguồn Google Sheet lịch nghỉ phụ.
-# Lịch nghỉ CHỈ lấy từ SHEET_DU_PHONG_ID; danh sách nhân viên từ Sheet tài khoản;
-# LoaiNghi chỉ lấy từ Google Sheet chính.
 _LEAVE_COLS = LEAVE_DATA_COLUMNS.copy()
-df_lich = pd.DataFrame(columns=_LEAVE_COLS)  # giữ biến tương thích code cũ nhưng KHÔNG có dữ liệu file.
+df_lich = pd.DataFrame(columns=_LEAVE_COLS)
 df_nv_excel = pd.DataFrame(columns=["Tên nhân viên"])
 df_loai_nghi_excel = pd.DataFrame()
-df_loai_nghi = df_loai_nghi_gsheet.copy()
+df_loai_nghi = df_loai_nghi_runtime.copy()
+
+_refresh_result = st.session_state.pop("_loai_nghi_refresh_result_v92631", None)
+if isinstance(_refresh_result, dict) and _refresh_result.get("ok"):
+    _rows = int(_refresh_result.get("rows", 0) or 0)
+    if _refresh_result.get("persisted"):
+        st.success(
+            f"✅ Đã cập nhật qui định · {_rows} lý do nghỉ. "
+            "Quy định mới đã lưu vào PostgreSQL và đang có hiệu lực."
+        )
+    else:
+        st.warning(
+            f"⚠️ Đã áp dụng {_rows} lý do nghỉ cho phiên hiện tại nhưng chưa lưu được PostgreSQL. "
+            "Nếu Cloud Run khởi động lại, hệ thống sẽ quay về bản quy định embedded."
+        )
 
 # V71: áp dụng giao diện mặc định đã lưu cho cả màn hình đăng nhập và toàn bộ trang chức năng.
 _ui_theme_cfg, _ui_theme_err = load_ui_theme_config()
@@ -18609,9 +18906,6 @@ if not _credentials_dataframe_is_valid(df_credentials):
             pass
         rerun_current_view()
     st.stop()
-
-if df_loai_nghi.empty:
-    st.warning("⚠️ Chưa đọc được sheet LoaiNghi trên Google Sheet. Các chức năng chọn lý do nghỉ có thể tạm thời chưa đầy đủ.")
 
 # --- ĐĂNG NHẬP ---
 if "logged_in" not in st.session_state:
@@ -25198,6 +25492,13 @@ elif selected_page == "🧭 Bảng tour":
     render_bang_tour_fast_v920()
 
 elif selected_page == "📅 Đăng ký nghỉ phép":
+    _leave_title_col, _leave_refresh_col = st.columns([4, 1])
+    with _leave_refresh_col:
+        render_refresh_loai_nghi_button(
+            "refresh_loai_nghi_registration_v92631",
+            use_container_width=True,
+        )
+
     _can_leave_create = action_access("leave_create")
     _can_leave_export = action_access("leave_export")
     _can_leave_email = action_access("leave_email")
@@ -25631,9 +25932,9 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                                 st.error("❌ Bắt buộc nhập Chi tiết vi phạm / Ghi chú đối với 'Nghỉ lý do khác'.")
                                 can_proceed = False
 
-                            # V88.2 - GIỚI HẠN CUỐI TUẦN:
-                            # Mỗi nhân viên tối đa 2 NGÀY đăng ký cuối tuần / tháng.
-                            # Cuối tuần gồm cả Thứ 7 và Chủ nhật.
+                            # V92.6.29 - GIỚI HẠN CUỐI TUẦN:
+                            # Mọi Lý do nghỉ có chữ KHÔNG phép: không giới hạn số lần.
+                            # Các lý do khác vẫn giữ giới hạn tối đa 2 ngày cuối tuần/tháng.
                             if can_proceed:
                                 _weekend_all_sources = _load_live_leave_registration_for_validation(
                                     [df_backup]
@@ -25643,6 +25944,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                                     chosen_nv,
                                     start_date,
                                     end_date,
+                                    reason=chosen_loai,
                                     max_weekend_dates=2,
                                 )
                                 if not _weekend_ok:
@@ -26879,6 +27181,13 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
 
 
 elif selected_page == "✏️ Quản lý lịch nghỉ":
+    _manage_title_col, _manage_refresh_col = st.columns([4, 1])
+    with _manage_refresh_col:
+        render_refresh_loai_nghi_button(
+            "refresh_loai_nghi_manage_v92631",
+            use_container_width=True,
+        )
+
     _can_manage_edit_action = action_access("leave_manage_edit")
     _can_manage_delete_action = action_access("leave_manage_delete")
     st.subheader("✏️ Quản lý lịch nghỉ")

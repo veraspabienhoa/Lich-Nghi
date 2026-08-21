@@ -1,4 +1,4 @@
-# V92.6.62 - Fix ô Lý do nghỉ/Loại nghỉ lịch sử hiển thị trắng trong Data Editor (2026-08-22)
+# V92.6.63 - Audit Log toàn bộ thao tác Lịch nghỉ + bộ lọc Admin + Export Excel (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -4079,6 +4079,459 @@ def _admin_leave_audit_notice_message(item):
     )
 
 
+# ==========================================================
+# V92.6.63 - AUDIT LOG TOÀN BỘ THAO TÁC LỊCH NGHỈ
+# - Lưu riêng vào worksheet NhatKyLichNghi trong file Google Sheet chính.
+# - Ghi Đăng ký / Sửa / Xóa / Tự tính lại / Đồng bộ của mọi user và Auto Update.
+# - Chỉ Admin được xem bộ công cụ log trên web.
+# - Log không được phép làm hỏng nghiệp vụ chính: lỗi ghi log chỉ trả False và bị bỏ qua.
+# ==========================================================
+LEAVE_ACTIVITY_LOG_WORKSHEET = "NhatKyLichNghi"
+LEAVE_ACTIVITY_LOG_HEADERS = [
+    "ID",
+    "Thời điểm VN",
+    "Ngày thao tác",
+    "Giờ thao tác",
+    "Hành động",
+    "Trạng thái",
+    "Tài khoản thao tác",
+    "Vai trò",
+    "Nguồn thao tác",
+    "Tên nhân viên",
+    "Ngày lịch nghỉ",
+    "Lý do trước",
+    "Lý do sau",
+    "Loại trước",
+    "Loại sau",
+    "Số ngày trước",
+    "Số ngày sau",
+    "Phạt trước",
+    "Phạt sau",
+    "Người Thứ trước",
+    "Người Thứ sau",
+    "Trường thay đổi",
+    "Ghi chú",
+    "Dữ liệu trước (JSON)",
+    "Dữ liệu sau (JSON)",
+]
+
+
+def _leave_activity_log_ws():
+    """Tạo/đọc worksheet audit. Không dùng sheet lịch chính để tránh trộn dữ liệu."""
+    client = get_gspread_client()
+    if not client:
+        return None
+    ss = client.open_by_key(SHEET_DU_PHONG_ID)
+    ws = _get_or_create_worksheet(
+        ss,
+        LEAVE_ACTIVITY_LOG_WORKSHEET,
+        rows=20000,
+        cols=len(LEAVE_ACTIVITY_LOG_HEADERS),
+    )
+    try:
+        header = _gs_call_with_backoff(ws.row_values, 1)
+        if header[:len(LEAVE_ACTIVITY_LOG_HEADERS)] != LEAVE_ACTIVITY_LOG_HEADERS:
+            end_col = _excel_column_letter_v92663(len(LEAVE_ACTIVITY_LOG_HEADERS))
+            gspread_update_range(
+                ws,
+                f"A1:{end_col}1",
+                [LEAVE_ACTIVITY_LOG_HEADERS],
+            )
+    except Exception:
+        pass
+    return ws
+
+
+def _excel_column_letter_v92663(number):
+    """1 -> A, 26 -> Z, 27 -> AA; tránh phụ thuộc openpyxl cho thao tác Google Sheet."""
+    try:
+        n = max(1, int(number))
+    except Exception:
+        n = 1
+    out = ""
+    while n:
+        n, rem = divmod(n - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+def _leave_activity_actor_role(actor, explicit_role=None):
+    role = str(explicit_role or "").strip().lower()
+    if role:
+        return role
+
+    actor_text = str(actor or "").strip()
+    actor_norm = normalize_login_name(actor_text)
+    if "auto update" in actor_norm or actor_norm in {"he thong", "system"}:
+        return "system"
+
+    try:
+        current_user = str(st.session_state.get("current_user", "") or "").strip()
+        if actor_norm and actor_norm == normalize_login_name(current_user):
+            return str(st.session_state.get("current_role", "") or "").strip().lower()
+    except Exception:
+        pass
+
+    try:
+        creds = load_credentials_recent()
+        if isinstance(creds, pd.DataFrame) and not creds.empty:
+            for _, row in creds.iterrows():
+                if normalize_login_name(row.get("Tên nhân viên", "")) == actor_norm:
+                    return str(row.get("Phân quyền", "") or "").strip().lower()
+    except Exception:
+        pass
+    return ""
+
+
+def _leave_activity_source(source=None, actor=None):
+    if str(source or "").strip():
+        return str(source).strip()
+    actor_norm = normalize_login_name(actor or "")
+    if "auto update" in actor_norm:
+        return "Auto Update"
+    try:
+        page = str(st.session_state.get("app_page", "") or "").strip()
+        if page:
+            return page
+    except Exception:
+        pass
+    return "Hệ thống"
+
+
+def _leave_activity_changed_fields(before, after):
+    before = before or {}
+    after = after or {}
+    fields = [
+        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Loại nghỉ", "Chi tiết",
+        "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
+        "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật",
+    ]
+    changed = []
+    for field in fields:
+        a = before.get(field, "")
+        b = after.get(field, "")
+        try:
+            if pd.isna(a):
+                a = ""
+        except Exception:
+            pass
+        try:
+            if pd.isna(b):
+                b = ""
+        except Exception:
+            pass
+        if str(a).strip() != str(b).strip():
+            changed.append(field)
+    return ", ".join(changed)
+
+
+def _leave_activity_ordinal(snapshot):
+    if not snapshot:
+        return ""
+    value = _extract_progressive_ordinal(snapshot.get("Chi tiết", ""))
+    return value if value is not None else ""
+
+
+def write_leave_activity_log(
+    action,
+    actor,
+    before_row=None,
+    after_row=None,
+    actor_role=None,
+    source=None,
+    status="SUCCESS",
+    note="",
+):
+    """Ghi 1 sự kiện audit. Tuyệt đối không raise lỗi ra nghiệp vụ chính."""
+    try:
+        ws = _leave_activity_log_ws()
+        if ws is None:
+            return False, "Không kết nối được worksheet Nhật ký lịch nghỉ."
+
+        before = _leave_audit_snapshot(before_row)
+        after = _leave_audit_snapshot(after_row)
+        now = datetime.now(VN_TZ)
+        actor_text = str(actor or "Hệ thống").strip() or "Hệ thống"
+        role = _leave_activity_actor_role(actor_text, actor_role)
+        source_text = _leave_activity_source(source, actor_text)
+
+        employee = str(
+            after.get("Tên nhân viên", "")
+            or before.get("Tên nhân viên", "")
+        ).strip()
+        leave_date = str(after.get("Ngày", "") or before.get("Ngày", "")).strip()
+        changed_fields = _leave_activity_changed_fields(before, after)
+
+        raw_id = "|".join([
+            now.isoformat(), str(action), actor_text, employee, leave_date,
+            json.dumps(before, ensure_ascii=False, sort_keys=True, default=str),
+            json.dumps(after, ensure_ascii=False, sort_keys=True, default=str),
+            secrets.token_hex(4),
+        ])
+        event_id = hashlib.sha1(raw_id.encode("utf-8")).hexdigest()[:24]
+
+        row = [
+            event_id,
+            now.strftime("%d/%m/%Y %H:%M:%S"),
+            now.strftime("%d/%m/%Y"),
+            now.strftime("%H:%M:%S"),
+            str(action or "").strip(),
+            str(status or "SUCCESS").strip().upper(),
+            actor_text,
+            role,
+            source_text,
+            employee,
+            leave_date,
+            str(before.get("Lý do nghỉ", "") or ""),
+            str(after.get("Lý do nghỉ", "") or ""),
+            str(before.get("Loại nghỉ", "") or ""),
+            str(after.get("Loại nghỉ", "") or ""),
+            before.get("Số ngày tính", ""),
+            after.get("Số ngày tính", ""),
+            before.get("Phạt vi phạm", ""),
+            after.get("Phạt vi phạm", ""),
+            _leave_activity_ordinal(before),
+            _leave_activity_ordinal(after),
+            changed_fields,
+            str(note or "").strip(),
+            json.dumps(before, ensure_ascii=False, default=str),
+            json.dumps(after, ensure_ascii=False, default=str),
+        ]
+        _gs_call_with_backoff(
+            ws.append_row,
+            row,
+            value_input_option="USER_ENTERED",
+        )
+        try:
+            load_leave_activity_log.clear()
+        except Exception:
+            pass
+        return True, "Đã ghi Nhật ký lịch nghỉ."
+    except Exception as e:
+        return False, f"Không ghi được Nhật ký lịch nghỉ: {e}"
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def load_leave_activity_log():
+    """Đọc toàn bộ audit log; newest-first ở UI."""
+    try:
+        ws = _leave_activity_log_ws()
+        if ws is None:
+            return pd.DataFrame(columns=LEAVE_ACTIVITY_LOG_HEADERS)
+        values = _gs_call_with_backoff(ws.get_all_values)
+        if len(values) <= 1:
+            return pd.DataFrame(columns=LEAVE_ACTIVITY_LOG_HEADERS)
+        rows = []
+        for raw in values[1:]:
+            vals = list(raw[:len(LEAVE_ACTIVITY_LOG_HEADERS)])
+            vals += [""] * max(0, len(LEAVE_ACTIVITY_LOG_HEADERS) - len(vals))
+            if any(str(v).strip() for v in vals):
+                rows.append(vals)
+        return pd.DataFrame(rows, columns=LEAVE_ACTIVITY_LOG_HEADERS)
+    except Exception:
+        return pd.DataFrame(columns=LEAVE_ACTIVITY_LOG_HEADERS)
+
+
+def _leave_activity_export_xlsx(df):
+    """
+    Export nhật ký theo đúng yêu cầu:
+    - header có màu + chữ trắng đậm;
+    - AutoFilter;
+    - freeze dòng title;
+    - fit/cap độ rộng cột.
+    """
+    output = io.BytesIO()
+    export_df = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        _excel_safe_dataframe_v92654(export_df).to_excel(
+            writer,
+            index=False,
+            sheet_name="NhatKyLichNghi",
+        )
+        _style_snapshot_excel_v92657(writer)
+    return output.getvalue()
+
+
+def render_leave_activity_log_admin():
+    """Bộ công cụ nhật ký chỉ Admin được nhìn thấy và sử dụng."""
+    if str(st.session_state.get("current_role", "") or "").strip().lower() != "admin":
+        st.error("Chỉ Admin được phép xem Nhật ký lịch nghỉ.")
+        return
+
+    st.subheader("🧾 Nhật ký thao tác lịch nghỉ")
+    st.caption(
+        "Ghi lại các thao tác Đăng ký, Sửa, Xóa, Tự tính lại và Đồng bộ lịch nghỉ. "
+        "Nhật ký được lưu riêng và không làm thay đổi dữ liệu lịch nghỉ chính."
+    )
+
+    left, right = st.columns([4, 1])
+    with right:
+        if st.button("🔄 Làm mới log", use_container_width=True, key="leave_audit_refresh_v92663"):
+            try:
+                load_leave_activity_log.clear()
+            except Exception:
+                pass
+            rerun_current_view()
+
+    log_df = load_leave_activity_log()
+    if not isinstance(log_df, pd.DataFrame) or log_df.empty:
+        st.info("Chưa có dữ liệu Nhật ký lịch nghỉ. Log mới sẽ bắt đầu được ghi từ phiên bản V92.6.63.")
+        return
+
+    d = log_df.copy()
+    d["__date"] = pd.to_datetime(d["Ngày thao tác"], errors="coerce", dayfirst=True).dt.date
+    today = get_vn_today()
+
+    f1, f2, f3, f4 = st.columns([1.4, 2.2, 1.6, 1.8])
+    with f1:
+        preset = st.selectbox(
+            "Lọc thời gian",
+            ["Hôm nay", "7 ngày gần nhất", "30 ngày gần nhất", "Tháng này", "Tất cả", "Tùy chỉnh"],
+            index=1,
+            key="leave_audit_time_preset_v92663",
+        )
+
+    if preset == "Hôm nay":
+        start_date = end_date = today
+    elif preset == "7 ngày gần nhất":
+        start_date, end_date = today - timedelta(days=6), today
+    elif preset == "30 ngày gần nhất":
+        start_date, end_date = today - timedelta(days=29), today
+    elif preset == "Tháng này":
+        start_date, end_date = today.replace(day=1), today
+    elif preset == "Tất cả":
+        valid_dates = [x for x in d["__date"].dropna().tolist() if isinstance(x, date)]
+        start_date = min(valid_dates) if valid_dates else today
+        end_date = max(valid_dates) if valid_dates else today
+    else:
+        with f2:
+            custom_range = st.date_input(
+                "Khoảng ngày",
+                value=(today - timedelta(days=6), today),
+                format="DD/MM/YYYY",
+                key="leave_audit_custom_range_v92663",
+            )
+        if isinstance(custom_range, (tuple, list)) and len(custom_range) >= 2:
+            start_date, end_date = custom_range[0], custom_range[1]
+        elif isinstance(custom_range, (tuple, list)) and len(custom_range) == 1:
+            start_date = end_date = custom_range[0]
+        else:
+            start_date = end_date = custom_range or today
+
+    if preset != "Tùy chỉnh":
+        with f2:
+            st.caption(f"📅 {start_date.strftime('%d/%m/%Y')} → {end_date.strftime('%d/%m/%Y')}")
+
+    action_values = sorted(
+        [str(x).strip() for x in d["Hành động"].dropna().unique().tolist() if str(x).strip()]
+    )
+    actor_values = sorted(
+        [str(x).strip() for x in d["Tài khoản thao tác"].dropna().unique().tolist() if str(x).strip()],
+        key=normalize_login_name,
+    )
+    employee_values = sorted(
+        [str(x).strip() for x in d["Tên nhân viên"].dropna().unique().tolist() if str(x).strip()],
+        key=normalize_login_name,
+    )
+
+    with f3:
+        action_filter = st.selectbox(
+            "Hành động",
+            ["Tất cả"] + action_values,
+            key="leave_audit_action_filter_v92663",
+        )
+    with f4:
+        actor_filter = st.selectbox(
+            "User thao tác",
+            ["Tất cả"] + actor_values,
+            key="leave_audit_actor_filter_v92663",
+            filter_mode="contains",
+        )
+
+    f5, f6 = st.columns([2.0, 3.0])
+    with f5:
+        employee_filter = st.selectbox(
+            "Nhân viên bị tác động",
+            ["Tất cả"] + employee_values,
+            key="leave_audit_employee_filter_v92663",
+            filter_mode="contains",
+        )
+    with f6:
+        text_filter = st.text_input(
+            "Tìm trong lý do / ghi chú / trường thay đổi",
+            key="leave_audit_text_filter_v92663",
+            placeholder="Nhập từ khóa...",
+        ).strip()
+
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    mask_date = d["__date"].apply(
+        lambda x: isinstance(x, date) and start_date <= x <= end_date
+    )
+    filtered = d[mask_date].copy()
+    if action_filter != "Tất cả":
+        filtered = filtered[filtered["Hành động"].astype(str).eq(action_filter)].copy()
+    if actor_filter != "Tất cả":
+        filtered = filtered[filtered["Tài khoản thao tác"].astype(str).eq(actor_filter)].copy()
+    if employee_filter != "Tất cả":
+        filtered = filtered[filtered["Tên nhân viên"].astype(str).eq(employee_filter)].copy()
+    if text_filter:
+        key = normalize_login_name(text_filter)
+        search_cols = [
+            "Lý do trước", "Lý do sau", "Ghi chú", "Trường thay đổi",
+            "Nguồn thao tác", "Loại trước", "Loại sau",
+        ]
+        text_series = filtered[search_cols].fillna("").astype(str).agg(" | ".join, axis=1)
+        filtered = filtered[
+            text_series.apply(lambda v: key in normalize_login_name(v))
+        ].copy()
+
+    # Mới nhất lên đầu. __date chỉ là cột kỹ thuật, không hiển thị/export.
+    filtered["__dt"] = pd.to_datetime(
+        filtered["Thời điểm VN"], errors="coerce", dayfirst=True
+    )
+    filtered = filtered.sort_values("__dt", ascending=False, na_position="last", kind="stable")
+    filtered = filtered.drop(columns=["__date", "__dt"], errors="ignore")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Tổng thao tác", len(filtered))
+    m2.metric("Đăng ký", int(filtered["Hành động"].astype(str).eq("ĐĂNG KÝ").sum()))
+    m3.metric("Sửa", int(filtered["Hành động"].astype(str).eq("SỬA").sum()))
+    m4.metric("Xóa", int(filtered["Hành động"].astype(str).eq("XÓA").sum()))
+
+    export_bytes = _leave_activity_export_xlsx(filtered)
+    st.download_button(
+        "📥 Export Nhật ký lịch nghỉ · Excel",
+        data=export_bytes,
+        file_name=f"VERA_NHAT_KY_LICH_NGHI_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="leave_audit_export_v92663",
+        disabled=filtered.empty,
+    )
+
+    if filtered.empty:
+        st.info("Không có log phù hợp với bộ lọc đã chọn.")
+        return
+
+    preferred = [
+        "Thời điểm VN", "Hành động", "Trạng thái", "Tài khoản thao tác", "Vai trò",
+        "Nguồn thao tác", "Tên nhân viên", "Ngày lịch nghỉ",
+        "Lý do trước", "Lý do sau", "Loại trước", "Loại sau",
+        "Số ngày trước", "Số ngày sau", "Phạt trước", "Phạt sau",
+        "Người Thứ trước", "Người Thứ sau", "Trường thay đổi", "Ghi chú",
+    ]
+    view_cols = [c for c in preferred if c in filtered.columns]
+    st.dataframe(
+        filtered[view_cols],
+        hide_index=True,
+        width="stretch",
+        height=620,
+    )
+
+
+
 def gspread_update_range(sheet, range_name, values, **kwargs):
     """Tương thích cả gspread 5.x (range trước) và 6.x (values trước)."""
     try:
@@ -4774,6 +5227,13 @@ def admin_sync_excel_to_gsheet_overwrite():
         if values:
             last_row = len(values) + 1
             gspread_update_range(sheet_dp, f'A2:M{last_row}', values, value_input_option='USER_ENTERED')
+        write_leave_activity_log(
+            "ĐỒNG BỘ GHI ĐÈ",
+            st.session_state.get("current_user", "Admin"),
+            actor_role=st.session_state.get("current_role", "admin"),
+            source="Đồng bộ Excel → Google Sheet",
+            note=f"Ghi đè A2:M; nạp {len(values)} dòng từ Excel.",
+        )
         _clear_dynamic_data_caches()
         return True, f"Phiên bản 1 hoàn tất: đã GHI ĐÈ vùng A2:M và chuyển {len(values)} dòng Excel cũ sang schema mới."
     except Exception as e:
@@ -4813,6 +5273,13 @@ def admin_sync_excel_to_gsheet_append():
         target_row = _next_data_row_a_to_m(sheet_dp)
         end_row = target_row + len(rows) - 1
         gspread_update_range(sheet_dp, f'A{target_row}:M{end_row}', rows, value_input_option='USER_ENTERED')
+        write_leave_activity_log(
+            "ĐỒNG BỘ THÊM MỚI",
+            st.session_state.get("current_user", "Admin"),
+            actor_role=st.session_state.get("current_role", "admin"),
+            source="Đồng bộ Excel → Google Sheet",
+            note=f"Thêm {len(rows)} dòng mới vào A{target_row}:M{end_row}.",
+        )
         _clear_dynamic_data_caches()
         return True, f"Phiên bản 2 hoàn tất: đã thêm {len(rows)} dòng mới vào A{target_row}:M{end_row}; không ghi đè dữ liệu cũ."
     except Exception as e:
@@ -8445,6 +8912,15 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         target_row = _next_data_row_a_to_m(sheet_dp)
         gspread_update_range(sheet_dp, f"A{target_row}:M{target_row}", [row_values], value_input_option='USER_ENTERED')
 
+        # V92.6.63: mọi đăng ký (user hoặc Auto Update) đều ghi Audit Log.
+        write_leave_activity_log(
+            "ĐĂNG KÝ",
+            updated_by,
+            before_row=None,
+            after_row=record,
+            note=(ordinal_note if ordinal_note else "Đăng ký lịch nghỉ"),
+        )
+
         _clear_leave_data_caches()
         if ordinal_note:
             extra = max(0, save_penalty - float(phat_vi_pham or 0))
@@ -8463,6 +8939,7 @@ def delete_backup_row(row_index_1_based, updated_by=None):
         sheet_headers = _get_leave_sheet_headers(sheet, strict=True)
         row_values = sheet.get(f'A{row_index_1_based}:M{row_index_1_based}')
         affected_groups = set()
+        deleted_row = None
         if row_values and row_values[0]:
             deleted_row = _leave_sheet_row_to_record(row_values[0], sheet_headers)
             deleted_row['__source_sheet_id'] = SHEET_DU_PHONG_ID
@@ -8473,6 +8950,11 @@ def delete_backup_row(row_index_1_based, updated_by=None):
 
         sheet.delete_rows(row_index_1_based)
         rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor) if affected_groups else 0
+        if deleted_row is not None:
+            write_leave_activity_log(
+                "XÓA", actor, before_row=deleted_row, after_row=None,
+                note=f"Xóa trực tiếp dòng Google Sheet {row_index_1_based}."
+            )
         _clear_leave_data_caches()
         if rebalanced:
             return True, f"Đã xóa lịch nghỉ và tự xếp lại thứ tự/phạt cho {rebalanced} bản ghi còn lại."
@@ -11267,6 +11749,24 @@ def rebalance_progressive_penalty_groups(client, affected_groups, updated_by):
             )
             updated_physical_rows += 1
 
+            # Chỉ tạo log TỰ TÍNH LẠI khi Người Thứ/Chi tiết hoặc tiền phạt thật sự đổi.
+            _reb_before_detail = str(physical.get("Chi tiết", "") or "")
+            _reb_after_detail = str(updated_record.get("Chi tiết", "") or "")
+            _reb_before_penalty = _parse_leave_number(physical.get("Phạt vi phạm", 0), 0.0, money=True)
+            _reb_after_penalty = _parse_leave_number(updated_record.get("Phạt vi phạm", 0), 0.0, money=True)
+            if (
+                _reb_before_detail != _reb_after_detail
+                or abs(float(_reb_before_penalty) - float(_reb_after_penalty)) > 1e-9
+            ):
+                write_leave_activity_log(
+                    "TỰ TÍNH LẠI",
+                    actor,
+                    before_row=physical,
+                    after_row=updated_record,
+                    source="Hệ thống tính lại Người Thứ / Phạt lũy tiến",
+                    note=f"Rebalance nhóm {canonical} ngày {ngay}.",
+                )
+
     if updated_physical_rows:
         _clear_leave_data_caches()
     return updated_physical_rows
@@ -11385,6 +11885,19 @@ def update_schedule_record(original_row, edited_row, updated_by):
         _actor_role = str(
             st.session_state.get("current_role", "") or ""
         ).strip().lower()
+
+        # V92.6.63: log SỬA cho mọi vai trò; TRƯỚC/SAU là trạng thái thực tế sau rebalance.
+        write_leave_activity_log(
+            "SỬA",
+            updated_by,
+            before_row=original_row,
+            after_row=_audit_after_row,
+            actor_role=_actor_role,
+            note=(
+                f"Đổi Lý do nghỉ; hệ thống tự tính lại {rebalanced} bản ghi liên quan."
+                if rebalanced else "Đổi Lý do nghỉ và tự tính lại các cột phụ thuộc."
+            ),
+        )
         if _actor_role in {"letan", "quanly"}:
             _audit_ok, _audit_msg = notify_admin_leave_schedule_change(
                 "edit",
@@ -11459,6 +11972,20 @@ def delete_schedule_records(original_rows, updated_by=None):
         _actor_role = str(
             st.session_state.get("current_role", "") or ""
         ).strip().lower()
+
+        # V92.6.63: mỗi bản ghi đã xóa tạo một log riêng, áp dụng cho mọi user.
+        for _deleted_record in matched_delete_records:
+            write_leave_activity_log(
+                "XÓA",
+                actor,
+                before_row=_deleted_record,
+                after_row=None,
+                actor_role=_actor_role,
+                note=(
+                    f"Xóa lịch nghỉ; hệ thống tự tính lại {rebalanced} bản ghi liên quan."
+                    if rebalanced else "Xóa lịch nghỉ."
+                ),
+            )
         if _actor_role in {"letan", "quanly"}:
             for _deleted_record in matched_delete_records:
                 _audit_ok, _audit_msg = notify_admin_leave_schedule_change(
@@ -20394,6 +20921,7 @@ PAGE_SLUGS = {
     "🧭 Bảng tour": "bang-tour",
     "💰 Bảng lương": "bang-luong",
     "📅 Đăng ký nghỉ phép": "dang-ky-thong-ke-nghi-phep",
+    "🧾 Nhật ký lịch nghỉ": "nhat-ky-lich-nghi",
     "✏️ Quản lý lịch nghỉ": "quan-ly-lich-nghi",
     "🏖️ Lịch nghỉ dài hạn": "nghi-dai-han",
     "⏰ Thiết lập ca làm việc": "thiet-lap-ca",
@@ -20449,6 +20977,8 @@ def has_page_access(page_name):
     # Quyền Đăng ký/Sửa/Xóa vẫn được kiểm tra riêng ở từng chức năng.
     if page_name == "📅 Đăng ký nghỉ phép":
         return True
+    if page_name == "🧾 Nhật ký lịch nghỉ":
+        return str(st.session_state.get("current_role", "") or "").strip().lower() == "admin"
     if page_name == "📘 Hướng dẫn sử dụng":
         return True
     if page_name == "🏖️ Lịch nghỉ dài hạn":
@@ -20466,6 +20996,12 @@ def has_page_access(page_name):
     return bool(key and has_feature_access(key))
 
 DEFAULT_PAGE_ORDER = list(PAGE_FEATURE_KEYS.keys())
+# V92.6.63: đặt Nhật ký ngay cạnh nhóm Lịch nghỉ trong MENU Admin.
+try:
+    _leave_audit_menu_pos = DEFAULT_PAGE_ORDER.index("✏️ Quản lý lịch nghỉ") + 1
+except ValueError:
+    _leave_audit_menu_pos = len(DEFAULT_PAGE_ORDER)
+DEFAULT_PAGE_ORDER.insert(_leave_audit_menu_pos, "🧾 Nhật ký lịch nghỉ")
 PAGE_ORDER = admin_menu_order_for_pages(DEFAULT_PAGE_ORDER)
 allowed_pages = [p for p in PAGE_ORDER if has_page_access(p)]
 # Admin luôn giữ trang phân quyền để tránh tự khóa hệ thống.
@@ -26534,6 +27070,9 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                                             st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
 elif selected_page == "🧭 Bảng tour":
     render_bang_tour_fast_v920()
+
+elif selected_page == "🧾 Nhật ký lịch nghỉ":
+    render_leave_activity_log_admin()
 
 elif selected_page == "📅 Đăng ký nghỉ phép":
     _leave_title_col, _leave_refresh_col = st.columns([4, 1])

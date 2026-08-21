@@ -1,4 +1,4 @@
-# V92.6.59 - Màu dropdown Lý do nghỉ: Có phép xanh, Không phép đỏ, còn lại vàng (2026-08-21)
+# V92.6.60 - Fix marker_id cho render_leave_reason_selectbox_color (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -8004,7 +8004,7 @@ def _daily_leave_group(reason, reason_type_map=None):
     return ""
 
 
-def render_leave_reason_selectbox_color(selected_reason, reason_type_map=None):
+def render_leave_reason_selectbox_color(selected_reason, reason_type_map=None, marker_id="vera-leave-reason-selectbox"):
     """
     V92.6.59 - Màu dropdown Lý do nghỉ:
     - KHÔNG phép: đỏ (giữ nguyên)
@@ -8062,6 +8062,7 @@ def render_leave_reason_selectbox_color(selected_reason, reason_type_map=None):
     # JS gắn màu động cho option trong dropdown và ô đang chọn.
     selected_json = json.dumps(selected_text, ensure_ascii=False)
     selected_class_json = json.dumps(selected_class)
+    marker_json = json.dumps(str(marker_id or "vera-leave-reason-selectbox"), ensure_ascii=False)
 
     components.html(
         f"""
@@ -8071,6 +8072,7 @@ def render_leave_reason_selectbox_color(selected_reason, reason_type_map=None):
                 const D = window.parent.document;
                 const selectedText = {selected_json};
                 const selectedClass = {selected_class_json};
+                const markerId = {marker_json};
 
                 function norm(s) {{
                     return (s || '')
@@ -8111,7 +8113,7 @@ def render_leave_reason_selectbox_color(selected_reason, reason_type_map=None):
                     }}
 
                     // Ô selectbox Lý do nghỉ đang chọn.
-                    const marker = D.querySelector('#vera-leave-reason-selectbox');
+                    const marker = D.getElementById(markerId);
                     if (marker) {{
                         let host = marker.parentElement;
                         let selectWrap = null;

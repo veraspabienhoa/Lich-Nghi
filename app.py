@@ -1,4 +1,4 @@
-# V92.6.78 - Thống kê nhân sự + tối ưu Google Sheets quota 429 bằng batch/cache/backoff (2026-08-22)
+# V92.6.80 - Auto Check Manual gửi email theo lô + đồng bộ tên nút Auto Check (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -4079,6 +4079,7 @@ def send_auto_penalty_notification_email_v92673(
     leave_detail,
     penalty_amount,
     actor="AUTO UPDATE",
+    credentials_df=None,
 ):
     """Gửi email ngay khi Auto Update ghi thành công một vi phạm có tiền phạt > 0."""
     try:
@@ -4096,9 +4097,13 @@ def send_auto_penalty_notification_email_v92673(
         )
 
     try:
-        # Dùng cache hồ sơ gần nhất để một lượt Auto nhiều nhân viên không ép đọc lại
-        # Google/PostgreSQL cho từng email; cache hiện tại vẫn đủ mới cho thông tin liên hệ.
-        creds = load_credentials_fresh_for_email()
+        # V92.6.80: khi Auto Check Manual gửi nhiều người, hồ sơ được đọc 1 lần
+        # rồi truyền dùng chung cho toàn bộ batch. Scheduler/luồng đơn vẫn tự đọc mới.
+        creds = (
+            credentials_df
+            if isinstance(credentials_df, pd.DataFrame) and not credentials_df.empty
+            else load_credentials_fresh_for_email()
+        )
         to_email = latest_email_from_credentials(creds, employee_username)
         if not to_email or "@" not in to_email:
             return False, f"{employee_username} chưa có Email hợp lệ trong hồ sơ."
@@ -10015,31 +10020,44 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         auto_email_ok_v92673 = None
         actor_key_v92673 = str(updated_by or "").strip().upper()
         if actor_key_v92673.startswith("AUTO UPDATE") and save_penalty > 0:
-            auto_email_ok_v92673, auto_email_msg_v92673 = (
-                send_auto_penalty_notification_email_v92673(
-                    nv,
-                    record.get("Ngày", ngay),
-                    record.get("Lý do nghỉ", loai_nghi),
-                    record.get("Chi tiết", save_detail),
-                    save_penalty,
-                    actor=updated_by,
+            # V92.6.80: Auto Check Manual không gửi từng email ngay giữa quá trình
+            # đối soát. Dòng mới được gom lại rồi gửi theo lô ở cuối lượt chạy.
+            # Cách này tránh việc 10 trường hợp phải đọc hồ sơ/đăng nhập SMTP 10 lần
+            # xen kẽ với các thao tác Google Sheets. Scheduler vẫn gửi ngay như cũ.
+            _manual_email_batch_v92680 = isinstance(
+                st.session_state.get("_auto_update_active_collector_v92674"), list
+            )
+            if _manual_email_batch_v92680:
+                auto_email_ok_v92673 = None
+                auto_email_msg_v92673 = (
+                    "Đang chờ gửi email theo lô sau khi hoàn tất Auto Update Check Manual."
                 )
-            )
-            _auto_mail_status_v92675 = _auto_email_result_status_v92675(
-                auto_email_ok_v92673, auto_email_msg_v92673
-            )
-            write_leave_activity_log(
-                "EMAIL AUTO PHẠT",
-                updated_by,
-                before_row=None,
-                after_row=record,
-                status=_auto_mail_status_v92675,
-                note=auto_email_msg_v92673,
-            )
-            _append_auto_update_email_log_v92674(
-                nv, "", "", record.get("Lý do nghỉ", loai_nghi),
-                _auto_mail_status_v92675, auto_email_msg_v92673, count=1
-            )
+            else:
+                auto_email_ok_v92673, auto_email_msg_v92673 = (
+                    send_auto_penalty_notification_email_v92673(
+                        nv,
+                        record.get("Ngày", ngay),
+                        record.get("Lý do nghỉ", loai_nghi),
+                        record.get("Chi tiết", save_detail),
+                        save_penalty,
+                        actor=updated_by,
+                    )
+                )
+                _auto_mail_status_v92675 = _auto_email_result_status_v92675(
+                    auto_email_ok_v92673, auto_email_msg_v92673
+                )
+                write_leave_activity_log(
+                    "EMAIL AUTO PHẠT",
+                    updated_by,
+                    before_row=None,
+                    after_row=record,
+                    status=_auto_mail_status_v92675,
+                    note=auto_email_msg_v92673,
+                )
+                _append_auto_update_email_log_v92674(
+                    nv, "", "", record.get("Lý do nghỉ", loai_nghi),
+                    _auto_mail_status_v92675, auto_email_msg_v92673, count=1
+                )
 
         if actor_key_v92673.startswith("AUTO UPDATE"):
             _auto_update_collect_record_v92674(
@@ -11800,6 +11818,11 @@ def _retry_missing_auto_penalty_emails_v92674(records_df, actor="AUTO UPDATE - A
             df.loc[mask, "Chi tiết email"] = "Gửi mail tự động của Auto Update đang TẠM DỪNG."
         return df, ["Gửi mail tự động đang TẠM DỪNG; chưa gửi bù email cá nhân."]
     messages = []
+    # V92.6.80: đọc hồ sơ/email đúng 1 lần cho cả batch Manual Check.
+    try:
+        _batch_creds_v92680 = load_credentials_fresh_for_email()
+    except Exception:
+        _batch_creds_v92680 = pd.DataFrame()
     for idx, r in df.iterrows():
         try:
             penalty = float(r.get("Phạt vi phạm", 0) or 0)
@@ -11812,6 +11835,7 @@ def _retry_missing_auto_penalty_emails_v92674(records_df, actor="AUTO UPDATE - A
         ok, msg = send_auto_penalty_notification_email_v92673(
             r.get("Tên nhân viên", ""), r.get("Ngày", ""), r.get("Lý do nghỉ", ""),
             r.get("Chi tiết", ""), penalty, actor=actor,
+            credentials_df=_batch_creds_v92680,
         )
         df.at[idx, "Email cá nhân"] = "Đã gửi" if ok else "Lỗi"
         df.at[idx, "Chi tiết email"] = msg
@@ -11892,11 +11916,16 @@ def _send_unsent_auto_penalty_range_v92674(start_date, end_date, actor):
     if not isinstance(d, pd.DataFrame) or d.empty:
         return 0, 0, ["Không có email Auto phạt nào cần gửi bù trong phạm vi đã chọn."]
     ok_count=0; fail_count=0; msgs=[]
+    try:
+        _batch_creds_v92680 = load_credentials_fresh_for_email()
+    except Exception:
+        _batch_creds_v92680 = pd.DataFrame()
     for _,r in d.iterrows():
         try: penalty=float(str(r.get("Phạt vi phạm",0)).replace(",",""))
         except Exception: penalty=0
         ok,msg=send_auto_penalty_notification_email_v92673(
-            r.get("Tên nhân viên",""), r.get("Ngày",""), r.get("Lý do nghỉ",""), r.get("Chi tiết",""), penalty, actor=actor
+            r.get("Tên nhân viên",""), r.get("Ngày",""), r.get("Lý do nghỉ",""), r.get("Chi tiết",""), penalty, actor=actor,
+            credentials_df=_batch_creds_v92680,
         )
         _retry_status_v92675 = _auto_email_result_status_v92675(ok, msg)
         write_leave_activity_log("EMAIL AUTO PHẠT", actor, before_row=None, after_row=r.to_dict(), status=_retry_status_v92675, note=f"Gửi bù theo phạm vi: {msg}")
@@ -12024,7 +12053,7 @@ def run_auto_penalty_now(
     - 15:00: chạy các Auto Update thông thường; nghỉ giữa ca bị bỏ qua.
     - 20:00: giữ nguyên các Auto Update thông thường, bao gồm Auto Nghỉ không phép.
     - 21:00: lượt CHUYÊN nghỉ giữa ca, không chạy lại Tour/Đi trễ/Nghỉ KP/Ca1.
-    - Nút Admin `Chạy Auto Update ngay` dùng force_midshift_daily=True nên vẫn chạy toàn bộ.
+    - Nút Admin `Chạy Auto Update Check Manual` dùng force_midshift_daily=True nên vẫn chạy toàn bộ.
     """
     now_vn_v92669 = datetime.now(VN_TZ)
     midshift_only_v92669 = (
@@ -23895,8 +23924,34 @@ def collapse_sidebar_after_navigation_once():
     """, height=0, width=0)
 
 # V86.4: mọi tài khoản dùng MENU CHỨC NĂNG dạng dọc trong sidebar.
+# V92.6.79: khóa căn trái cho toàn bộ nút chức năng trong sidebar.
+# Dùng selector stButton để không tác động nút đóng/mở sidebar của Streamlit.
 st.sidebar.markdown(
-    "<div style='font-size:18px;font-weight:800;line-height:1.15;margin:2px 0 10px 0;'>📌 MENU CHỨC NĂNG</div>",
+    """
+    <style id="vera-sidebar-menu-left-v92679">
+    [data-testid="stSidebar"] div[data-testid="stButton"] > button,
+    [data-testid="stSidebar"] div.stButton > button {
+        justify-content: flex-start !important;
+        text-align: left !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stButton"] > button p,
+    [data-testid="stSidebar"] div[data-testid="stButton"] > button span,
+    [data-testid="stSidebar"] div.stButton > button p,
+    [data-testid="stSidebar"] div.stButton > button span {
+        width: 100% !important;
+        text-align: left !important;
+        justify-content: flex-start !important;
+    }
+    @media (max-width: 768px) {
+        [data-testid="stSidebar"] div[data-testid="stButton"] > button,
+        [data-testid="stSidebar"] div.stButton > button {
+            justify-content: flex-start !important;
+            text-align: left !important;
+        }
+    }
+    </style>
+    <div style='font-size:18px;font-weight:800;line-height:1.15;margin:2px 0 10px 0;text-align:left;'>📌 MENU CHỨC NĂNG</div>
+    """,
     unsafe_allow_html=True
 )
 for page_name in allowed_pages:
@@ -27110,13 +27165,13 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
     c_auto1, c_auto_mail_v92675, c_auto2 = st.columns(3)
     with c_auto1:
         if paused:
-            if st.button("▶️ Mở lại Auto Update phạt", use_container_width=True, type="primary", key="resume_auto_penalty_v84", disabled=not _can_auto_control):
+            if st.button("▶️ Mở lại Auto Check", use_container_width=True, type="primary", key="resume_auto_penalty_v84", disabled=not _can_auto_control):
                 ok, msg = set_auto_penalty_paused(False, st.session_state.current_user)
                 (st.success if ok else st.error)(msg)
                 if ok:
                     rerun_current_view()
         else:
-            if st.button("⏸️ Tạm dừng Auto Update phạt", use_container_width=True, type="primary", key="pause_auto_penalty_v84", disabled=not _can_auto_control):
+            if st.button("⏸️ Tạm Dừng Auto Check", use_container_width=True, type="primary", key="pause_auto_penalty_v84", disabled=not _can_auto_control):
                 ok, msg = set_auto_penalty_paused(True, st.session_state.current_user)
                 (st.success if ok else st.error)(msg)
                 if ok:
@@ -27142,9 +27197,15 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
                     rerun_current_view()
     with c_auto2:
         run_now = st.button(
-            "▶️ Chạy Auto Update ngay", use_container_width=True,
+            "▶️ Chạy Auto Update Check Manual", use_container_width=True,
             disabled=paused or (not _can_auto_run), key="run_auto_penalty_now_v84",
             help="Chạy theo bộ lọc thời gian phía trên. Lịch sử chỉ xử lý ngày có Snapshot TimeSoft; Bảng tour chỉ áp dụng cho hôm nay."
+        )
+
+    if _mail_paused_v92675:
+        st.warning(
+            "📧 MAIL AUTO ĐANG TẠM DỪNG: Auto Update Check Manual vẫn kiểm tra và ghi phạt, "
+            "nhưng sẽ KHÔNG gửi email cá nhân hoặc email tổng hợp. Các email được giữ lại để gửi bù sau khi mở mail."
         )
 
     if run_now:
@@ -27208,6 +27269,19 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
     _last_added_v92674 = st.session_state.get("auto_update_last_added_df_v92674")
     if isinstance(_last_added_v92674, pd.DataFrame) and not _last_added_v92674.empty:
         st.markdown("#### 📋 Danh sách Auto Update vừa thêm")
+        _mail_status_series_v92680 = _last_added_v92674.get(
+            "Email cá nhân", pd.Series(["Chưa gửi"] * len(_last_added_v92674))
+        ).astype(str)
+        _mail_sent_v92680 = int(_mail_status_series_v92680.eq("Đã gửi").sum())
+        _mail_paused_count_v92680 = int(_mail_status_series_v92680.eq("Tạm dừng").sum())
+        _mail_error_v92680 = int(_mail_status_series_v92680.eq("Lỗi").sum())
+        _mail_pending_v92680 = max(
+            0, len(_last_added_v92674) - _mail_sent_v92680 - _mail_paused_count_v92680 - _mail_error_v92680
+        )
+        st.caption(
+            f"📧 Email cá nhân · Đã gửi {_mail_sent_v92680}/{len(_last_added_v92674)} · "
+            f"Tạm dừng {_mail_paused_count_v92680} · Lỗi {_mail_error_v92680} · Chưa gửi {_mail_pending_v92680}"
+        )
         st.dataframe(_last_added_v92674, use_container_width=True, hide_index=True)
         _last_range_v92674 = st.session_state.get("auto_update_last_range_v92674") or (_auto_start_v92672, _auto_end_v92672)
         _lr_start_v92674, _lr_end_v92674 = _last_range_v92674
@@ -27232,7 +27306,7 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
 
     st.markdown("#### Quy tắc V84.7")
     st.write(
-        "• **Lịch Cloud Scheduler: 15:00 + 20:00 + 21:00 hằng ngày**. Lượt **15:00** chạy Auto ban ngày; lượt **20:00** giữ Auto tối và Auto Nghỉ không phép; lượt **21:00 chuyên kiểm tra nghỉ giữa ca** và tác vụ này chỉ chạy **1 lần/ngày**. Scheduler luôn xử lý ngày hiện tại. Nút **Chạy Auto Update ngay** của Admin chạy theo bộ lọc Hôm qua/Hôm nay/Tuần/Tháng/Tất cả/Tùy chỉnh.  \n"
+        "• **Lịch Cloud Scheduler: 15:00 + 20:00 + 21:00 hằng ngày**. Lượt **15:00** chạy Auto ban ngày; lượt **20:00** giữ Auto tối và Auto Nghỉ không phép; lượt **21:00 chuyên kiểm tra nghỉ giữa ca** và tác vụ này chỉ chạy **1 lần/ngày**. Scheduler luôn xử lý ngày hiện tại. Nút **Chạy Auto Update Check Manual** của Admin chạy theo bộ lọc Hôm qua/Hôm nay/Tuần/Tháng/Tất cả/Tùy chỉnh.  \n"
         "• Ra ngoài vào muộn: chỉ Auto Update khi cột **Vào trễ >= 5 phút**. "
         "Tên như **Cẩm Nhung *** được đối chiếu như **Cẩm Nhung**.  \n"
         "• TimeSoft: check-in được so trực tiếp với giờ bắt đầu ca. **Hỗ trợ Ca 1 2 tiếng = 120 phút; Ca 1 sau 0:0H 3 tiếng = 180 phút; Ca 2 sau 0:0H 1 tiếng = 60 phút**. Chỉ Auto phạt khi vượt mức Hỗ trợ; nếu không có Hỗ trợ thì ngưỡng là **>= 5 phút**.  \n"
@@ -27241,7 +27315,7 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         "không có **Hỗ trợ Ca 1 đi trễ 2 tiếng / Hỗ trợ Ca 1 đi trễ 3 tiếng / Hỗ trợ Ca 2 đi trễ 1 tiếng**, "
         "và hôm đó có **Đi trễ <=30 / <=60 / >60 đến <=120 phút** theo đúng loại nghỉ đã cấu hình.  \n"
         "• Tiền phạt và Số ngày tính lấy trực tiếp từ sheet **LoaiNghi**; dữ liệu phạt ghi vào MainData A:M và không tạo trùng cùng Ngày + Nhân viên + Lý do.  \n"
-        "• **Email cho mọi Auto Update có Phạt vi phạm > 0**: gửi ngay sau khi MainData ghi thành công tới nhân viên; CC `veraspabienhoa@gmail.com + quanly + letan`. Admin có nút **Tạm dừng gửi mail tự động** độc lập với Auto Update phạt; khi mail đang dừng, dữ liệu phạt vẫn ghi nhưng email được để lại để gửi bù sau. Khi chạy tay, hệ thống gửi bù email cá nhân và email tổng hợp khi mail đang hoạt động.  \n"
+        "• **Email cho mọi Auto Update có Phạt vi phạm > 0**: gửi ngay sau khi MainData ghi thành công tới nhân viên; CC `veraspabienhoa@gmail.com + quanly + letan`. Admin có nút **Tạm dừng gửi mail tự động** độc lập với **Auto Check**; khi mail đang dừng, dữ liệu phạt vẫn ghi nhưng email được để lại để gửi bù sau. Khi chạy tay, hệ thống gửi bù email cá nhân và email tổng hợp khi mail đang hoạt động.  \n"
         "• **Nghỉ giữa ca ưu tiên TimeSoft tuyệt đối**: có đủ cặp FaceID TimeSoft thì dùng TimeSoft; chỉ khi TimeSoft chưa đủ dữ liệu ra/vào mới fallback TourVera R:V hoặc nguồn khác. Riêng Auto nghỉ giữa ca vào muộn **<=60 phút áp dụng LoaiNghi STT 31** theo quy tắc đã chốt; vượt các mốc tiếp theo dùng STT tương ứng."
     )
 

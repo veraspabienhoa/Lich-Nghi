@@ -1,4 +1,4 @@
-# V92.6.76 - Fix Auto Ra ngoài vào muộn theo đúng LoaiNghi dòng 30-33; 0.5/1 chỉ chặn Nghỉ KP (2026-08-22)
+# V92.6.77 - STT44 Không check mặt cho G=0.5 không FaceID + Lê My/midshift dùng STT31 (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -10110,6 +10110,11 @@ def build_leave_reason_catalog(source_df=None):
         penalty_text = _leave_policy_clean_text(penalty_raw)
 
         item = {
+            # V92.6.77: giữ STT LoaiNghi để Auto Update có thể bám đúng rule nghiệp vụ
+            # theo số dòng cấu hình (ví dụ STT 31 / STT 44), không phụ thuộc tên hiển thị.
+            "stt": _leave_policy_clean_text(
+                _leave_policy_row_value(row, "STT", 0, "")
+            ),
             "name": name,
             "leave_type": _leave_policy_clean_text(
                 _leave_policy_row_value(row, "Loại nghỉ", 2, "")
@@ -10482,6 +10487,22 @@ def _auto_penalty_catalog_item(reason_name, catalog=None):
     for item in catalog.values():
         if normalize_login_name(item.get('name', '')) == wanted:
             return item
+    return None
+
+def _auto_penalty_catalog_item_by_stt(stt, catalog=None):
+    """Lấy chính xác rule Auto Update theo STT cột A của LoaiNghi."""
+    catalog = catalog if catalog is not None else build_leave_reason_catalog(
+        globals().get('df_loai_nghi', pd.DataFrame())
+    )
+    wanted = str(stt).strip()
+    for item in (catalog or {}).values():
+        raw = str(item.get("stt", "") or "").strip()
+        try:
+            if str(int(float(raw))) == str(int(float(wanted))):
+                return item
+        except Exception:
+            if raw == wanted:
+                return item
     return None
 
 def _canonical_system_employee_name(raw_name):
@@ -11053,32 +11074,45 @@ def _timesoft_checkin_employee_keys_for_date(checkin_df, target_date):
     return keys
 
 
-def _leave_coverage_employee_keys_for_date(leave_df, target_date):
+def _leave_coverage_sets_for_date_v92677(leave_df, target_date):
     """
-    Một nhân viên được coi là đã có lịch nghỉ hợp lệ cho quy tắc vắng mặt khi
-    cùng ngày có ít nhất một dòng Số ngày tính chính xác 0.5 hoặc 1.0.
+    Tách lịch MainData cùng ngày theo cột G:
+    - half_day: có ít nhất một dòng G = 0.5 -> vẫn phải có FaceID; nếu không có thì STT 44 Không check mặt.
+    - full_day: có ít nhất một dòng G = 1.0.
 
-    Lưu ý schema MainData hiện tại: Số ngày tính là cột G.
-    Hàm vẫn dùng tên trường sau khi đã xác nhận header G để tránh lệch cột.
+    Nếu một người đồng thời có 0.5 và 1.0 thì half_day được ưu tiên cho nghiệp vụ
+    Không check mặt theo yêu cầu V92.6.77; riêng Nghỉ KHÔNG phép vẫn bị chặn.
     """
+    half_day, full_day = set(), set()
     if not isinstance(leave_df, pd.DataFrame) or leave_df.empty:
-        return set()
+        return half_day, full_day
     required = {"Ngày", "Tên nhân viên", "Số ngày tính"}
     if not required.issubset(set(leave_df.columns)):
-        return set()
+        return half_day, full_day
 
     d = leave_df.copy()
     dates = pd.to_datetime(d["Ngày"], dayfirst=True, errors="coerce").dt.date
     days = pd.to_numeric(d["Số ngày tính"], errors="coerce")
-    valid_days = days.apply(
-        lambda x: bool(pd.notna(x) and (abs(float(x) - 0.5) < 1e-9 or abs(float(x) - 1.0) < 1e-9))
-    )
-    d = d[dates.eq(target_date) & valid_days].copy()
-    return {
-        normalize_employee_match_name(x)
-        for x in d["Tên nhân viên"].astype(str).tolist()
-        if normalize_employee_match_name(x)
-    }
+    d = d[dates.eq(target_date)].copy()
+    d["__days_v92677"] = days[dates.eq(target_date)].values if len(d) else []
+    for _, row in d.iterrows():
+        key = normalize_employee_match_name(row.get("Tên nhân viên", ""))
+        if not key:
+            continue
+        val = pd.to_numeric(row.get("__days_v92677"), errors="coerce")
+        if pd.isna(val):
+            continue
+        if abs(float(val) - 0.5) < 1e-9:
+            half_day.add(key)
+        elif abs(float(val) - 1.0) < 1e-9:
+            full_day.add(key)
+    return half_day, full_day
+
+
+def _leave_coverage_employee_keys_for_date(leave_df, target_date):
+    """Tương thích code cũ: trả tập có G=0.5 hoặc G=1.0."""
+    half_day, full_day = _leave_coverage_sets_for_date_v92677(leave_df, target_date)
+    return set(half_day) | set(full_day)
 
 
 def _active_shifted_absence_staff(credentials_df):
@@ -11119,14 +11153,19 @@ def auto_update_absence_without_checkin_from_timesoft(
     actor="AUTO UPDATE - TIMESOFT NGHỈ KHÔNG PHÉP",
 ):
     """
-    Auto Nghỉ không phép:
-    - nhân viên/leader đang làm việc + đã phân ca;
-    - không có bất kỳ check-in TimeSoft nào trong ngày;
-    - MainData cột G cùng ngày không có dòng của người đó với Số ngày tính = 0.5 hoặc 1;
-    - hôm nay chỉ kết luận từ 20:00 trở đi để Scheduler 15:00 không phạt nhầm.
-    - nếu toàn bộ snapshot check-in rỗng thì không phạt để tránh lỗi TimeSoft/API gây phạt hàng loạt.
+    V92.6.77 - đối soát nhân viên không có FaceID theo 3 nhánh độc lập:
+    1) Có MainData cột G = 0.5 -> KHÔNG coi là nghỉ cả ngày; Auto STT 44 ``Không check mặt``.
+    2) Không có 0.5 nhưng có G = 1.0 -> đã nghỉ cả ngày, không Auto Nghỉ KHÔNG phép.
+    3) Không có 0.5/1.0 -> Auto ``Nghỉ KHÔNG phép`` như nghiệp vụ cũ.
+
+    Vì vậy 0.5 chỉ chặn Nghỉ KHÔNG phép nhưng KHÔNG miễn nghĩa vụ check FaceID.
     """
-    result = _auto_result("TimeSoft nghỉ không phép")
+    result = _auto_result("TimeSoft vắng/Không check mặt")
+    result["no_face_added"] = 0
+    result["absence_added"] = 0
+    result["no_face_eligible"] = 0
+    result["absence_eligible"] = 0
+
     cfg = load_auto_penalty_config()
     if cfg.get("paused"):
         result["paused"] = True
@@ -11135,38 +11174,35 @@ def auto_update_absence_without_checkin_from_timesoft(
 
     target_date = target_date or get_vn_today()
     now_vn = datetime.now(VN_TZ)
-
     if target_date == now_vn.date() and now_vn.hour < ABSENCE_AUTO_UPDATE_CUTOFF_HOUR:
         result["messages"].append(
-            f"Nghỉ không phép chỉ được đối soát từ {ABSENCE_AUTO_UPDATE_CUTOFF_HOUR:02d}:00 để tránh phạt nhầm trước khi hoàn tất ngày làm việc."
+            f"Đối soát vắng/Không check mặt chỉ chạy từ {ABSENCE_AUTO_UPDATE_CUTOFF_HOUR:02d}:00 để tránh kết luận sớm."
         )
         return result
 
-    # Guard quan trọng: không biến lỗi fetch TimeSoft thành "mọi người đều vắng".
+    # Không biến lỗi fetch TimeSoft thành mọi người đều không check mặt/vắng.
     if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
         result["messages"].append(
-            "Snapshot chấm công TimeSoft đang rỗng; hệ thống bỏ qua Auto Nghỉ không phép để tránh phạt hàng loạt do lỗi dữ liệu."
+            "Snapshot chấm công TimeSoft đang rỗng; bỏ qua đối soát để tránh phạt hàng loạt do lỗi dữ liệu."
         )
         return result
 
     checkin_keys = _timesoft_checkin_employee_keys_for_date(checkin_df, target_date)
     if not checkin_keys:
         result["messages"].append(
-            "Không nhận diện được nhân viên nào trong snapshot TimeSoft của ngày; bỏ qua Auto Nghỉ không phép."
+            "Không nhận diện được bất kỳ nhân viên nào trong snapshot TimeSoft của ngày; bỏ qua để tránh phạt hàng loạt."
         )
         return result
 
-    # V92.6.75: quyết định Auto Nghỉ KP bắt buộc đối chiếu MainData LIVE trước.
-    # Không dùng cache/PG vì nếu cache lỗi/rỗng giả có thể phạt nhầm người đã nghỉ Có phép.
-    live_leave, _leave_guard_err_v92675 = _load_main_data_absence_guard_v92675()
+    live_leave, guard_err = _load_main_data_absence_guard_v92675()
     if live_leave is None:
         result["errors"] += 1
         result["messages"].append(
-            f"AN TOÀN: bỏ qua Auto Nghỉ không phép vì chưa đối chiếu được MainData LIVE. {_leave_guard_err_v92675}"
+            f"AN TOÀN: bỏ qua đối soát vì chưa đọc được MainData LIVE. {guard_err}"
         )
         return result
 
-    covered_leave_keys = _leave_coverage_employee_keys_for_date(live_leave, target_date)
+    half_day_keys, full_day_keys = _leave_coverage_sets_for_date_v92677(live_leave, target_date)
 
     try:
         creds = load_credentials_fresh()
@@ -11179,39 +11215,55 @@ def auto_update_absence_without_checkin_from_timesoft(
         )
         return result
 
-    catalog = build_leave_reason_catalog(
-        globals().get("df_loai_nghi", pd.DataFrame())
-    )
-    reason_item = _auto_penalty_catalog_item("Nghỉ không phép", catalog)
-    if not reason_item:
+    catalog = build_leave_reason_catalog(globals().get("df_loai_nghi", pd.DataFrame()))
+    absence_item = _auto_penalty_catalog_item("Nghỉ không phép", catalog)
+    no_face_item = _auto_penalty_catalog_item_by_stt(44, catalog) or _auto_penalty_catalog_item("Không check mặt", catalog)
+
+    if not absence_item:
         result["errors"] += 1
-        result["messages"].append(
-            "Sheet LoaiNghi chưa có 'Nghỉ không phép', nên hệ thống không thể Auto Update phạt."
-        )
+        result["messages"].append("LoaiNghi chưa có rule Nghỉ không phép.")
+        return result
+    if not no_face_item:
+        result["errors"] += 1
+        result["messages"].append("LoaiNghi chưa có STT 44 'Không check mặt'.")
         return result
 
-    reason = reason_item.get("name", "Nghỉ không phép")
-    base_penalty = float(reason_item.get("penalty", 0) or 0)
-    days = float(reason_item.get("days", 0) or 0)
     weekday = _vn_weekday_label(target_date)
     main_source = live_leave
 
     for profile in staff:
         employee = profile["employee"]
         ekey = profile["employee_key"]
-
         if ekey in checkin_keys:
             continue
-        if ekey in covered_leave_keys:
+
+        # Có G=0.5: vẫn phải check FaceID. Nếu hoàn toàn không có -> STT 44.
+        if ekey in half_day_keys:
+            item = no_face_item
+            reason = item.get("name", "Không check mặt")
+            detail = (
+                f"Auto Update TimeSoft · không có dữ liệu FaceID/check-in · {weekday}"
+                " · MainData có cột G = 0.5 nên không tính Nghỉ KHÔNG phép"
+                " · áp dụng LoaiNghi STT 44 Không check mặt"
+                f" · Ca {profile['shift']}"
+            )
+            result["no_face_eligible"] += 1
+        # Chỉ có nghỉ cả ngày G=1.0: không yêu cầu FaceID cho nghiệp vụ này.
+        elif ekey in full_day_keys:
             continue
+        else:
+            item = absence_item
+            reason = item.get("name", "Nghỉ không phép")
+            detail = (
+                f"Auto Update TimeSoft · không có dữ liệu check-in · {weekday}"
+                " · MainData cột G không có lịch nghỉ Số ngày tính 0.5 hoặc 1"
+                f" · Ca {profile['shift']}"
+            )
+            result["absence_eligible"] += 1
 
         result["eligible"] += 1
-        detail = (
-            f"Auto Update TimeSoft · không có dữ liệu check-in · {weekday}"
-            " · MainData cột G không có lịch nghỉ Số ngày tính 0.5 hoặc 1"
-            f" · Ca {profile['shift']}"
-        )
-
+        base_penalty = float(item.get("penalty", 0) or 0)
+        days = float(item.get("days", 0) or 0)
         ok, msg = save_lich_nghi_to_backup_sheet(
             target_date.strftime("%d/%m/%Y"),
             employee,
@@ -11225,6 +11277,10 @@ def auto_update_absence_without_checkin_from_timesoft(
         )
         if ok:
             result["added"] += 1
+            if ekey in half_day_keys:
+                result["no_face_added"] += 1
+            else:
+                result["absence_added"] += 1
         elif (
             "đã có đúng lý do" in str(msg).lower()
             or "không được đăng ký trùng" in str(msg).lower()
@@ -11237,7 +11293,7 @@ def auto_update_absence_without_checkin_from_timesoft(
 
     if result["eligible"] == 0:
         result["messages"].append(
-            f"{target_date.strftime('%d/%m/%Y')} ({weekday}): không có nhân viên đủ điều kiện Auto Nghỉ không phép."
+            f"{target_date.strftime('%d/%m/%Y')} ({weekday}): không có nhân viên đủ điều kiện vắng/Không check mặt."
         )
     return result
 
@@ -11423,15 +11479,22 @@ def auto_update_midshift_late_from_timesoft(
         if minutes < threshold:
             continue
 
-        reason = _outside_late_reason_for_minutes(minutes, catalog)
-        if not reason:
+        # V92.6.77: riêng Auto nghỉ giữa ca, người dùng chốt trường hợp Lê My
+        # 11 phút áp dụng đúng LoaiNghi STT 31. Vì vậy nhóm <=60 phút của
+        # nghiệp vụ nghỉ giữa ca lấy STT 31 trực tiếp; Bảng tour vẫn giữ mapping riêng.
+        if minutes <= 60:
+            item = _auto_penalty_catalog_item_by_stt(31, catalog) or {}
+            reason = item.get("name", "")
+        else:
+            reason = _outside_late_reason_for_minutes(minutes, catalog)
+            item = _auto_penalty_catalog_item(reason, catalog) or {} if reason else {}
+        if not reason or not item:
             result["errors"] += 1
             result["messages"].append(
-                f"{employee}: chưa tìm thấy loại 'Ra ngoài vào muộn' phù hợp trong LoaiNghi."
+                f"{employee}: chưa tìm thấy LoaiNghi STT phù hợp cho Ra ngoài vào muộn {minutes} phút."
             )
             continue
 
-        item = _auto_penalty_catalog_item(reason, catalog) or {}
         base_penalty = float(item.get("penalty", 0) or 0)
         days = float(item.get("days", 0) or 0)
 
@@ -26961,11 +27024,11 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         m1.metric("Tour đã thêm", rt.get('added',0))
         m2.metric("Đi trễ đã thêm", rs.get('added',0))
         m3.metric("Nghỉ giữa ca", rm.get('added',0))
-        m4.metric("Nghỉ KP đã thêm", ra.get('added',0))
+        m4.metric("Nghỉ KP / Không check", ra.get('added',0))
         m5.metric("Ca 1 đã thêm", rc.get('added',0))
         st.caption(
             f"Điều kiện: Tour {rt.get('eligible',0)} · Đi trễ {rs.get('eligible',0)} · "
-            f"Nghỉ giữa ca {rm.get('eligible',0)} · Nghỉ không phép {ra.get('eligible',0)} · Ca1 {rc.get('eligible',0)}"
+            f"Nghỉ giữa ca {rm.get('eligible',0)} · Nghỉ KP {ra.get('absence_eligible',0)} · Không check mặt {ra.get('no_face_eligible',0)} · Ca1 {rc.get('eligible',0)}"
         )
         all_msgs = (
             (rt.get('messages') or [])
@@ -27009,13 +27072,13 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         "• Ra ngoài vào muộn: chỉ Auto Update khi cột **Vào trễ >= 5 phút**. "
         "Tên như **Cẩm Nhung *** được đối chiếu như **Cẩm Nhung**.  \n"
         "• TimeSoft: check-in được so trực tiếp với giờ bắt đầu ca. **Hỗ trợ Ca 1 2 tiếng = 120 phút; Ca 1 sau 0:0H 3 tiếng = 180 phút; Ca 2 sau 0:0H 1 tiếng = 60 phút**. Chỉ Auto phạt khi vượt mức Hỗ trợ; nếu không có Hỗ trợ thì ngưỡng là **>= 5 phút**.  \n"
-        "• **Auto Nghỉ không phép**: từ **20:00**, chỉ xét `nhanvien + leader` đang **Đang làm việc** và **đã phân ca**. Nếu người đó không có check-in TimeSoft trong ngày và MainData LIVE không có dòng cùng ngày với **cột G · Số ngày tính = 0.5 hoặc 1**, hệ thống tự ghi **Nghỉ không phép**; Thứ ngày lấy theo ngày thực tế và tiền phạt lấy từ `LoaiNghi` + phạt lũy tiến của đúng ngày. Snapshot TimeSoft rỗng sẽ không phạt để tránh lỗi hàng loạt. **Quy tắc cột G=0.5/1 chỉ áp dụng cho Auto Nghỉ không phép, không áp dụng cho Ra ngoài vào muộn/Đi trễ/vi phạm khác.**  \n"
+        "• **Không có FaceID từ 20:00**: nếu MainData cùng ngày có **cột G = 0.5** thì vẫn phải có FaceID; không có FaceID sẽ Auto **STT 44 · Không check mặt**. Nếu không có G=0.5 nhưng có **G=1.0** thì coi là nghỉ cả ngày và không Auto Nghỉ KP. Nếu không có cả 0.5/1.0 thì mới Auto **Nghỉ KHÔNG phép**. Snapshot TimeSoft rỗng sẽ không phạt hàng loạt.  \n"
         "• **KHÔNG dọn vệ sinh ca 1**: chỉ áp dụng cho role `nhanvien` đang làm **Ca 1 trong tuần hiện tại**, "
         "không có **Hỗ trợ Ca 1 đi trễ 2 tiếng / Hỗ trợ Ca 1 đi trễ 3 tiếng / Hỗ trợ Ca 2 đi trễ 1 tiếng**, "
         "và hôm đó có **Đi trễ <=30 / <=60 / >60 đến <=120 phút** theo đúng loại nghỉ đã cấu hình.  \n"
         "• Tiền phạt và Số ngày tính lấy trực tiếp từ sheet **LoaiNghi**; dữ liệu phạt ghi vào MainData A:M và không tạo trùng cùng Ngày + Nhân viên + Lý do.  \n"
         "• **Email cho mọi Auto Update có Phạt vi phạm > 0**: gửi ngay sau khi MainData ghi thành công tới nhân viên; CC `veraspabienhoa@gmail.com + quanly + letan`. Admin có nút **Tạm dừng gửi mail tự động** độc lập với Auto Update phạt; khi mail đang dừng, dữ liệu phạt vẫn ghi nhưng email được để lại để gửi bù sau. Khi chạy tay, hệ thống gửi bù email cá nhân và email tổng hợp khi mail đang hoạt động.  \n"
-        "• **Nghỉ giữa ca ưu tiên TimeSoft tuyệt đối**: có đủ cặp FaceID TimeSoft thì dùng TimeSoft; chỉ khi TimeSoft chưa đủ dữ liệu ra/vào mới fallback TourVera R:V hoặc nguồn khác. Vượt Duration nghỉ hoặc vượt giờ quay lại cuối cùng từ đủ ngưỡng đều được tính `Ra ngoài vào muộn`."
+        "• **Nghỉ giữa ca ưu tiên TimeSoft tuyệt đối**: có đủ cặp FaceID TimeSoft thì dùng TimeSoft; chỉ khi TimeSoft chưa đủ dữ liệu ra/vào mới fallback TourVera R:V hoặc nguồn khác. Riêng Auto nghỉ giữa ca vào muộn **<=60 phút áp dụng LoaiNghi STT 31** theo quy tắc đã chốt; vượt các mốc tiếp theo dùng STT tương ứng."
     )
 
 elif selected_page == "📦 Snapshot" and has_feature_access("snapshot_today"):

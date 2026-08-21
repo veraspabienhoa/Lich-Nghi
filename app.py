@@ -1,4 +1,4 @@
-# V92.6.49 - VERA SPA size 36px cho Desktop và Mobile (2026-08-21)
+# V92.6.50 - TimeSoft Xuất file Excel thật đúng format mẫu để tính lương (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -16822,21 +16822,171 @@ def _standardize_payroll_source_from_timesoft(invoice_df):
     st.session_state["payroll_timesoft_excel_like_v856"] = best["excel_like"]
     return best["out"], ""
 
-def load_payroll_source_from_timesoft(start_date, end_date):
-    """Lấy trực tiếp TimeSoft theo đúng kỳ lương và chuẩn hóa thành nguồn tính lương."""
+
+TIMESOFT_PAYROLL_EXPORT_REQUIRED_HEADERS = [
+    "STT", "Thời gian", "Mã hóa đơn", "Mã KH2", "Tên KH",
+    "Sản phẩm/ Dịch vụ/ PT", "Tổng tiền", "Giảm giá",
+    "NV tư vấn", "Ghi chú", "Nhân viên tư vấn",
+]
+
+
+def _validate_timesoft_payroll_export_file(file_path):
+    try:
+        xls = pd.ExcelFile(file_path, engine="openpyxl")
+    except Exception as e:
+        return False, f"File TimeSoft tải về không phải Excel hợp lệ: {type(e).__name__}: {e}", pd.DataFrame()
+    if PAYROLL_SOURCE_WORKSHEET not in xls.sheet_names:
+        return False, f"File TimeSoft không có sheet '{PAYROLL_SOURCE_WORKSHEET}'.", pd.DataFrame()
+    try:
+        raw = pd.read_excel(file_path, sheet_name=PAYROLL_SOURCE_WORKSHEET, header=None, engine="openpyxl")
+    except Exception as e:
+        return False, f"Không đọc được sheet '{PAYROLL_SOURCE_WORKSHEET}': {e}", pd.DataFrame()
+    if raw.shape[0] < 3 or raw.shape[1] < 11:
+        return False, "File TimeSoft chưa đúng format chuẩn: phải có tối thiểu 3 dòng và 11 cột A:K.", raw
+    actual = [str(v or "").strip() for v in raw.iloc[2, :11].tolist()]
+    expected = TIMESOFT_PAYROLL_EXPORT_REQUIRED_HEADERS
+    if actual != expected:
+        mismatch = [f"{chr(65+i)}: '{actual[i]}' ≠ '{expected[i]}'" for i in range(11) if actual[i] != expected[i]]
+        return False, "File TimeSoft không đúng header chuẩn ở dòng 3. " + " | ".join(mismatch), raw
+    return True, "Đúng format TimeSoft chuẩn A:K, header dòng 3.", raw
+
+
+def _timesoft_click_text_option(page, text_value):
+    for selector in [f'label:has-text("{text_value}")', f'text="{text_value}"']:
+        try:
+            loc = page.locator(selector)
+            for i in range(min(loc.count(), 8)):
+                node = loc.nth(i)
+                if node.is_visible():
+                    node.click(timeout=3000)
+                    page.wait_for_timeout(250)
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _timesoft_set_report_date_range(page, start_date, end_date):
+    start_text = start_date.strftime("%d/%m/%Y")
+    end_text = end_date.strftime("%d/%m/%Y")
+    range_text = f"{start_text} - {end_text}"
+    try:
+        changed = page.evaluate("""([s,e,r]) => {
+          for (const el of Array.from(document.querySelectorAll('input'))) {
+            try {
+              if (window.jQuery) {
+                const jq = window.jQuery(el), p = jq.data('daterangepicker');
+                if (p) { p.setStartDate(s); p.setEndDate(e); el.value=r; jq.trigger('input'); jq.trigger('change'); return true; }
+              }
+            } catch(x) {}
+          }
+          return false;
+        }""", [start_text, end_text, range_text])
+        if changed:
+            page.wait_for_timeout(500)
+            return True
+    except Exception:
+        pass
+    try:
+        changed = page.evaluate("""([r]) => {
+          const inputs = Array.from(document.querySelectorAll('input')).filter(el => { const b=el.getBoundingClientRect(); return b.width>0&&b.height>0; });
+          const scored = inputs.map(el => { const s=[el.name,el.id,el.placeholder,el.value,el.className].filter(Boolean).join(' ').toLowerCase(); let n=0; if(s.includes('date'))n+=5;if(s.includes('time'))n+=3;if(s.includes('range'))n+=5;if(/\\d{1,2}\\/\\d{1,2}\\/\\d{4}\\s*-\\s*\\d{1,2}\\/\\d{1,2}\\/\\d{4}/.test(el.value||''))n+=20; return [n,el]; }).sort((a,b)=>b[0]-a[0]);
+          if (!scored.length || scored[0][0] <= 0) return false;
+          const el=scored[0][1]; try{el.removeAttribute('readonly')}catch(x){}; const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set; setter.call(el,r); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); el.dispatchEvent(new Event('blur',{bubbles:true})); return true;
+        }""", [range_text])
+        if changed:
+            page.wait_for_timeout(500)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _timesoft_export_payroll_excel(start_date, end_date):
     if not timesoft_is_configured():
-        return pd.DataFrame(), "Chưa cấu hình tài khoản TimeSoft trong Secrets.", {}
+        return False, "Chưa cấu hình tài khoản TimeSoft trong Secrets.", None, {}
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return False, "Máy chủ chưa có Playwright/Chromium để tự Xuất file TimeSoft.", None, {}
+    browser = None
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="vera_timesoft_payroll_")
+        output_path = str(Path(tmp_dir) / "Bao_cao_tong_hop_theo_san_pham_dich_vu.xlsx")
+        report_url = urljoin(TIMESOFT_BASE_URL + "/", TIMESOFT_REPORT_PAGES["summary_invoice"]["path"].lstrip("/"))
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox","--disable-dev-shm-usage","--disable-gpu"])
+            context = browser.new_context(ignore_https_errors=False, accept_downloads=True, viewport={"width":1600,"height":1000}, locale="vi-VN")
+            page = context.new_page()
+            page.goto(report_url, wait_until="domcontentloaded", timeout=35000)
+            page.wait_for_timeout(500)
+            ok_login, login_msg = _timesoft_login_with_playwright(page, verify_url=report_url)
+            if not ok_login:
+                context.close(); browser.close(); browser=None
+                return False, login_msg, None, {}
+            if "reportsummaryinvoice" not in str(page.url or "").lower():
+                page.goto(report_url, wait_until="domcontentloaded", timeout=35000)
+            page.wait_for_timeout(800)
+            _timesoft_click_text_option(page, "Theo loại hóa đơn")
+            _timesoft_click_text_option(page, "Theo sản phẩm/dịch vụ")
+            if not _timesoft_set_report_date_range(page, start_date, end_date):
+                context.close(); browser.close(); browser=None
+                return False, "Không nhận diện được ô Thời gian của Báo cáo tổng hợp doanh thu TimeSoft.", None, {}
+            page.wait_for_timeout(1200)
+            export_node = None
+            for selector in ['button:has-text("Xuất file")','a:has-text("Xuất file")','input[value*="Xuất file" i]','[onclick*="export" i]']:
+                try:
+                    loc=page.locator(selector)
+                    for i in range(min(loc.count(),10)):
+                        node=loc.nth(i)
+                        if node.is_visible() and node.is_enabled(): export_node=node; break
+                    if export_node is not None: break
+                except Exception: pass
+            if export_node is None:
+                context.close(); browser.close(); browser=None
+                return False, "Không tìm thấy nút 'Xuất file' trên báo cáo TimeSoft.", None, {}
+            try:
+                with page.expect_download(timeout=60000) as info:
+                    export_node.click(timeout=10000)
+                info.value.save_as(output_path)
+            except Exception as e:
+                context.close(); browser.close(); browser=None
+                return False, f"TimeSoft không phát sinh file tải xuống: {type(e).__name__}: {e}", None, {}
+            context.close(); browser.close(); browser=None
+        okf,msgf,raw = _validate_timesoft_payroll_export_file(output_path)
+        if not okf:
+            return False,msgf,output_path,{"export_path":output_path,"format_valid":False}
+        return True,"Đã tải file Excel TimeSoft đúng format chuẩn.",output_path,{"export_path":output_path,"format_valid":True,"format_message":msgf,"sheet":PAYROLL_SOURCE_WORKSHEET,"header_row":3,"columns":list(TIMESOFT_PAYROLL_EXPORT_REQUIRED_HEADERS),"rows_raw":int(len(raw)),"start_date":start_date,"end_date":end_date}
+    except Exception as e:
+        try:
+            if browser is not None: browser.close()
+        except Exception: pass
+        return False, f"Không tự Xuất file TimeSoft: {type(e).__name__}: {e}", None, {}
 
-    ok, msg, result = timesoft_direct_sync(start_date, end_date, force_login=False)
-    if not ok:
-        return pd.DataFrame(), msg, result or {}
 
-    inv_df = (result or {}).get("summary_invoice_df")
-    source_df, source_err = _standardize_payroll_source_from_timesoft(inv_df)
-    if source_err:
-        return source_df, source_err, result or {}
+def _load_payroll_source_from_timesoft_export(start_date, end_date):
+    ok,msg,file_path,meta = _timesoft_export_payroll_excel(start_date,end_date)
+    if not ok or not file_path:
+        return pd.DataFrame(), msg, meta or {}
+    try:
+        raw = pd.read_excel(file_path, sheet_name=PAYROLL_SOURCE_WORKSHEET, header=None, engine="openpyxl")
+        source_df = _standardize_payroll_source(raw)
+    except Exception as e:
+        return pd.DataFrame(), f"Đã tải file TimeSoft nhưng không đọc được dữ liệu lương: {e}", meta or {}
+    if source_df.empty:
+        return pd.DataFrame(), "File TimeSoft đúng format nhưng không có dữ liệu tính lương trong kỳ đã chọn.", meta or {}
+    tip_mask = source_df["Sản phẩm/ Dịch vụ/ PT"].astype(str).str.strip().str.casefold().str.startswith("tip")
+    tip_count = int(tip_mask.sum())
+    if tip_count <= 0:
+        return pd.DataFrame(), "File TimeSoft đúng format nhưng không có dòng Tip; hệ thống dừng để tránh tính lương sai.", meta or {}
+    meta = dict(meta or {}); meta.update({"tip_count":tip_count,"source":"TimeSoft Export Excel","format":"Excel TimeSoft thật · sheet Báo cáo doanh thu hóa đơn · header dòng 3 · A:K"})
+    st.session_state["payroll_timesoft_mapping_v855"] = {"frame":"TimeSoft Export Excel","mapping":{"B · Thời gian":"Cột B","F · Sản phẩm/ Dịch vụ/ PT":"Cột F","G · Tổng tiền":"Cột G","I · NV tư vấn":"Cột I"},"tip_count":tip_count,"tip_match_count":0,"format":meta["format"]}
+    return source_df, "", meta
 
-    return source_df, "", result or {}
+
+def load_payroll_source_from_timesoft(start_date, end_date):
+    """V92.6.50: bảng lương bắt buộc dùng file Excel Xuất thật từ TimeSoft."""
+    return _load_payroll_source_from_timesoft_export(start_date, end_date)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -24696,8 +24846,8 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                 payroll_upload = None
                 if source_mode == "TimeSoft":
                     st.caption(
-                        "⭐ Nguồn mặc định: TimeSoft. Khi bấm Tính lương, hệ thống tự lấy dữ liệu "
-                        "đúng kỳ đang chọn và chỉ cộng các dòng có loại bắt đầu bằng 'Tip'."
+                        "⭐ Nguồn mặc định: TimeSoft. Khi bấm Tính lương, hệ thống tự đăng nhập và Xuất file "
+                        "đúng kỳ, kiểm tra đúng format Excel mẫu rồi mới tính các dòng bắt đầu bằng 'Tip'."
                     )
                     if not timesoft_is_configured():
                         st.warning("⚠️ TimeSoft chưa được cấu hình đầy đủ trong Secrets.")
@@ -24760,9 +24910,9 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
 
                     if source_mode == "TimeSoft":
                         status.write(
-                            f"2/5 · Đang lấy TimeSoft: {p_start.strftime('%d/%m/%Y')} → {p_end.strftime('%d/%m/%Y')}"
+                            f"2/5 · Đang Xuất file TimeSoft: {p_start.strftime('%d/%m/%Y')} → {p_end.strftime('%d/%m/%Y')}"
                         )
-                        progress.progress(20, text="20% - Đang đăng nhập và lấy dữ liệu TimeSoft")
+                        progress.progress(20, text="20% - Đang đăng nhập TimeSoft và Xuất file Excel")
                         src_df, src_err, _payroll_ts_result = load_payroll_source_from_timesoft(p_start, p_end)
                         st.session_state["payroll_timesoft_last_result_v855"] = _payroll_ts_result
                         src_label = f"TimeSoft {p_start.strftime('%d/%m/%Y')} - {p_end.strftime('%d/%m/%Y')}"
@@ -24772,6 +24922,9 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                                 f"✅ TimeSoft đã nhận diện {_ts_map.get('tip_count', 0)} dòng Tip "
                                 f"· cấu trúc {_ts_map.get('frame', 'Data')}"
                             )
+                        _ts_export_path = str((_payroll_ts_result or {}).get("export_path", "") or "")
+                        if _ts_export_path and os.path.exists(_ts_export_path):
+                            st.session_state["payroll_timesoft_export_path_v92650"] = _ts_export_path
                     elif source_mode == "Upload file Excel":
                         if payroll_upload is None:
                             raise ValueError("Vui lòng upload file Excel dữ liệu lương trước khi tính.")
@@ -24797,6 +24950,21 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                                 "🔎 Mapping TimeSoft → Lương: "
                                 + " | ".join(f"{k} ← {v}" for k, v in _map_info["mapping"].items())
                             )
+                    if source_mode == "TimeSoft" and st.session_state.current_role == "admin":
+                        _ts_export_path = str(st.session_state.get("payroll_timesoft_export_path_v92650", "") or "")
+                        if _ts_export_path and os.path.exists(_ts_export_path):
+                            try:
+                                with open(_ts_export_path, "rb") as _ts_export_f:
+                                    st.download_button(
+                                        "📥 Tải lại file Excel TimeSoft vừa xuất",
+                                        data=_ts_export_f.read(),
+                                        file_name=f"Bao_cao_tong_hop_theo_san_pham_dich_vu_{p_start.strftime('%Y%m%d')}_{p_end.strftime('%Y%m%d')}.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        use_container_width=True,
+                                        key="download_timesoft_payroll_export_v92650",
+                                    )
+                            except Exception:
+                                pass
                     progress.progress(45, text="45% - Đã đọc dữ liệu nguồn")
 
                     status.write("3/5 · Đang tải dữ liệu tiền phạt từ hệ thống")

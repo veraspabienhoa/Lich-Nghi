@@ -1,4 +1,4 @@
-# V92.6.42 - Fix NameError is_excluded trong thống kê lịch nghỉ (2026-08-21)
+# V92.6.44 - Giới hạn lịch tháng hiện tại + tháng kế; khóa quá khứ ngoài Admin (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1972,6 +1972,44 @@ online_users_list = list(active_users.keys())
 
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="Vera Spa Tam Hiệp Đồng Nai", page_icon="📅", layout="wide", initial_sidebar_state="auto")
+
+# ==========================================================
+# V92.6.43 - TẮT TOÀN BỘ TOOLTIP HOVER / POPUP GIẢI THÍCH
+# Áp dụng cho tất cả tài khoản và toàn bộ ứng dụng.
+# Giữ nguyên help= trong code để không ảnh hưởng nghiệp vụ,
+# nhưng không hiển thị popup khi rê chuột.
+# ==========================================================
+st.markdown(
+    """
+    <style>
+    /* BaseWeb / Streamlit tooltip */
+    [data-baseweb="tooltip"],
+    div[data-baseweb="tooltip"],
+    [role="tooltip"],
+    .stTooltipContent,
+    div.stTooltipContent,
+    div[data-testid="stTooltipContent"] {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
+
+    /* Một số phiên bản Streamlit render tooltip qua portal/popover */
+    div[data-baseweb="popover"] [role="tooltip"],
+    div[data-baseweb="popover"] .stTooltipContent,
+    div[data-baseweb="popover"] div[data-testid="stTooltipContent"] {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
 
 # --- JAVASCRIPT: NHỚ ĐĂNG NHẬP + ĐÓNG DROPDOWN KHI BẤM RA NGOÀI ---
 components.html("""
@@ -10103,6 +10141,23 @@ def _validate_leave_registration_request_live(payload, live_df, credentials_df):
 
     now_vn = datetime.now(VN_TZ)
     today = now_vn.date()
+
+    # V92.6.44:
+    # Tất cả tài khoản KHÔNG PHẢI Admin chỉ được đăng ký từ hôm nay
+    # đến hết tháng kế tiếp. Admin được toàn quyền với ngày quá khứ.
+    if not is_admin:
+        _reg_min_v92644, _reg_max_v92644 = employee_registration_window(today)
+        if start_date < _reg_min_v92644 or end_date < _reg_min_v92644:
+            result["errors"].append(
+                "Không được đăng ký lịch nghỉ cho ngày trong quá khứ."
+            )
+        if start_date > _reg_max_v92644 or end_date > _reg_max_v92644:
+            result["errors"].append(
+                f"Chỉ được đăng ký lịch nghỉ đến hết {_reg_max_v92644.strftime('%d/%m/%Y')}."
+            )
+        if result["errors"]:
+            return result
+
     selected_dates = [
         start_date + timedelta(days=i)
         for i in range((end_date - start_date).days + 1)
@@ -10470,6 +10525,12 @@ def validate_schedule_delete_permission(original_row, role, current_user=None, t
     dt = pd.to_datetime(original_row.get("Ngày"), errors="coerce", dayfirst=True)
     old_date = dt.date() if pd.notna(dt) else None
 
+    # V92.6.44: ngoài Admin, tuyệt đối không được xóa lịch của ngày quá khứ.
+    if old_date is None:
+        return False, "Ngày nghỉ không hợp lệ."
+    if old_date < today:
+        return False, "Không được xóa lịch nghỉ của ngày trong quá khứ."
+
     if role in EMPLOYEE_LIKE_ROLES:
         return validate_employee_leave_change_permission(
             original_row, None, current_user=current_user, today=today, action="hủy"
@@ -10519,6 +10580,17 @@ def validate_schedule_edit_permission(original_row, edited_row, role, today=None
     if role == "admin":
         return True, ""
 
+    # V92.6.44:
+    # Ngoài Admin, không được sửa bản ghi quá khứ, không được đổi sang ngày quá khứ,
+    # và ngày mới chỉ nằm trong tháng hiện tại + tháng kế tiếp.
+    if old_date < today or new_date < today:
+        return False, "Không được sửa lịch nghỉ của ngày trong quá khứ."
+    _, _edit_max_v92644 = employee_registration_window(today)
+    if new_date > _edit_max_v92644:
+        return False, (
+            f"Chỉ được sửa lịch nghỉ đến hết {_edit_max_v92644.strftime('%d/%m/%Y')}."
+        )
+
     if role in EMPLOYEE_LIKE_ROLES:
         permitted, message = validate_employee_leave_change_permission(
             original_row,
@@ -10529,13 +10601,6 @@ def validate_schedule_edit_permission(original_row, edited_row, role, today=None
         )
         if not permitted:
             return False, message
-
-        # Giữ giới hạn phạm vi lịch tối đa đến hết tháng kế tiếp.
-        _, emp_max_date = employee_registration_window(today)
-        if new_date > emp_max_date:
-            return False, (
-                f"Nhân viên chỉ được sửa lịch đến hết {emp_max_date.strftime('%d/%m/%Y')}."
-            )
 
     elif role in {"letan", "quanly"}:
         old_reason = original_row.get("Lý do nghỉ", original_row.get("Loại nghỉ", ""))
@@ -25948,28 +26013,39 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             # KHÔNG có truy vấn dữ liệu đối chiếu LIVE tại bước chọn ngày.
             _registration_today = get_vn_today()
 
+            _calendar_role_v92644 = str(
+                st.session_state.get("current_role", "") or ""
+            ).strip().lower()
+            _calendar_min_v92644, _calendar_max_v92644 = employee_registration_window(
+                _registration_today
+            )
+
             if is_admin_letan:
                 list_nv_input = ["-- Chọn nhân viên --"] + all_users
+            else:
+                list_nv_input = [st.session_state.current_user]
+
+            if _calendar_role_v92644 == "admin":
+                # Admin là ngoại lệ duy nhất: được thao tác ngày quá khứ.
                 chosen_date = st.date_input(
                     "📅 Chọn ngày nghỉ:",
                     value=_registration_today,
                     key="sb_chosen_date_v92633_single",
                 )
             else:
-                list_nv_input = [st.session_state.current_user]
-                emp_min_date, emp_max_date = employee_registration_window()
+                # V92.6.44: mọi tài khoản ngoài Admin chỉ chọn được từ hôm nay
+                # đến hết tháng kế tiếp; calendar khóa toàn bộ ngày ngoài phạm vi.
                 chosen_date = st.date_input(
                     "📅 Chọn ngày nghỉ:",
-                    value=emp_min_date,
-                    min_value=emp_min_date,
-                    max_value=emp_max_date,
+                    value=_calendar_min_v92644,
+                    min_value=_calendar_min_v92644,
+                    max_value=_calendar_max_v92644,
                     key="sb_chosen_date_v92633_single",
                 )
                 st.caption(
-                    f"Leader/Nhân viên chỉ thao tác lịch của chính mình; "
-                    f"ngày được chọn từ {emp_min_date.strftime('%d/%m/%Y')} đến "
-                    f"{emp_max_date.strftime('%d/%m/%Y')}. "
-                    "Mỗi Lý do nghỉ vẫn phải thỏa quy định G:N trong LoaiNghi."
+                    f"Chỉ được đăng ký từ {_calendar_min_v92644.strftime('%d/%m/%Y')} đến "
+                    f"{_calendar_max_v92644.strftime('%d/%m/%Y')}. "
+                    "Không được đăng ký ngày trong quá khứ."
                 )
 
             # Toàn bộ luồng kiểm tra/lưu phía sau vẫn dùng start_date/end_date,

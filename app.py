@@ -1,4 +1,4 @@
-# V92.6.55 - Upload Excel là nguồn lương ưu tiên số 1; tên file bất kỳ (2026-08-21)
+# V92.6.56 - Fix timezone Excel cho toàn bộ sheet Snapshot TimeSoft (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1042,24 +1042,26 @@ def _timesoft_history_export_workbook(summary_df, invoice_df, checkin_df, events
             {"Thông tin": "Dòng doanh thu", "Giá trị": len(invoice_df) if isinstance(invoice_df, pd.DataFrame) else 0},
             {"Thông tin": "Dòng chấm công", "Giá trị": len(checkin_df) if isinstance(checkin_df, pd.DataFrame) else 0},
         ])
-        info.to_excel(writer, index=False, sheet_name="ThongTin")
+        _excel_safe_dataframe_v92654(info).to_excel(writer, index=False, sheet_name="ThongTin")
         _excel_safe_dataframe_v92654(summary_df if isinstance(summary_df, pd.DataFrame) else pd.DataFrame()).to_excel(
             writer, index=False, sheet_name="TongHopNgay"
         )
-        (invoice_df if isinstance(invoice_df, pd.DataFrame) else pd.DataFrame()).to_excel(
-            writer, index=False, sheet_name="DoanhThu"
-        )
+        _excel_safe_dataframe_v92654(
+            invoice_df if isinstance(invoice_df, pd.DataFrame) else pd.DataFrame()
+        ).to_excel(writer, index=False, sheet_name="DoanhThu")
         chk_export = _timesoft_checkin_display_df(checkin_df) if isinstance(checkin_df, pd.DataFrame) else pd.DataFrame()
         # Nếu hàm display bỏ cột Ngày snapshot, giữ bản raw khi cần.
         if isinstance(checkin_df, pd.DataFrame) and "Ngày snapshot" in checkin_df.columns and "Ngày snapshot" not in chk_export.columns:
             chk_export.insert(0, "Ngày snapshot", checkin_df["Ngày snapshot"].values)
-        chk_export.to_excel(writer, index=False, sheet_name="ChamCong")
+        _excel_safe_dataframe_v92654(chk_export).to_excel(
+            writer, index=False, sheet_name="ChamCong"
+        )
         _excel_safe_dataframe_v92654(events_df if isinstance(events_df, pd.DataFrame) else pd.DataFrame()).to_excel(
             writer, index=False, sheet_name="LichSuHoatDong"
         )
-        (storage_df if isinstance(storage_df, pd.DataFrame) else pd.DataFrame()).to_excel(
-            writer, index=False, sheet_name="DataLuuTru"
-        )
+        _excel_safe_dataframe_v92654(
+            storage_df if isinstance(storage_df, pd.DataFrame) else pd.DataFrame()
+        ).to_excel(writer, index=False, sheet_name="DataLuuTru")
     return output.getvalue()
 
 

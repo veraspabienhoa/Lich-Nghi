@@ -1,4 +1,4 @@
-# V92.6.72 - Snapshot chấm công số phút +/- + Auto Update theo khoảng ngày + ẩn nhân sự không hoạt động (2026-08-22)
+# V92.6.73 - Ưu tiên TimeSoft nghỉ giữa ca + Auto phạt quá Duration + email vi phạm (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -887,6 +887,18 @@ def _timesoft_signed_arrival_minutes_v92672(row):
     return int(round(-diff))
 
 
+def _strip_midshift_status_icons_v92673(value):
+    """Trạng thái nghỉ giữa ca chỉ giữ chữ, bỏ icon/emoji trang trí."""
+    text = str(value or "").strip()
+    for token in [
+        "✅", "🔴", "❌", "⚠️", "⚠", "🟢", "🟡", "⛔", "☕", "⏳",
+        "✔️", "✔", "✖️", "✖", "ℹ️", "ℹ",
+    ]:
+        text = text.replace(token, "")
+    text = re.sub(r"\s+", " ", text).strip(" ·-–—")
+    return text
+
+
 def _timesoft_checkin_display_df(
     df,
     include_midshift_break=True,
@@ -903,10 +915,10 @@ def _timesoft_checkin_display_df(
       - Trạng thái nghỉ giữa ca
       - Số phút (âm = vào muộn, dương = vào sớm)
 
-    Nguồn xác định:
-      1) FaceID chi tiết TimeSoft (nếu Admin đã nạp file `lich-su-checkin`);
-      2) đối chiếu TourVera cột R:V để nhận diện trường hợp ra ngoài nhưng thiếu FaceID;
-      3) dữ liệu tổng hợp TimeSoft hiện có làm fallback.
+    Nguồn xác định V92.6.73:
+      1) TimeSoft trước: FaceID chi tiết; nếu không đủ thì dữ liệu TimeSoft tổng hợp;
+      2) CHỈ khi TimeSoft không đủ dữ liệu để xác định đủ cặp ra/vào mới fallback
+         sang TourVera R:V hoặc nguồn đối chiếu khác. Không để nguồn phụ ghi đè TimeSoft.
 
     FaceID trong khung 23:00 ngày làm việc -> 02:00 ngày hôm sau được coi là
     check-out cuối ca và KHÔNG dùng làm cặp nghỉ giữa ca.
@@ -1077,7 +1089,11 @@ def _timesoft_checkin_display_df(
                     _vals_out.append(_info_v92667.get("out", ""))
                     _vals_in.append(_info_v92667.get("in", ""))
                     _vals_min.append(_info_v92667.get("minutes", ""))
-                    _vals_status.append(_info_v92667.get("status", ""))
+                    _vals_status.append(
+                        _strip_midshift_status_icons_v92673(
+                            _info_v92667.get("status", "")
+                        )
+                    )
 
                 if len(_vals_out) == len(out):
                     out["Giờ ra nghỉ giữa ca"] = _vals_out
@@ -1576,7 +1592,7 @@ def render_timesoft_snapshot_history_admin():
                     chk_view = chk_view[chk_view[employee_col].astype(str).eq(selected_employee)].copy()
             st.caption(
                 "☕ Nghỉ giữa ca: Giờ ra / Giờ vào lại / Trạng thái được tính từ các cụm FaceID "
-                "theo cùng quy tắc đang dùng cho Auto Update. · Số phút: số âm = vào muộn, "
+                "theo cùng quy tắc đang dùng cho Auto Update, ưu tiên TimeSoft trước mọi nguồn khác. · Số phút: số âm = vào muộn, "
                 "số dương = vào sớm."
             )
             st.dataframe(chk_view, hide_index=True, width="stretch", height=520)
@@ -3975,6 +3991,123 @@ def get_smtp_sender_credentials():
         except Exception:
             pass
     return sender_email, sender_pass
+
+
+def _auto_penalty_cc_emails_v92673(credentials_df=None):
+    """CC Auto phạt: email hệ thống/Admin + toàn bộ quanly/letan đang làm việc."""
+    emails = {"veraspabienhoa@gmail.com"}
+    try:
+        smtp_email, _ = get_smtp_sender_credentials()
+        if smtp_email and "@" in smtp_email:
+            emails.add(smtp_email.strip())
+    except Exception:
+        pass
+
+    try:
+        creds = (
+            credentials_df
+            if isinstance(credentials_df, pd.DataFrame)
+            else load_credentials_recent()
+        )
+        if isinstance(creds, pd.DataFrame) and not creds.empty:
+            if "Phân quyền" in creds.columns and "Email" in creds.columns:
+                d = creds[
+                    creds["Phân quyền"].astype(str).str.strip().str.lower()
+                    .isin({"quanly", "letan"})
+                ].copy()
+                if "Tên nhân viên" in d.columns:
+                    try:
+                        status_map = load_employment_status_map()
+                        d = d[d["Tên nhân viên"].astype(str).apply(
+                            lambda n: status_map.get(
+                                normalize_login_name(n), EMPLOYMENT_STATUS_ACTIVE
+                            ) == EMPLOYMENT_STATUS_ACTIVE
+                        )]
+                    except Exception:
+                        pass
+                for value in d["Email"].astype(str).tolist():
+                    value = value.strip()
+                    if value and "@" in value:
+                        emails.add(value)
+    except Exception:
+        pass
+    return sorted(emails)
+
+
+def send_auto_penalty_notification_email_v92673(
+    employee_username,
+    work_date,
+    leave_reason,
+    leave_detail,
+    penalty_amount,
+    actor="AUTO UPDATE",
+):
+    """Gửi email ngay khi Auto Update ghi thành công một vi phạm có tiền phạt > 0."""
+    try:
+        amount = float(penalty_amount or 0)
+    except Exception:
+        amount = 0.0
+    if amount <= 0:
+        return True, "Không gửi email vì Phạt vi phạm = 0."
+
+    try:
+        # Dùng cache hồ sơ gần nhất để một lượt Auto nhiều nhân viên không ép đọc lại
+        # Google/PostgreSQL cho từng email; cache hiện tại vẫn đủ mới cho thông tin liên hệ.
+        creds = load_credentials_recent()
+        to_email = latest_email_from_credentials(creds, employee_username)
+        if not to_email or "@" not in to_email:
+            return False, f"{employee_username} chưa có Email hợp lệ trong hồ sơ."
+
+        smtp_email, smtp_password = get_smtp_sender_credentials()
+        if not smtp_email or not smtp_password:
+            return False, "Chưa cấu hình SMTP để gửi email Auto Update."
+
+        emp_profile = _credential_profile_by_username(employee_username, creds)
+        emp_name = str(
+            emp_profile.get("Họ và tên đầy đủ", "") or employee_username
+        ).strip()
+        date_text = normalize_schedule_date(work_date) or str(work_date or "")
+        reason_text = clean_leave_reason_display(leave_reason)
+        detail_text = str(leave_detail or "").strip()
+
+        cc_emails = [
+            x for x in _auto_penalty_cc_emails_v92673(creds)
+            if normalize_login_name(x) != normalize_login_name(to_email)
+        ]
+
+        body_html = f"""
+        <html><body style='font-family:Arial,sans-serif'>
+        <h3>VERA SPA · THÔNG BÁO AUTO UPDATE VI PHẠM</h3>
+        <p>Hệ thống đã tự động ghi nhận một vi phạm của <b>{html.escape(emp_name)}</b>.</p>
+        <p><b>Ngày:</b> {html.escape(date_text)}</p>
+        <p><b>Lý do:</b> {html.escape(reason_text)}</p>
+        <p><b>Chi tiết:</b> {html.escape(detail_text)}</p>
+        <p><b>Phạt vi phạm:</b> {amount:,.0f} VNĐ</p>
+        <p><b>Nguồn:</b> {html.escape(str(actor or 'AUTO UPDATE'))}</p>
+        <p>Vui lòng đăng nhập hệ thống VERA để kiểm tra chi tiết.</p>
+        </body></html>
+        """
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"[VERA SPA] Auto Update vi phạm · {employee_username} · {date_text}"
+        msg["From"] = f"VERA SPA <{smtp_email}>"
+        msg["To"] = to_email
+        if cc_emails:
+            msg["Cc"] = ", ".join(cc_emails)
+        msg.attach(MIMEText(body_html, "html", "utf-8"))
+
+        recipients = [to_email] + cc_emails
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(smtp_email, smtp_password)
+        server.sendmail(smtp_email, recipients, msg.as_string())
+        server.quit()
+        return True, (
+            f"Đã gửi email Auto Update tới {employee_username} ({to_email})"
+            + (f"; CC {len(cc_emails)} địa chỉ." if cc_emails else ".")
+        )
+    except Exception as e:
+        return False, f"Lỗi gửi email Auto Update: {e}"
 
 
 def _credential_profile_by_username(username, credentials_df=None):
@@ -7470,18 +7603,18 @@ def calculate_midshift_break_from_timesoft(
     tour_df=None,
 ):
     """
-    V92.6.67 - Tính nghỉ giữa ca theo FaceID thật + đối chiếu TourVera.
+    V92.6.73 - Tính nghỉ giữa ca theo thứ tự nguồn nghiêm ngặt.
 
     Nguyên tắc:
-    - FaceID chi tiết TimeSoft là nguồn chính khi có file `lich-su-checkin`.
-    - TourVera Input R:V là nguồn đối chiếu để phát hiện ra/vào mà thiếu FaceID.
+    - Ưu tiên tuyệt đối TimeSoft. Nếu có đủ cụm FaceID TimeSoft để xác định cặp nghỉ
+      thì dùng cặp đó và KHÔNG cho TourVera ghi đè.
+    - TimeSoft chi tiết (`lich-su-checkin`) được ưu tiên; dữ liệu tổng hợp TimeSoft chỉ
+      bổ sung các mốc TimeSoft còn thiếu.
+    - Chỉ khi TimeSoft KHÔNG ĐỦ dữ liệu để xác định đủ Giờ ra + Giờ vào mới fallback
+      sang TourVera Input R:V hoặc nguồn đối chiếu khác.
     - FaceID 23:00 ngày làm việc -> 02:00 hôm sau là checkout cuối ca, luôn loại khỏi
       cặp nghỉ giữa ca.
-    - Ví dụ có 3 FaceID hợp lệ: nếu cụm đầu là vào ca thì cụm 2 -> cụm 3 là nghỉ.
-    - Nếu TourVera có Giờ ra/Giờ vào, ưu tiên ghép các FaceID gần 2 mốc đó; nhờ vậy
-      vẫn xử lý đúng trường hợp nhân viên không chấm FaceID lúc vào ca đầu ngày.
-    - Khi TourVera chứng minh có ra ngoài nhưng thiếu FaceID, vẫn tính thời gian từ
-      TourVera và ghi cảnh báo rõ trong Trạng thái.
+    - Ví dụ có đúng 3 cụm FaceID hợp lệ: cụm 1 = vào ca, cụm 2 -> cụm 3 = nghỉ giữa ca.
     """
     cols = [
         "Ngày", "Tên nhân viên", "Bộ phận", "Ca làm việc",
@@ -7626,60 +7759,43 @@ def calculate_midshift_break_from_timesoft(
         face_warning = ""
 
         # ------------------------------------------------------
-        # 1) Có dữ liệu TourVera: ghép FaceID gần Giờ ra/Giờ vào.
+        # 1) V92.6.73: TIMESOFT LUÔN ĐƯỢC XÉT TRƯỚC.
+        # Nếu TimeSoft đã đủ cặp nghỉ thì nguồn phụ tuyệt đối không ghi đè.
         # ------------------------------------------------------
-        if isinstance(tour_out, datetime) or isinstance(tour_in, datetime):
-            matched_out = _nearest_cluster_to_time_v92667(
-                clusters,
-                tour_out,
-                max_minutes=MIDSHIFT_TOUR_FACE_MATCH_MINUTES_V92667,
-            ) if isinstance(tour_out, datetime) else None
-            exclude_idx = [matched_out[1]] if matched_out else []
-            matched_in = _nearest_cluster_to_time_v92667(
-                clusters,
-                tour_in,
-                max_minutes=MIDSHIFT_TOUR_FACE_MATCH_MINUTES_V92667,
-                exclude=exclude_idx,
-            ) if isinstance(tour_in, datetime) else None
-
-            if matched_out and matched_in and matched_out[2]["start"] < matched_in[2]["start"]:
-                break_out = matched_out[2]["start"]
-                break_in = matched_in[2]["start"]
-                source = "TimeSoft FaceID + TourVera"
-                method = "Ghép FaceID gần Giờ ra/Giờ vào TourVera"
-            elif matched_out and isinstance(tour_in, datetime):
-                break_out = matched_out[2]["start"]
-                break_in = tour_in
-                source = "TimeSoft + TourVera"
-                face_warning = "Thiếu FaceID giờ vào"
-                method = "FaceID giờ ra + Giờ vào TourVera"
-            elif matched_in and isinstance(tour_out, datetime):
-                break_out = tour_out
-                break_in = matched_in[2]["start"]
-                source = "TimeSoft + TourVera"
-                face_warning = "Thiếu FaceID giờ ra"
-                method = "Giờ ra TourVera + FaceID giờ vào"
-            elif isinstance(tour_out, datetime) and isinstance(tour_in, datetime):
-                break_out = tour_out
-                break_in = tour_in
-                source = "TourVera"
-                face_warning = "Thiếu FaceID ra/vào"
-                method = "TourVera R:V xác nhận có nghỉ giữa ca"
+        pair = _pick_midshift_break_pair(
+            clusters,
+            allowed_minutes=allowed,
+            cluster_minutes=cluster_minutes,
+        )
+        if pair:
+            break_out = pair["start_cluster"]["start"]
+            break_in = pair["end_cluster"]["start"]
+            source = "TimeSoft FaceID chi tiết" if raw_exists else "TimeSoft tổng hợp"
+            method = pair.get("method", "")
 
         # ------------------------------------------------------
-        # 2) Không có TourVera: suy ra từ FaceID.
+        # 2) Chỉ khi TimeSoft KHÔNG ĐỦ cặp ra/vào mới dùng TourVera.
+        # Không trộn nửa TimeSoft + nửa Tour để tránh kết quả nguồn phụ làm lệch FaceID.
         # ------------------------------------------------------
         if break_out is None or break_in is None:
-            pair = _pick_midshift_break_pair(
-                clusters,
-                allowed_minutes=allowed,
-                cluster_minutes=cluster_minutes,
-            )
-            if pair:
-                break_out = pair["start_cluster"]["start"]
-                break_in = pair["end_cluster"]["start"]
-                source = "TimeSoft FaceID chi tiết" if raw_exists else "TimeSoft tổng hợp"
-                method = pair.get("method", "")
+            if (
+                isinstance(tour_out, datetime)
+                and isinstance(tour_in, datetime)
+                and tour_in > tour_out
+            ):
+                break_out = tour_out
+                break_in = tour_in
+                source = "TourVera R:V (fallback)"
+                face_warning = "TimeSoft chưa đủ FaceID xác định nghỉ giữa ca"
+                method = "Fallback TourVera vì TimeSoft chưa đủ cặp ra/vào"
+            elif isinstance(tour_out, datetime):
+                face_warning = "TimeSoft chưa đủ dữ liệu · TourVera có Giờ ra nhưng chưa có Giờ vào"
+                source = "TourVera R:V (fallback)"
+                method = "Chưa đủ cặp ra/vào"
+            elif isinstance(tour_in, datetime):
+                face_warning = "TimeSoft chưa đủ dữ liệu · TourVera có Giờ vào nhưng chưa có Giờ ra"
+                source = "TourVera R:V (fallback)"
+                method = "Chưa đủ cặp ra/vào"
 
         # Chưa đủ bằng chứng.
         if break_out is None or break_in is None or break_in <= break_out:
@@ -7706,7 +7822,7 @@ def calculate_midshift_break_from_timesoft(
                 "Loại vi phạm": "",
                 "Nguồn nghỉ giữa ca": source,
                 "Cách xác định": method,
-                "Trạng thái": status,
+                "Trạng thái": _strip_midshift_status_icons_v92673(status),
             })
             continue
 
@@ -7714,17 +7830,24 @@ def calculate_midshift_break_from_timesoft(
         actual = int(round(actual_float))
         duration_diff = actual - allowed
 
+        # V92.6.73: "vào muộn sau nghỉ giữa ca" được tính theo CẢ HAI giới hạn:
+        # 1) vượt Duration nghỉ của ca; 2) vượt giờ phải quay lại cuối cùng toàn hệ thống.
+        # Lấy số phút vi phạm lớn hơn. Ví dụ nghỉ 101 phút / quy định 90 -> vào muộn 11 phút.
+        duration_late_minutes = max(0, int(duration_diff))
         deadline_dt = _midshift_deadline_datetime(work_date, deadline_text)
-        late_seconds = max(0.0, (break_in - deadline_dt).total_seconds())
-        late_minutes = int(late_seconds // 60)
-        is_outside_late = late_seconds >= late_threshold * 60
+        deadline_late_seconds = max(0.0, (break_in - deadline_dt).total_seconds())
+        deadline_late_minutes = int(deadline_late_seconds // 60)
+        late_minutes = max(duration_late_minutes, deadline_late_minutes)
+        is_outside_late = late_minutes >= late_threshold
 
         if is_outside_late:
             violation = "Ra ngoài vào muộn"
             core_status = f"Ra ngoài vào muộn {late_minutes} phút"
-        elif duration_diff > 0:
-            violation = "Nghỉ giữa ca quá thời gian"
-            core_status = f"Nghỉ quá {duration_diff} phút"
+        elif late_minutes > 0:
+            violation = ""
+            core_status = (
+                f"Vào muộn {late_minutes} phút (dưới ngưỡng phạt {late_threshold} phút)"
+            )
         else:
             violation = ""
             core_status = "Đúng quy định"
@@ -7733,6 +7856,7 @@ def calculate_midshift_break_from_timesoft(
             status = f"{face_warning} · {core_status}"
         else:
             status = core_status
+        status = _strip_midshift_status_icons_v92673(status)
 
         out.append({
             **base_row,
@@ -7746,7 +7870,7 @@ def calculate_midshift_break_from_timesoft(
             "Loại vi phạm": violation,
             "Nguồn nghỉ giữa ca": source,
             "Cách xác định": method,
-            "Trạng thái": status,
+            "Trạng thái": _strip_midshift_status_icons_v92673(status),
         })
 
     return pd.DataFrame(out, columns=cols)
@@ -9611,11 +9735,43 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
             note=(ordinal_note if ordinal_note else "Đăng ký lịch nghỉ"),
         )
 
+        # V92.6.73: email Auto Update được đặt tại điểm ghi dữ liệu trung tâm.
+        # Nhờ vậy Tour / Đi trễ / Nghỉ KP / Nghỉ giữa ca / Ca1 đều gửi cùng một cách
+        # sau khi Sheet1 đã ghi thành công và chỉ khi tổng Phạt vi phạm > 0.
+        auto_email_msg_v92673 = ""
+        actor_key_v92673 = str(updated_by or "").strip().upper()
+        if actor_key_v92673.startswith("AUTO UPDATE") and save_penalty > 0:
+            auto_email_ok_v92673, auto_email_msg_v92673 = (
+                send_auto_penalty_notification_email_v92673(
+                    nv,
+                    record.get("Ngày", ngay),
+                    record.get("Lý do nghỉ", loai_nghi),
+                    record.get("Chi tiết", save_detail),
+                    save_penalty,
+                    actor=updated_by,
+                )
+            )
+            write_leave_activity_log(
+                "EMAIL AUTO PHẠT",
+                updated_by,
+                before_row=None,
+                after_row=record,
+                status=("SUCCESS" if auto_email_ok_v92673 else "ERROR"),
+                note=auto_email_msg_v92673,
+            )
+
         _clear_leave_data_caches()
         if ordinal_note:
             extra = max(0, save_penalty - float(phat_vi_pham or 0))
-            return True, f"{ordinal_note}. Phạt lũy tiến cộng thêm {extra:,.0f} VNĐ; tổng phạt {save_penalty:,.0f} VNĐ."
-        return True, "Đã ghi nhận lịch nghỉ thành công vào Sheet1 chính."
+            base_msg_v92673 = (
+                f"{ordinal_note}. Phạt lũy tiến cộng thêm {extra:,.0f} VNĐ; "
+                f"tổng phạt {save_penalty:,.0f} VNĐ."
+            )
+        else:
+            base_msg_v92673 = "Đã ghi nhận lịch nghỉ thành công vào Sheet1 chính."
+        if auto_email_msg_v92673:
+            base_msg_v92673 += f" Email: {auto_email_msg_v92673}"
+        return True, base_msg_v92673
     except Exception as e:
         return False, f"Lỗi ghi dữ liệu: {e}"
 
@@ -10927,9 +11083,10 @@ def auto_update_midshift_late_from_timesoft(
     force_daily_run=False,
 ):
     """
-    Tự ghi "Ra ngoài vào muộn" khi nhân viên quay lại nghỉ giữa ca
-    từ đủ ngưỡng sau giờ giới hạn (mặc định 20:05 trở đi).
-    Không ghi nếu ngày đó không nghỉ hoặc dữ liệu chưa đủ cụm FaceID.
+    Tự ghi "Ra ngoài vào muộn" khi nhân viên quay lại nghỉ giữa ca từ đủ ngưỡng:
+    - vượt Duration nghỉ của ca; HOẶC
+    - vượt giờ phải quay lại cuối cùng toàn hệ thống.
+    Ưu tiên dữ liệu TimeSoft; chỉ fallback nguồn khác khi TimeSoft chưa đủ cặp ra/vào.
     """
     result = _auto_result("TimeSoft nghỉ giữa ca")
 
@@ -26251,7 +26408,8 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         "không có **Hỗ trợ Ca 1 đi trễ 2 tiếng / Hỗ trợ Ca 1 đi trễ 3 tiếng / Hỗ trợ Ca 2 đi trễ 1 tiếng**, "
         "và hôm đó có **Đi trễ <=30 / <=60 / >60 đến <=120 phút** theo đúng loại nghỉ đã cấu hình.  \n"
         "• Tiền phạt và Số ngày tính lấy trực tiếp từ sheet **LoaiNghi**; dữ liệu phạt ghi vào Sheet1 A:M và không tạo trùng cùng Ngày + Nhân viên + Lý do.  \n"
-        "• **Email bắt buộc cho mọi Auto Update có Phạt vi phạm > 0**: gửi từ `veraspabienhoa@gmail.com` đến nhân viên bị phạt; CC `veraspabienhoa@gmail.com + quanly + letan`. Email lỗi sẽ được Job kế tiếp tự thử gửi lại."
+        "• **Email cho mọi Auto Update có Phạt vi phạm > 0**: gửi ngay sau khi Sheet1 ghi thành công tới nhân viên; CC `veraspabienhoa@gmail.com + quanly + letan`. Kết quả gửi email được ghi vào Nhật ký lịch nghỉ.  \n"
+        "• **Nghỉ giữa ca ưu tiên TimeSoft tuyệt đối**: có đủ cặp FaceID TimeSoft thì dùng TimeSoft; chỉ khi TimeSoft chưa đủ dữ liệu ra/vào mới fallback TourVera R:V hoặc nguồn khác. Vượt Duration nghỉ hoặc vượt giờ quay lại cuối cùng từ đủ ngưỡng đều được tính `Ra ngoài vào muộn`."
     )
 
 elif selected_page == "📦 Snapshot" and has_feature_access("snapshot_today"):

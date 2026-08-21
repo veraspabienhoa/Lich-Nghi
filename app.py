@@ -1,4 +1,4 @@
-# V92.6.58 - Căn giữa cột Tổng nghỉ trong bảng thống kê theo ngày (2026-08-21)
+# V92.6.59 - Cho phép đổi trực tiếp Lý do nghỉ cùng ngày và tự tính lại toàn bộ cột phụ thuộc (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -11155,11 +11155,37 @@ def rebalance_progressive_penalty_groups(client, affected_groups, updated_by):
     return updated_physical_rows
 
 def update_schedule_record(original_row, edited_row, updated_by):
-    """Sửa đúng dòng Sheet1 chính theo schema A:M và tự xếp lại phạt lũy tiến."""
+    """
+    V92.6.59 - Sửa Lý do nghỉ trực tiếp nhưng GIỮ NGUYÊN ngày + nhân viên.
+
+    Người dùng chỉ thay đổi cột "Lý do nghỉ". Backend luôn lấy Ngày, Tên nhân viên
+    và Chi tiết gốc làm nền rồi tự tính lại toàn bộ cột phụ thuộc theo LoaiNghi:
+    Thứ ngày, Loại nghỉ, Chi tiết/Người Thứ X, Số ngày tính, Số ngày phép cộng dồn,
+    Phạt vi phạm và metadata cập nhật. Sau khi ghi, cả nhóm phạt lũy tiến CŨ và MỚI
+    đều được rebalance để Người Thứ 1/2/3... và tiền phạt của các dòng liên quan đúng lại.
+    """
     try:
         client = get_gspread_client()
         if not client:
             return False, "Chưa cấu hình quyền kết nối Google Sheets."
+
+        # Bảo vệ backend: thao tác sửa trực tiếp này tuyệt đối không được đổi ngày
+        # hoặc đổi nhân viên. Dù UI bị can thiệp, backend vẫn giữ bản ghi gốc.
+        original_date = normalize_schedule_date(original_row.get('Ngày', ''))
+        edited_date = normalize_schedule_date(edited_row.get('Ngày', original_row.get('Ngày', '')))
+        if edited_date and original_date and edited_date != original_date:
+            return False, "Chỉ được đổi Lý do nghỉ của đúng ngày đã đăng ký; không được đổi Ngày trong thao tác này."
+
+        original_employee = str(original_row.get('Tên nhân viên', '') or '').strip()
+        edited_employee = str(edited_row.get('Tên nhân viên', original_employee) or '').strip()
+        if edited_employee and normalize_login_name(edited_employee) != normalize_login_name(original_employee):
+            return False, "Chỉ được đổi Lý do nghỉ; không được đổi Tên nhân viên trong thao tác này."
+
+        new_reason = clean_leave_reason_display(
+            edited_row.get('Lý do nghỉ', original_row.get('Lý do nghỉ', ''))
+        )
+        if not new_reason:
+            return False, "Lý do nghỉ không được để trống."
 
         affected_groups = set()
         old_group = _progressive_group_key(original_row)
@@ -11167,38 +11193,39 @@ def update_schedule_record(original_row, edited_row, updated_by):
             affected_groups.add(old_group)
 
         live_all = _load_live_primary_leave_sheet(client)
-        _actor_role_direct_v92638 = str(
-            st.session_state.get("current_role", "") or ""
-        ).strip().lower()
-        _admin_direct_v92638 = _actor_role_direct_v92638 == "admin"
 
-        if _admin_direct_v92638:
-            # V92.6.38: Admin sửa trực tiếp toàn bộ cột hiển thị.
-            # Không tự tính lại Loại nghỉ / Số ngày / Phạt / metadata để đè giá trị Admin nhập.
-            recalculated = edited_row.copy()
-        else:
-            recalculated = recalculate_schedule_fields(
-                original_row,
-                edited_row,
-                updated_by,
-                all_leave_data=live_all,
-                source_df=globals().get('df_loai_nghi', pd.DataFrame()),
-            )
+        # Chỉ nhận Lý do nghỉ mới; mọi trường khác lấy từ record gốc.
+        # Áp dụng giống nhau cho Admin/Lễ tân/Quản lý/Nhân viên/Leader để không còn
+        # trường hợp Admin sửa lý do nhưng Phạt/Người Thứ không được tính lại.
+        reason_only_edit = original_row.copy()
+        reason_only_edit['Ngày'] = original_row.get('Ngày', '')
+        reason_only_edit['Tên nhân viên'] = original_employee
+        reason_only_edit['Lý do nghỉ'] = new_reason
+        reason_only_edit['Chi tiết'] = original_row.get('Chi tiết', '')
+
+        recalculated = recalculate_schedule_fields(
+            original_row,
+            reason_only_edit,
+            updated_by,
+            all_leave_data=live_all,
+            source_df=globals().get('df_loai_nghi', pd.DataFrame()),
+        )
 
         ngay = normalize_schedule_date(recalculated.get('Ngày', ''))
         nv = str(recalculated.get('Tên nhân viên', '')).strip()
         lydo = clean_leave_reason_display(recalculated.get('Lý do nghỉ', ''))
-        if not nv or not lydo:
-            return False, "Tên nhân viên và Lý do nghỉ không được để trống."
+        if not ngay or not nv or not lydo:
+            return False, "Ngày, Tên nhân viên và Lý do nghỉ không hợp lệ."
 
         others = _exclude_original_from_leave_df(live_all, original_row)
         if _leave_exists_in_sources(others, ngay, nv, lydo):
-            return False, f"'{nv}' đã có đúng lý do '{lydo}' trong ngày {ngay}. Có thể ghi thêm nếu là lý do khác."
+            return False, f"'{nv}' đã có đúng lý do '{lydo}' trong ngày {ngay}. Không thể đổi thành một lý do đã tồn tại cùng ngày."
 
-        recalculated['Ngày'] = ngay
-        if not _admin_direct_v92638:
-            recalculated['Thứ ngày'] = _vn_weekday_label(ngay)
-            recalculated['Loại nghỉ'] = _leave_type_for_reason(lydo)
+        # Khóa lại hai khóa định danh trước khi ghi.
+        recalculated['Ngày'] = original_date or ngay
+        recalculated['Tên nhân viên'] = original_employee
+        recalculated['Thứ ngày'] = _vn_weekday_label(recalculated['Ngày'])
+        recalculated['Loại nghỉ'] = _leave_type_for_reason(lydo)
 
         target = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
         sheet_headers = _get_leave_sheet_headers(target, strict=True)
@@ -11221,14 +11248,10 @@ def update_schedule_record(original_row, edited_row, updated_by):
         )
         gspread_update_range(target, f'A{row_idx}:M{row_idx}', [new_values], raw=False)
 
-        if _admin_direct_v92638:
-            # Admin đã nhập trực tiếp tất cả giá trị, không cho rebalance ghi đè Chi tiết/Phạt.
-            rebalanced = 0
-        else:
-            new_group = _progressive_group_key(recalculated)
-            if new_group:
-                affected_groups.add(new_group)
-            rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, updated_by)
+        new_group = _progressive_group_key(recalculated)
+        if new_group:
+            affected_groups.add(new_group)
+        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, updated_by)
 
         # Đọc lại đúng trạng thái SAU cùng sau rebalance để audit chính xác.
         _audit_after_row = recalculated
@@ -11265,7 +11288,7 @@ def update_schedule_record(original_row, edited_row, updated_by):
                 f"{rebalanced} bản ghi trong nhóm bị ảnh hưởng."
                 + _audit_suffix
             )
-        return True, "Đã cập nhật lịch nghỉ thành công." + _audit_suffix
+        return True, "Đã đổi Lý do nghỉ và tự tính lại các cột liên quan thành công." + _audit_suffix
     except Exception as e:
         return False, f"Lỗi cập nhật lịch nghỉ: {e}"
 
@@ -27656,26 +27679,17 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             # V74: ép đúng dtype trước st.data_editor để tương thích Streamlit mới.
             editor_df = prepare_leave_editor_types(editor_df)
 
-            derived_cols = [
-                "Quyền xóa", "Lý do khóa",
-                "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
-                "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
-            ]
             _detail_role = str(st.session_state.current_role).strip().lower()
-            if _detail_role == "admin":
-                # V92.6.38: Admin được sửa trực tiếp TẤT CẢ cột đang hiển thị.
-                # Hai cột nội bộ Quyền xóa/Lý do khóa vẫn ẩn và không cần chỉnh.
-                disabled_cols = [
-                    c for c in ["Quyền xóa", "Lý do khóa"] if c in editor_df.columns
-                ]
-            else:
-                disabled_cols = [c for c in derived_cols if c in editor_df.columns]
-                if "Loại nghỉ" in editor_df.columns:
-                    disabled_cols.append("Loại nghỉ")
-                if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and "Tên nhân viên" in editor_df.columns:
-                    disabled_cols.append("Tên nhân viên")
 
-            # Chỉ Admin hoặc tài khoản có quyền sửa trực tiếp mới được sửa cell.
+            # V92.6.59: trong Chi tiết danh sách chỉ cho phép sửa Lý do nghỉ.
+            # Ngày + Nhân viên là khóa của bản ghi hiện tại; các cột còn lại do hệ thống
+            # tự tính lại sau khi bấm Lưu, áp dụng giống nhau kể cả Admin.
+            disabled_cols = [
+                c for c in editor_df.columns
+                if c not in {"Chọn", "Lý do nghỉ"}
+            ]
+
+            # Chỉ tài khoản có quyền sửa trực tiếp mới được mở dropdown Lý do nghỉ.
             # Các tài khoản còn lại vẫn được tick "Chọn" để yêu cầu xóa theo quy định từng dòng.
             _detail_can_edit_cells = (
                 _can_leave_detail_edit
@@ -27692,6 +27706,12 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     c for c in editor_df.columns
                     if c != "Chọn"
                 ]
+
+            if _detail_can_edit_cells:
+                st.caption(
+                    "✏️ Chỉ sửa cột Lý do nghỉ. Ngày và nhân viên được giữ nguyên; "
+                    "Loại nghỉ, Người Thứ, số ngày, phạt vi phạm và thông tin cập nhật sẽ tự tính lại khi bấm Lưu."
+                )
 
             editor_version = int(st.session_state.get('_detail_editor_version', 1))
             editor_key = f"detail_schedule_editor_batch_v{editor_version}"
@@ -27711,11 +27731,12 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 detail_col_config["Lý do khóa"] = None
             if "Ngày" in editor_df.columns:
                 detail_col_config["Ngày"] = st.column_config.DateColumn(
-                    "Ngày", format="DD/MM/YYYY", width=layout_width("leave_detail", "Ngày", "small")
+                    "Ngày", format="DD/MM/YYYY", disabled=True,
+                    width=layout_width("leave_detail", "Ngày", "small")
                 )
             if "Thứ ngày" in editor_df.columns:
                 detail_col_config["Thứ ngày"] = st.column_config.TextColumn(
-                    "Thứ ngày", disabled=(_detail_role != "admin"), width=layout_width("leave_detail", "Thứ ngày", "small")
+                    "Thứ ngày", disabled=True, width=layout_width("leave_detail", "Thứ ngày", "small")
                 )
             if "Lý do nghỉ" in editor_df.columns:
                 detail_col_config["Lý do nghỉ"] = st.column_config.SelectboxColumn(
@@ -27724,28 +27745,28 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 )
             if "Loại nghỉ" in editor_df.columns:
                 detail_col_config["Loại nghỉ"] = st.column_config.TextColumn(
-                    "Loại nghỉ", disabled=(_detail_role != "admin"),
+                    "Loại nghỉ", disabled=True,
                     width=layout_width("leave_detail", "Loại nghỉ", "medium"),
                 )
             if "Số ngày tính" in editor_df.columns:
                 detail_col_config["Số ngày tính"] = st.column_config.NumberColumn(
-                    "Số ngày tính", step=0.5, format="%.1f", disabled=(_detail_role != "admin"),
+                    "Số ngày tính", step=0.5, format="%.1f", disabled=True,
                     width=layout_width("leave_detail", "Số ngày tính", "small")
                 )
             if "Số ngày phép cộng dồn" in editor_df.columns:
                 detail_col_config["Số ngày phép cộng dồn"] = st.column_config.NumberColumn(
-                    "Số ngày phép cộng dồn", step=0.5, format="%.1f", disabled=(_detail_role != "admin"),
+                    "Số ngày phép cộng dồn", step=0.5, format="%.1f", disabled=True,
                     width=layout_width("leave_detail", "Số ngày phép cộng dồn", "small")
                 )
             if "Phạt vi phạm" in editor_df.columns:
                 detail_col_config["Phạt vi phạm"] = st.column_config.NumberColumn(
-                    "Phạt vi phạm", step=50000, format="%.0f", disabled=(_detail_role != "admin"),
+                    "Phạt vi phạm", step=50000, format="%.0f", disabled=True,
                     width=layout_width("leave_detail", "Phạt vi phạm", "small")
                 )
             for _c in ["Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"]:
                 if _c in editor_df.columns:
                     detail_col_config[_c] = st.column_config.TextColumn(
-                        _c, disabled=(_detail_role != "admin"), width=layout_width("leave_detail", _c, "small")
+                        _c, disabled=True, width=layout_width("leave_detail", _c, "small")
                     )
 
             with st.form(f"detail_schedule_batch_form_v{editor_version}", clear_on_submit=False):
@@ -27783,7 +27804,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 errors='ignore'
             ).copy().reset_index(drop=True)
             detail_compare = detail_edit_only.copy().reset_index(drop=True)
-            changed_positions = get_changed_schedule_positions(original_compare, detail_compare)
+            changed_positions = get_changed_schedule_positions(original_compare, detail_compare, editable_columns=["Lý do nghỉ"])
             selected_positions = detail_editor.index[detail_editor.get('Chọn', False) == True].tolist() if 'Chọn' in detail_editor.columns else []
 
             if submit_detail_save:
@@ -28079,7 +28100,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
                 help='Tick khi muốn XÓA. Không cần tick khi sửa; hệ thống tự nhận biết dòng đã thay đổi.'
             )
         if 'Ngày' in manage_visible.columns:
-            manage_col_config['Ngày'] = st.column_config.DateColumn('Ngày', format='DD/MM/YYYY', width=layout_width('leave_manage', 'Ngày', 'small'))
+            manage_col_config['Ngày'] = st.column_config.DateColumn('Ngày', format='DD/MM/YYYY', disabled=True, width=layout_width('leave_manage', 'Ngày', 'small'))
         if 'Thứ ngày' in manage_visible.columns:
             manage_col_config['Thứ ngày'] = st.column_config.TextColumn(
                 'Thứ ngày', disabled=True, width=layout_width('leave_manage', 'Thứ ngày', 'small')
@@ -28105,9 +28126,12 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             if _c in manage_visible.columns:
                 manage_col_config[_c] = st.column_config.TextColumn(_c, disabled=True)
 
-        manage_derived = [c for c in ['Thứ ngày','Loại nghỉ','Số ngày tính','Số ngày phép cộng dồn','Phạt vi phạm','Ngày cập nhật','Giờ cập nhật','Người cập nhật'] if c in manage_visible.columns]
-        if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and 'Tên nhân viên' in manage_visible.columns:
-            manage_derived.append('Tên nhân viên')
+        # V92.6.59: Quản lý lịch nghỉ chỉ cho sửa Lý do nghỉ.
+        # Ngày + Nhân viên + Chi tiết và toàn bộ cột phát sinh đều khóa trên editor.
+        manage_derived = [
+            c for c in manage_visible.columns
+            if c not in {'Chọn', 'Lý do nghỉ'}
+        ]
 
         _manage_has_general_edit = _can_manage_edit_action
         _manage_has_today_khong_phep = has_feature_access("leave_today_khong_phep_edit_delete")
@@ -28147,14 +28171,20 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             st.error("🔒 Admin đang khóa quyền thay đổi lịch nghỉ của nhân viên. Bảng chỉ được xem cho đến khi mở khóa.")
             manage_derived = list(manage_visible.columns)
 
-        with st.form('leave_manage_batch_edit_form_v70', clear_on_submit=False):
+        if not manage_edit_locked:
+            st.caption(
+                "✏️ Chỉ sửa cột Lý do nghỉ. Ngày và nhân viên được giữ nguyên; "
+                "Loại nghỉ, Người Thứ, số ngày, phạt vi phạm và thông tin cập nhật sẽ tự tính lại khi bấm Lưu."
+            )
+
+        with st.form('leave_manage_batch_edit_form_v92659', clear_on_submit=False):
             manage_editor = st.data_editor(
                 manage_visible,
                 width='stretch', height='content', hide_index=True, num_rows='fixed',
                 row_height=layout_row_height('leave_manage'),
                 disabled=manage_derived,
                 column_config=manage_col_config,
-                key='leave_manage_batch_editor_v70'
+                key='leave_manage_batch_editor_v92659'
             )
             _m_save, _m_delete = st.columns(2)
             with _m_save:
@@ -28175,7 +28205,7 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             manage_original_visible['Lý do nghỉ'] = manage_original_visible['Lý do nghỉ'].apply(clean_leave_reason_display)
         manage_original_visible = manage_original_visible.reset_index(drop=True)
         manage_original_visible = prepare_leave_editor_types(manage_original_visible)
-        manage_changed = get_changed_schedule_positions(manage_original_visible, manage_edit_only)
+        manage_changed = get_changed_schedule_positions(manage_original_visible, manage_edit_only, editable_columns=["Lý do nghỉ"])
         manage_selected = manage_editor.index[manage_editor.get('Chọn', False) == True].tolist() if 'Chọn' in manage_editor.columns else []
 
         if manage_submit_save:

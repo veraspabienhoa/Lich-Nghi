@@ -1,0 +1,26 @@
+THỨ TỰ TRIỂN KHAI AN TOÀN - V93.2 A:L
+
+KHÔNG MERGE/DEPLOY app.py mới trước khi Sheet1 được migrate sang A:L.
+
+1) Trên branch postgres-phase1, upload toàn bộ code mới nhưng chưa merge main.
+2) Chạy preview migration:
+   python migrate_leave_sheet_to_AL.py
+3) Kiểm tra output nhận diện schema và số dòng.
+4) Chạy thật:
+   python migrate_leave_sheet_to_AL.py --apply
+   Script sẽ tạo Sheet backup tên Sheet1_BACKUP_YYYYMMDD_HHMMSS trước khi ghi.
+5) Mở Google Sheet và xác nhận header A:L đúng:
+   Ngày | Thứ ngày | Tên nhân viên | Lý do nghỉ | Loại nghỉ | Chi tiết |
+   Số ngày tính | Số ngày phép cộng dồn | Phạt vi phạm | Ngày cập nhật |
+   Giờ cập nhật | Người cập nhật
+6) Test branch / staging.
+7) Chỉ sau khi test đạt mới merge vào main.
+
+Các file cần đi cùng nhau:
+- app.py
+- timesoft_sync_job.py
+- auto_penalty_daily_job.py
+- vera_daily_ops_job.py (nếu Job 21:00 đang dùng)
+- vera_postgres.py giữ nguyên Phase 1
+
+Không sử dụng Google Sheet 1bLxn... nữa.

@@ -1,4 +1,4 @@
-"""Vera Spa daily operations Cloud Run Job - V86.12.
+"""Vera Spa daily operations Cloud Run Job - V93.2.
 
 Action:
   python vera_daily_ops_job.py violations
@@ -81,8 +81,57 @@ AUDIT_HEADERS = [
 ]
 
 
+PRIMARY_LEAVE_HEADERS = [
+    "Ngày", "Thứ ngày", "Tên nhân viên", "Lý do nghỉ", "Loại nghỉ",
+    "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
+    "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật",
+]
+LEAVE_HEADER_RANGE = "A1:L1"
+LEAVE_DATA_RANGE = "A:L"
+
+
+
 def vn_now() -> datetime:
     return datetime.now(VN_TZ)
+
+
+def weekday_vi(d: date) -> str:
+    return {
+        0: "Thứ Hai", 1: "Thứ Ba", 2: "Thứ Tư", 3: "Thứ Năm",
+        4: "Thứ Sáu", 5: "Thứ Bảy", 6: "Chủ Nhật",
+    }.get(d.weekday(), "") if isinstance(d, date) else ""
+
+
+def ensure_leave_header(ws) -> None:
+    current = ws.get(LEAVE_HEADER_RANGE)
+    row = list(current[0]) if current else []
+    row += [""] * max(0, 12 - len(row))
+    normalized = [str(x).strip() for x in row[:12]]
+    expected = [str(x).strip() for x in PRIMARY_LEAVE_HEADERS]
+    if normalized == expected:
+        return
+    if not any(normalized):
+        ws.update(
+            LEAVE_HEADER_RANGE,
+            [PRIMARY_LEAVE_HEADERS],
+            value_input_option="USER_ENTERED",
+        )
+        return
+
+    legacy = ws.get("A1:M1")
+    legacy_row = list(legacy[0]) if legacy else []
+    legacy_row += [""] * max(0, 13 - len(legacy_row))
+    legacy_expected = [
+        "Ngày", "Thứ ngày", "Tên nhân viên", "Lý do nghỉ", "", "Loại nghỉ",
+        "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
+        "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật",
+    ]
+    if [str(x).strip() for x in legacy_row[:13]] == legacy_expected:
+        raise RuntimeError("Sheet1 vẫn đang ở schema A:M cũ. Hãy chạy migration A:M -> A:L trước khi chạy Job 21:00.")
+    raise RuntimeError(
+        "Header Sheet1 không đúng schema A:L. Không tự sửa để tránh lệch dữ liệu; "
+        "hãy chạy migrate_leave_sheet_to_AL.py trước."
+    )
 
 
 def normalize_text(value) -> str:
@@ -593,28 +642,24 @@ def employee_directory(client):
 
 
 def existing_violation_keys(client) -> set:
-    ws = client.open_by_key(
-        SHEET_DU_PHONG_ID
-    ).get_worksheet(0)
-    vals = ws.get_all_values()
+    ws = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+    ensure_leave_header(ws)
+    vals = ws.get(LEAVE_DATA_RANGE)
 
     out = set()
     for row in vals[1:]:
-        if len(row) < 3:
+        row = list(row[:12]) + [""] * max(0, 12 - len(row))
+        if not any(str(v).strip() for v in row):
             continue
-
         out.add(
             (
                 str(row[0]).strip(),
-                normalize_text(
-                    clean_employee_name(row[1])
-                ),
-                normalize_text(row[2]),
+                normalize_text(clean_employee_name(row[2])),
+                normalize_text(row[3]),
             )
         )
 
     return out
-
 
 def append_violation(
     client,
@@ -624,9 +669,8 @@ def append_violation(
     detail: str,
     penalty: float,
 ) -> tuple[bool, str]:
-    ws = client.open_by_key(
-        SHEET_DU_PHONG_ID
-    ).get_worksheet(0)
+    """Ghi Job 21:00 vào Sheet1 A:L; E là Loại nghỉ từ LoaiNghi."""
+    ws = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
 
     date_text = target_date.strftime("%d/%m/%Y")
     employee = clean_employee_name(employee)
@@ -636,28 +680,36 @@ def append_violation(
         normalize_text(employee),
         normalize_text(reason),
     )
-
     if key in existing_violation_keys(client):
         return False, "Đã tồn tại"
 
-    now = vn_now()
+    catalog = leave_catalog(client)
+    leave_type = str(
+        (catalog.get(normalize_text(reason)) or {}).get("type", "")
+        or ""
+    ).strip()
 
+    # Bảo đảm header A:L mới.
+    ensure_leave_header(ws)
+
+    now = vn_now()
     ws.append_row(
         [
-            date_text,
-            employee,
-            reason,
-            detail,
-            0,
-            0,
-            float(penalty or 0),
-            now.strftime("%d/%m/%Y"),
-            now.strftime("%H:%M:%S"),
-            "AUTO UPDATE 21:00 - BẢNG TOUR",
+            date_text,                         # A Ngày
+            weekday_vi(target_date),           # B Thứ ngày
+            employee,                          # C Tên nhân viên
+            reason,                            # D Lý do nghỉ
+            leave_type,                        # E Loại nghỉ
+            detail,                            # F Chi tiết
+            0,                                 # G Số ngày tính
+            0,                                 # H Số ngày phép cộng dồn
+            float(penalty or 0),               # I Phạt vi phạm
+            now.strftime("%d/%m/%Y"),          # J Ngày cập nhật
+            now.strftime("%H:%M:%S"),          # K Giờ cập nhật
+            "AUTO UPDATE 21:00 - BẢNG TOUR",   # L Người cập nhật
         ],
         value_input_option="USER_ENTERED",
     )
-
     return True, "Đã ghi"
 
 

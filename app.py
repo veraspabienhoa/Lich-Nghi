@@ -1,4 +1,4 @@
-# V92.6.53 - Fix NameError tempfile trong TimeSoft Export (2026-08-21)
+# V92.6.54 - Fix Excel snapshot export timezone-aware datetime (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -987,6 +987,49 @@ def _timesoft_collect_snapshot_history(start_date, end_date):
     return available, summary_df, invoice_df, checkin_df
 
 
+
+def _excel_safe_dataframe_v92654(df):
+    """
+    V92.6.54 - Excel không hỗ trợ datetime có timezone.
+    Chuyển mọi cột datetime timezone-aware về datetime naive theo giờ đang hiển thị,
+    đồng thời xử lý object column có Timestamp/datetime timezone-aware.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+
+    out = df.copy()
+
+    for col in out.columns:
+        s = out[col]
+
+        # Datetime dtype có timezone: bỏ timezone, giữ nguyên giờ địa phương đang hiển thị.
+        try:
+            if isinstance(s.dtype, pd.DatetimeTZDtype):
+                out[col] = s.dt.tz_localize(None)
+                continue
+        except Exception:
+            pass
+
+        # Object dtype đôi khi chứa Timestamp/datetime có tz.
+        if getattr(s, "dtype", None) == object:
+            def _strip_tz_excel_v92654(v):
+                try:
+                    if isinstance(v, pd.Timestamp):
+                        if v.tzinfo is not None:
+                            return v.tz_localize(None)
+                        return v
+                    if isinstance(v, datetime):
+                        if v.tzinfo is not None:
+                            return v.replace(tzinfo=None)
+                        return v
+                except Exception:
+                    pass
+                return v
+            out[col] = s.map(_strip_tz_excel_v92654)
+
+    return out
+
+
 def _timesoft_history_export_workbook(summary_df, invoice_df, checkin_df, events_df, storage_df, start_date, end_date):
     """Export toàn bộ lịch sử đã lọc ra một file Excel."""
     output = io.BytesIO()
@@ -1000,7 +1043,7 @@ def _timesoft_history_export_workbook(summary_df, invoice_df, checkin_df, events
             {"Thông tin": "Dòng chấm công", "Giá trị": len(checkin_df) if isinstance(checkin_df, pd.DataFrame) else 0},
         ])
         info.to_excel(writer, index=False, sheet_name="ThongTin")
-        (summary_df if isinstance(summary_df, pd.DataFrame) else pd.DataFrame()).to_excel(
+        _excel_safe_dataframe_v92654(summary_df if isinstance(summary_df, pd.DataFrame) else pd.DataFrame()).to_excel(
             writer, index=False, sheet_name="TongHopNgay"
         )
         (invoice_df if isinstance(invoice_df, pd.DataFrame) else pd.DataFrame()).to_excel(
@@ -1011,7 +1054,7 @@ def _timesoft_history_export_workbook(summary_df, invoice_df, checkin_df, events
         if isinstance(checkin_df, pd.DataFrame) and "Ngày snapshot" in checkin_df.columns and "Ngày snapshot" not in chk_export.columns:
             chk_export.insert(0, "Ngày snapshot", checkin_df["Ngày snapshot"].values)
         chk_export.to_excel(writer, index=False, sheet_name="ChamCong")
-        (events_df if isinstance(events_df, pd.DataFrame) else pd.DataFrame()).to_excel(
+        _excel_safe_dataframe_v92654(events_df if isinstance(events_df, pd.DataFrame) else pd.DataFrame()).to_excel(
             writer, index=False, sheet_name="LichSuHoatDong"
         )
         (storage_df if isinstance(storage_df, pd.DataFrame) else pd.DataFrame()).to_excel(

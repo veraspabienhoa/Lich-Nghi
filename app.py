@@ -1,4 +1,4 @@
-# V92.6.63 - Audit Log toàn bộ thao tác Lịch nghỉ + bộ lọc Admin + Export Excel (2026-08-22)
+# V92.6.65 - Snapshot dropdown + theo dõi nghỉ giữa ca trong bảng chấm công (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -835,7 +835,19 @@ def _timesoft_background_status_row():
     return {}
 
 
-def _timesoft_checkin_display_df(df):
+def _timesoft_checkin_display_df(df, include_midshift_break=True):
+    """
+    V92.6.65 - Bảng chấm công Snapshot dùng chung dữ liệu TimeSoft và engine nghỉ giữa ca.
+
+    Khi include_midshift_break=True, bổ sung 3 cột:
+      - Giờ ra nghỉ giữa ca
+      - Giờ vào lại
+      - Trạng thái nghỉ giữa ca
+
+    Dữ liệu nghỉ giữa ca KHÔNG tự suy đoán bằng một công thức mới. Hàm gọi lại
+    calculate_midshift_break_from_timesoft(), tức cùng engine đang dùng cho Auto Update
+    "Ra ngoài vào muộn" để giao diện và nghiệp vụ luôn cho cùng một kết quả.
+    """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
     preferred = [
@@ -872,7 +884,70 @@ def _timesoft_checkin_display_df(df):
         "TotalMinuteInDay": "Tổng phút trong ngày",
         "TotalCheckInOneDay": "Số lần check-in",
     }
-    return out.rename(columns=rename)
+    out = out.rename(columns=rename)
+
+    # V92.6.65: gắn kết quả nghỉ giữa ca vào đúng Nhân viên + Ngày.
+    if include_midshift_break:
+        out["Giờ ra nghỉ giữa ca"] = ""
+        out["Giờ vào lại"] = ""
+        out["Trạng thái nghỉ giữa ca"] = ""
+        try:
+            _cred_break_v92665 = load_credentials_recent()
+            _break_df_v92665 = calculate_midshift_break_from_timesoft(
+                df, _cred_break_v92665
+            )
+
+            if isinstance(_break_df_v92665, pd.DataFrame) and not _break_df_v92665.empty:
+                _break_map_v92665 = {}
+                for _, _br_v92665 in _break_df_v92665.iterrows():
+                    _br_name_v92665 = normalize_login_name(
+                        _br_v92665.get("Tên nhân viên", "")
+                    )
+                    _br_date_raw_v92665 = _br_v92665.get("Ngày", "")
+                    _br_date_v92665 = pd.to_datetime(
+                        _br_date_raw_v92665, errors="coerce", dayfirst=True
+                    )
+                    if not _br_name_v92665 or pd.isna(_br_date_v92665):
+                        continue
+                    _break_map_v92665[(
+                        _br_name_v92665,
+                        _br_date_v92665.date().isoformat(),
+                    )] = {
+                        "out": str(_br_v92665.get("Bắt đầu nghỉ", "") or ""),
+                        "in": str(_br_v92665.get("Kết thúc nghỉ", "") or ""),
+                        "status": str(_br_v92665.get("Trạng thái", "") or ""),
+                    }
+
+                _break_out_v92665 = []
+                _break_in_v92665 = []
+                _break_status_v92665 = []
+                for _idx_v92665, _raw_v92665 in df.iterrows():
+                    _name_v92665 = str(_timesoft_row_value(
+                        _raw_v92665,
+                        [
+                            "employeeInfo.Name", "EmployeeName",
+                            "Tên nhân viên", "Nhân viên", "Name",
+                        ],
+                    ) or "").strip()
+                    _work_date_v92665 = _timesoft_work_date_from_row(_raw_v92665)
+                    _key_v92665 = (
+                        normalize_login_name(_name_v92665),
+                        _work_date_v92665.isoformat() if isinstance(_work_date_v92665, date) else "",
+                    )
+                    _info_v92665 = _break_map_v92665.get(_key_v92665, {})
+                    _break_out_v92665.append(_info_v92665.get("out", ""))
+                    _break_in_v92665.append(_info_v92665.get("in", ""))
+                    _break_status_v92665.append(_info_v92665.get("status", ""))
+
+                if len(_break_out_v92665) == len(out):
+                    out["Giờ ra nghỉ giữa ca"] = _break_out_v92665
+                    out["Giờ vào lại"] = _break_in_v92665
+                    out["Trạng thái nghỉ giữa ca"] = _break_status_v92665
+        except Exception:
+            # Snapshot vẫn phải hiển thị được chấm công nếu cấu hình nghỉ giữa ca lỗi/thiếu.
+            pass
+
+    return out
 
 
 
@@ -1032,39 +1107,43 @@ def _excel_safe_dataframe_v92654(df):
 
 
 SNAPSHOT_RANGE_PRESETS_V92657 = [
-    "Hôm nay",
     "Hôm qua",
-    "7 ngày trước",
-    "14 ngày trước",
-    "Tháng này",
+    "Hôm nay",
+    "Tuần trước",
+    "Tuần này",
     "Tháng trước",
-    "Năm nay",
-    "Năm trước",
+    "Tháng này",
+    "Tất cả",
     "Tùy chỉnh",
 ]
 
 
-def _snapshot_preset_range_v92657(preset, today):
-    """Trả về khoảng ngày theo bộ lọc nhanh Snapshot."""
+def _snapshot_preset_range_v92657(preset, today, earliest=None, latest=None):
+    """V92.6.65 - khoảng ngày cho dropdown Snapshot."""
     preset = str(preset or "").strip()
-    if preset == "Hôm nay":
-        return today, today
     if preset == "Hôm qua":
         d = today - timedelta(days=1)
         return d, d
-    if preset == "7 ngày trước":
-        return today - timedelta(days=6), today
-    if preset == "14 ngày trước":
-        return today - timedelta(days=13), today
-    if preset == "Tháng này":
-        return today.replace(day=1), today
+    if preset == "Hôm nay":
+        return today, today
+    if preset == "Tuần trước":
+        this_monday = today - timedelta(days=today.weekday())
+        prev_monday = this_monday - timedelta(days=7)
+        return prev_monday, prev_monday + timedelta(days=6)
+    if preset == "Tuần này":
+        monday = today - timedelta(days=today.weekday())
+        return monday, today
     if preset == "Tháng trước":
         prev_end = today.replace(day=1) - timedelta(days=1)
         return prev_end.replace(day=1), prev_end
-    if preset == "Năm nay":
-        return date(today.year, 1, 1), today
-    if preset == "Năm trước":
-        return date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
+    if preset == "Tháng này":
+        return today.replace(day=1), today
+    if preset == "Tất cả":
+        start = earliest if isinstance(earliest, date) else today
+        end = latest if isinstance(latest, date) else today
+        if start > end:
+            start, end = end, start
+        return start, end
     return None, None
 
 
@@ -1175,7 +1254,7 @@ def _timesoft_history_export_workbook(summary_df, checkin_df, start_date, end_da
 
 
 def render_timesoft_snapshot_history_admin():
-    """Trang Admin: lọc thời gian, lịch sử hoạt động, data lưu trữ và export."""
+    """V92.6.65 - Admin: dropdown thời gian + Snapshot chấm công có nghỉ giữa ca."""
     if str(st.session_state.get("current_role", "")).strip().lower() != "admin":
         return
 
@@ -1199,18 +1278,28 @@ def render_timesoft_snapshot_history_admin():
     st.markdown("### 🔎 Bộ lọc thời gian")
 
     if "snapshot_history_preset_v92657" not in st.session_state:
-        st.session_state["snapshot_history_preset_v92657"] = "7 ngày trước"
+        st.session_state["snapshot_history_preset_v92657"] = "Hôm nay"
+    elif st.session_state.get("snapshot_history_preset_v92657") not in SNAPSHOT_RANGE_PRESETS_V92657:
+        # Tương thích session cũ V92.6.57-64 (7 ngày trước/14 ngày trước/Năm...).
+        st.session_state["snapshot_history_preset_v92657"] = "Hôm nay"
 
-    preset_col, calendar_col = st.columns([1.15, 3.85])
+    # V92.6.65: dropdown thay radio để tiết kiệm chiều cao giao diện.
+    preset_col, calendar_col = st.columns([1.35, 3.65])
 
     with preset_col:
-        snapshot_preset = st.radio(
+        snapshot_preset = st.selectbox(
             "Chọn nhanh",
             SNAPSHOT_RANGE_PRESETS_V92657,
             key="snapshot_history_preset_v92657",
+            filter_mode="contains",
         )
 
-    preset_start, preset_end = _snapshot_preset_range_v92657(snapshot_preset, today)
+    preset_start, preset_end = _snapshot_preset_range_v92657(
+        snapshot_preset,
+        today,
+        earliest=earliest,
+        latest=latest,
+    )
 
     # Khi đổi preset, cập nhật lại khoảng ngày đang hiển thị.
     last_preset = st.session_state.get("_snapshot_history_last_preset_v92657")
@@ -1336,6 +1425,10 @@ def render_timesoft_snapshot_history_admin():
                 )
                 if selected_employee != "Tất cả":
                     chk_view = chk_view[chk_view[employee_col].astype(str).eq(selected_employee)].copy()
+            st.caption(
+                "☕ Nghỉ giữa ca: Giờ ra / Giờ vào lại / Trạng thái được tính từ các cụm FaceID "
+                "theo cùng quy tắc đang dùng cho Auto Update."
+            )
             st.dataframe(chk_view, hide_index=True, width="stretch", height=520)
 
 
@@ -4386,17 +4479,35 @@ def render_leave_activity_log_admin():
     with f1:
         preset = st.selectbox(
             "Lọc thời gian",
-            ["Hôm nay", "7 ngày gần nhất", "30 ngày gần nhất", "Tháng này", "Tất cả", "Tùy chỉnh"],
+            [
+                "Hôm qua",
+                "Hôm nay",
+                "Tuần trước",
+                "Tuần này",
+                "Tháng trước",
+                "Tháng này",
+                "Tất cả",
+                "Tùy chỉnh",
+            ],
             index=1,
-            key="leave_audit_time_preset_v92663",
+            key="leave_audit_time_preset_v92664",
         )
 
-    if preset == "Hôm nay":
+    if preset == "Hôm qua":
+        start_date = end_date = today - timedelta(days=1)
+    elif preset == "Hôm nay":
         start_date = end_date = today
-    elif preset == "7 ngày gần nhất":
-        start_date, end_date = today - timedelta(days=6), today
-    elif preset == "30 ngày gần nhất":
-        start_date, end_date = today - timedelta(days=29), today
+    elif preset == "Tuần trước":
+        this_week_start = today - timedelta(days=today.weekday())
+        start_date = this_week_start - timedelta(days=7)
+        end_date = start_date + timedelta(days=6)
+    elif preset == "Tuần này":
+        start_date = today - timedelta(days=today.weekday())
+        end_date = start_date + timedelta(days=6)
+    elif preset == "Tháng trước":
+        previous_month_end = today.replace(day=1) - timedelta(days=1)
+        start_date = previous_month_end.replace(day=1)
+        end_date = previous_month_end
     elif preset == "Tháng này":
         start_date, end_date = today.replace(day=1), today
     elif preset == "Tất cả":
@@ -4409,7 +4520,7 @@ def render_leave_activity_log_admin():
                 "Khoảng ngày",
                 value=(today - timedelta(days=6), today),
                 format="DD/MM/YYYY",
-                key="leave_audit_custom_range_v92663",
+                key="leave_audit_custom_range_v92664",
             )
         if isinstance(custom_range, (tuple, list)) and len(custom_range) >= 2:
             start_date, end_date = custom_range[0], custom_range[1]

@@ -1,4 +1,4 @@
-"""V93.1-PG2 - Cloud Run Job TimeSoft + lịch nghỉ Single Source A:M.
+"""V93.2-PG2 - Cloud Run Job TimeSoft + lịch nghỉ Single Source A:L.
 
 Mỗi lần Cloud Scheduler gọi:
 1) Đồng bộ TimeSoft -> PostgreSQL (giữ nguyên chức năng V82/V83).
@@ -9,7 +9,7 @@ Mỗi lần Cloud Scheduler gọi:
    - Bảng tour: Ra ngoài vào muộn khi cột Vào trễ >= 5 phút.
    - Cẩm Nhung * được đối chiếu như Cẩm Nhung.
    - Chống trùng Ngày + Nhân viên + Lý do.
-   - Ghi đúng Sheet1 A:M tại last row; cột E luôn trống.
+   - Ghi đúng Sheet1 A:L tại last row; không còn cột trống E.
 
 Google Sheets dùng Application Default Credentials của service account gắn với Cloud Run Job.
 """
@@ -43,7 +43,7 @@ PASSWORD = str(os.getenv("TIMESOFT_PASSWORD", "") or "")
 SYNC_DAYS = max(1, min(7, int(os.getenv("TIMESOFT_SYNC_DAYS", "2") or 2)))
 CHECKIN_PAGE_SIZE = max(20, min(500, int(os.getenv("TIMESOFT_CHECKIN_PAGE_SIZE", "100") or 100)))
 MAX_CHECKIN_PAGES = 500
-# V93.1-PG2: snapshot theo ngày là dữ liệu lịch sử, không còn TTL 24 giờ.
+# V93.2-PG2: snapshot theo ngày là dữ liệu lịch sử, không còn TTL 24 giờ.
 # Có thể đổi bằng env TIMESOFT_HISTORY_RETENTION_DAYS; mặc định giữ 10 năm.
 TIMESOFT_HISTORY_RETENTION_DAYS = max(
     30, min(36500, int(os.getenv("TIMESOFT_HISTORY_RETENTION_DAYS", "3650") or 3650))
@@ -70,22 +70,18 @@ AUTO_PENALTY_RUNNING = "RUNNING"
 AUTO_PENALTY_PAUSED = "PAUSED"
 AUTO_PENALTY_MINUTES = 5
 
-# V93.1-PG2 - Sheet1 lịch nghỉ là nguồn DUY NHẤT, schema vật lý A:M.
-# A Ngày | B Thứ ngày | C Tên nhân viên | D Lý do nghỉ | E luôn trống |
-# F Loại nghỉ | G Chi tiết | H Số ngày tính | I Số ngày phép cộng dồn |
-# J Phạt vi phạm | K Ngày cập nhật | L Giờ cập nhật | M Người cập nhật.
+# V93.2-PG2 - Sheet1 lịch nghỉ là nguồn DUY NHẤT, schema vật lý A:L.
+# A Ngày | B Thứ ngày | C Tên nhân viên | D Lý do nghỉ | E Loại nghỉ |
+# F Chi tiết | G Số ngày tính | H Số ngày phép cộng dồn | I Phạt vi phạm |
+# J Ngày cập nhật | K Giờ cập nhật | L Người cập nhật.
 LEAVE_SHEET_HEADERS = [
-    "Ngày", "Thứ ngày", "Tên nhân viên", "Lý do nghỉ", "", "Loại nghỉ",
-    "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
-    "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật",
-]
-LEAVE_DATA_COLUMNS = [
     "Ngày", "Thứ ngày", "Tên nhân viên", "Lý do nghỉ", "Loại nghỉ",
     "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
     "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật",
 ]
-LEAVE_SHEET_RANGE = "A:M"
-LEAVE_HEADER_RANGE = "A1:M1"
+LEAVE_DATA_COLUMNS = list(LEAVE_SHEET_HEADERS)
+LEAVE_SHEET_RANGE = "A:L"
+LEAVE_HEADER_RANGE = "A1:L1"
 
 PROGRESSIVE_REASONS = {
     "nghi khong phep": "Nghỉ không phép",
@@ -258,15 +254,15 @@ def _weekday_vi(d: date | None) -> str:
     }.get(d.weekday(), "")
 
 
-def _sheet_rows_a_to_m(ws) -> list[dict]:
-    """Đọc duy nhất Sheet1 A:M; bỏ qua cột E vật lý vì cột này bắt buộc để trống."""
+def _sheet_rows_a_to_l(ws) -> list[dict]:
+    """Đọc duy nhất Sheet1 A:L theo schema lịch nghỉ chuẩn."""
     values = ws.get(LEAVE_SHEET_RANGE)
     if not values or len(values) < 2:
         return []
 
     rows: list[dict] = []
     for sheet_row, row in enumerate(values[1:], start=2):
-        vals = list(row[:13]) + [""] * max(0, 13 - len(row))
+        vals = list(row[:12]) + [""] * max(0, 12 - len(row))
         if not any(str(v).strip() for v in vals):
             continue
         item = {
@@ -274,14 +270,14 @@ def _sheet_rows_a_to_m(ws) -> list[dict]:
             "Thứ ngày": vals[1],
             "Tên nhân viên": vals[2],
             "Lý do nghỉ": vals[3],
-            "Loại nghỉ": vals[5],
-            "Chi tiết": vals[6],
-            "Số ngày tính": vals[7],
-            "Số ngày phép cộng dồn": vals[8],
-            "Phạt vi phạm": vals[9],
-            "Ngày cập nhật": vals[10],
-            "Giờ cập nhật": vals[11],
-            "Người cập nhật": vals[12],
+            "Loại nghỉ": vals[4],
+            "Chi tiết": vals[5],
+            "Số ngày tính": vals[6],
+            "Số ngày phép cộng dồn": vals[7],
+            "Phạt vi phạm": vals[8],
+            "Ngày cập nhật": vals[9],
+            "Giờ cập nhật": vals[10],
+            "Người cập nhật": vals[11],
             "__row": sheet_row,
             "__source": SHEET_DU_PHONG_ID,
         }
@@ -289,18 +285,40 @@ def _sheet_rows_a_to_m(ws) -> list[dict]:
     return rows
 
 
+# Alias để các Job cũ import tên hàm này vẫn chạy được trong giai đoạn chuyển đổi.
+def _sheet_rows_a_to_m(ws) -> list[dict]:
+    return _sheet_rows_a_to_l(ws)
+
+
 def _ensure_leave_header(ws) -> None:
-    """Ép đúng header A:M; cột E có header rỗng theo thiết kế."""
+    """Ép đúng header A:L mới."""
     current = ws.get(LEAVE_HEADER_RANGE)
     row = list(current[0]) if current else []
-    row += [""] * max(0, 13 - len(row))
-    normalized = [str(x).strip() for x in row[:13]]
+    row += [""] * max(0, 12 - len(row))
+    normalized = [str(x).strip() for x in row[:12]]
     expected = [str(x).strip() for x in LEAVE_SHEET_HEADERS]
     if normalized != expected:
-        ws.update(
-            range_name=LEAVE_HEADER_RANGE,
-            values=[LEAVE_SHEET_HEADERS],
-            value_input_option="USER_ENTERED",
+        if not any(normalized):
+            ws.update(
+                range_name=LEAVE_HEADER_RANGE,
+                values=[LEAVE_SHEET_HEADERS],
+                value_input_option="USER_ENTERED",
+            )
+            return
+        # Không tự dịch dữ liệu cũ tại runtime vì sẽ làm lệch cột nghiệp vụ.
+        legacy = ws.get("A1:M1")
+        legacy_row = list(legacy[0]) if legacy else []
+        legacy_row += [""] * max(0, 13 - len(legacy_row))
+        legacy_expected = [
+            "Ngày", "Thứ ngày", "Tên nhân viên", "Lý do nghỉ", "", "Loại nghỉ",
+            "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
+            "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật",
+        ]
+        if [str(x).strip() for x in legacy_row[:13]] == legacy_expected:
+            raise RuntimeError("Sheet1 vẫn đang ở schema A:M cũ. Hãy chạy migration A:M -> A:L trước khi chạy Job.")
+        raise RuntimeError(
+            "Header Sheet1 không đúng schema A:L. Không tự sửa header để tránh lệch dữ liệu; "
+            "hãy chạy migrate_leave_sheet_to_AL.py trước."
         )
 
 
@@ -308,17 +326,18 @@ def _next_data_row(ws) -> int:
     values = ws.get(LEAVE_SHEET_RANGE)
     last = 0
     for idx, row in enumerate(values, start=1):
-        vals = list(row[:13]) + [""] * max(0, 13 - len(row))
+        vals = list(row[:12]) + [""] * max(0, 12 - len(row))
         if any(str(v).strip() for v in vals):
             last = idx
     return max(2, last + 1)
 
 
 def load_all_leave_rows(client: gspread.Client) -> list[dict]:
-    """V93.1-PG2: chỉ đọc Sheet1 của SHEET_DU_PHONG_ID; không còn nguồn lịch thứ hai."""
+    """V93.2-PG2: chỉ đọc Sheet1 của SHEET_DU_PHONG_ID; không còn nguồn lịch thứ hai."""
     try:
         ws = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        rows = _sheet_rows_a_to_m(ws)
+        _ensure_leave_header(ws)
+        rows = _sheet_rows_a_to_l(ws)
     except Exception as exc:
         _log(f"WARN: không đọc được Sheet1 lịch nghỉ chính: {type(exc).__name__}: {exc}")
         return []
@@ -333,7 +352,6 @@ def load_all_leave_rows(client: gspread.Client) -> list[dict]:
         if all(key):
             logical[key] = item
     return list(logical.values())
-
 
 def load_employee_name_map(client: gspread.Client) -> dict[str, str]:
     ws = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
@@ -470,7 +488,7 @@ def save_auto_violation(
     detail: str,
     actor: str,
 ) -> tuple[bool, str]:
-    """Ghi 1 vi phạm vào Sheet1 A:M duy nhất; chống trùng theo A+C+D ngay trước khi ghi."""
+    """Ghi 1 vi phạm vào Sheet1 A:L duy nhất; chống trùng theo A+C+D ngay trước khi ghi."""
     reason = _clean_reason(reason_item.get("name", ""))
     leave_type = str(reason_item.get("type", "") or "").strip()
     days = float(reason_item.get("days", 0) or 0)
@@ -500,19 +518,18 @@ def save_auto_violation(
         _weekday_vi(d),                  # B Thứ ngày
         employee,                        # C Tên nhân viên
         reason,                          # D Lý do nghỉ
-        "",                              # E luôn trống
-        leave_type,                      # F Loại nghỉ
-        str(detail or "").strip(),       # G Chi tiết
-        days,                            # H Số ngày tính
-        accumulated,                     # I Số ngày phép cộng dồn
-        penalty,                         # J Phạt vi phạm
-        now.strftime("%d/%m/%Y"),        # K Ngày cập nhật
-        now.strftime("%H:%M:%S"),        # L Giờ cập nhật
-        actor,                           # M Người cập nhật
+        leave_type,                      # E Loại nghỉ
+        str(detail or "").strip(),       # F Chi tiết
+        days,                            # G Số ngày tính
+        accumulated,                     # H Số ngày phép cộng dồn
+        penalty,                         # I Phạt vi phạm
+        now.strftime("%d/%m/%Y"),        # J Ngày cập nhật
+        now.strftime("%H:%M:%S"),        # K Giờ cập nhật
+        actor,                           # L Người cập nhật
     ]
     target = _next_data_row(primary_ws)
     primary_ws.update(
-        range_name=f"A{target}:M{target}",
+        range_name=f"A{target}:L{target}",
         values=[row],
         value_input_option="USER_ENTERED",
     )
@@ -1122,7 +1139,7 @@ def write_status(status: str, started_at: datetime, details: list[dict], error: 
 # ==========================================================
 def run_sync() -> int:
     started_at = datetime.now(VN_TZ)
-    _log(f"Bắt đầu TimeSoft background sync V93.1-PG2; days={SYNC_DAYS}")
+    _log(f"Bắt đầu TimeSoft background sync V93.2-PG2; days={SYNC_DAYS}")
     if not vpg.is_enabled():
         _log("ERROR: PostgreSQL chưa được bật.")
         return 2
@@ -1193,7 +1210,7 @@ def run_sync() -> int:
             tour_result=tour_result,
             timesoft_result=timesoft_result,
         )
-        _log(f"Hoàn tất Job V93.1-PG2 trong {(datetime.now(VN_TZ)-started_at).total_seconds():.1f}s")
+        _log(f"Hoàn tất Job V93.2-PG2 trong {(datetime.now(VN_TZ)-started_at).total_seconds():.1f}s")
         return 0
     except Exception as exc:
         safe_error = f"{type(exc).__name__}: {exc}"

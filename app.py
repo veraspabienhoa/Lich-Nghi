@@ -1,4 +1,4 @@
-# V92.6.59 - Cho phép đổi trực tiếp Lý do nghỉ cùng ngày và tự tính lại toàn bộ cột phụ thuộc (2026-08-22)
+# V92.6.60 - Sửa Lý do nghỉ theo đúng cột G LoaiNghi + tăng khoảng đệm giao diện lịch nghỉ (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -10020,6 +10020,78 @@ def get_leave_reason_options(source_df=None, extra_values=None):
 
 
 
+
+
+def get_leave_reason_options_for_edit(source_df=None, target_dates=None, role=None, extra_values=None):
+    """
+    V92.6.60 - Dropdown sửa trực tiếp lịch nghỉ phải tuân thủ LoaiNghi:
+      - cột G = ngày/thứ được phép nhập;
+      - cột H = role được phép nhập.
+
+    st.data_editor chỉ hỗ trợ một danh sách options cho cả cột. Vì vậy nếu bảng đang
+    hiển thị nhiều ngày, chỉ giữ các lý do hợp lệ cho TẤT CẢ ngày đang hiển thị. Khi
+    lọc về một ngày (trường hợp sửa lịch thông thường), dropdown chính xác theo ngày đó.
+
+    `extra_values` chỉ được giữ nếu chính lý do lịch sử đó vẫn map về một dòng LoaiNghi
+    hợp lệ theo G/H; không đưa lý do sai thứ/ngày trở lại dropdown chỉ để giữ giá trị cũ.
+    """
+    source = source_df if isinstance(source_df, pd.DataFrame) else globals().get('df_loai_nghi', pd.DataFrame())
+    catalog = build_leave_reason_catalog(source)
+    role_key = str(role if role is not None else st.session_state.get('current_role', '')).strip().lower()
+
+    dates = []
+    for value in (target_dates or []):
+        parsed = _parse_vn_date(value)
+        if parsed is not None and parsed not in dates:
+            dates.append(parsed)
+
+    def _allowed(item):
+        if not isinstance(item, dict):
+            return False
+        allowed_roles = _leave_policy_role_tokens(item.get('allowed_roles', ''))
+        if allowed_roles and role_key not in allowed_roles:
+            return False
+        if dates and not all(
+            _leave_day_rule_matches(item.get('allowed_days', ''), d)
+            for d in dates
+        ):
+            return False
+        return True
+
+    options = []
+    seen_exact = set()
+
+    def _append(value):
+        clean = clean_leave_reason_display(value)
+        if not clean or clean.casefold() in {'nan', 'none', 'nat', 'loại nghỉ', 'lý do nghỉ'}:
+            return
+        if clean not in seen_exact:
+            options.append(clean)
+            seen_exact.add(clean)
+
+    for item in catalog.values():
+        if _allowed(item):
+            _append(item.get('name', ''))
+
+    # Giữ đúng cách viết lịch sử (nếu có) nhưng CHỈ khi lý do đó hợp lệ cho ngày/role.
+    if extra_values is not None:
+        for value in extra_values:
+            item = catalog.get(normalize_leave_reason(value))
+            if item is None:
+                wanted = normalize_login_name(clean_leave_reason_display(value))
+                item = next(
+                    (
+                        candidate for candidate in catalog.values()
+                        if normalize_login_name(candidate.get('name', '')) == wanted
+                    ),
+                    None,
+                )
+            if _allowed(item):
+                _append(value)
+
+    return options
+
+
 def _schedule_compare_value(column_name, value):
     """Chuẩn hóa giá trị để phát hiện dòng lịch nghỉ thật sự đã thay đổi."""
     if column_name == 'Ngày':
@@ -10750,6 +10822,31 @@ def validate_schedule_edit_permission(original_row, edited_row, role, today=None
         return False, "Ngày nghỉ không hợp lệ."
 
     role = str(role or "").strip().lower()
+    old_reason = original_row.get("Lý do nghỉ", original_row.get("Loại nghỉ", ""))
+    new_reason = edited_row.get("Lý do nghỉ", edited_row.get("Loại nghỉ", old_reason))
+
+    # V92.6.60: cột G/H của LoaiNghi là luật nền cho cả thao tác sửa trực tiếp,
+    # kể cả Admin. Admin vẫn giữ quyền bỏ qua thời hạn I/J/K và L/M/N như trước,
+    # nhưng không được đổi sang một lý do sai thứ/ngày hoặc sai role.
+    _edit_policy_item_v92660 = _leave_notice_policy_item(new_reason)
+    if not _edit_policy_item_v92660:
+        return False, f"Không tìm thấy Lý do nghỉ '{clean_leave_reason_display(new_reason)}' trong LoaiNghi."
+    _edit_allowed_roles_v92660 = _leave_policy_role_tokens(
+        _edit_policy_item_v92660.get("allowed_roles", "")
+    )
+    if _edit_allowed_roles_v92660 and role not in _edit_allowed_roles_v92660:
+        return False, (
+            f"Tài khoản {role} không được phép dùng lý do "
+            f"'{_edit_policy_item_v92660.get('name', new_reason)}' theo cột H của LoaiNghi."
+        )
+    if not _leave_day_rule_matches(
+        _edit_policy_item_v92660.get("allowed_days", ""), old_date
+    ):
+        return False, (
+            f"'{_edit_policy_item_v92660.get('name', new_reason)}' không được áp dụng cho "
+            f"{_vn_weekday_label(old_date)} {old_date.strftime('%d/%m/%Y')} theo cột G của LoaiNghi."
+        )
+
     if role == "admin":
         return True, ""
 
@@ -26907,6 +27004,10 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                             _clear_leave_data_caches()
                             rerun_current_view()
 
+    # V92.6.60: khoảng đệm giữa nút Ghi lịch nghỉ và khối lọc thống kê.
+    # Chỉ tạo khoảng trắng, không thêm divider để giao diện nhẹ và dễ nhìn trên mobile.
+    st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+
     # V86.20: bỏ divider ở đây để tiết kiệm chiều cao hiển thị trên điện thoại.
     # Bộ lọc được đặt sát ngay dưới khối Đăng ký lịch nghỉ.
     # V86.21: từ đây trở xuống KHÔNG phụ thuộc _registration_locked.
@@ -27017,6 +27118,9 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
         if st.button("🔄 Cập Nhật Dữ Liệu", use_container_width=True):
             _clear_leave_data_caches()
             rerun_current_view()
+
+    # V92.6.60: tách khối lọc khỏi Thống kê chi tiết theo từng ngày để dễ quan sát.
+    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
     # V92.6.15: Thống kê / Chi tiết danh sách chỉ dùng Google Sheet lịch nghỉ chính.
     detail_all_df = combine_leave_sources_for_daily_stats(df_backup)
@@ -27650,10 +27754,20 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             raw_detail.insert(0, "Quyền xóa", _detail_delete_status)
             raw_detail.insert(1, "Lý do khóa", _detail_delete_reason)
 
-            # Danh mục Lý do nghỉ dùng trực tiếp trong bảng sửa.
-            reason_options = get_leave_reason_options(
+            # V92.6.60: dropdown sửa lịch chỉ hiện lý do hợp lệ theo cột G/H LoaiNghi
+            # của ngày đang hiển thị. Nếu lọc nhiều ngày, lấy giao của các lý do hợp lệ
+            # vì st.data_editor chỉ hỗ trợ một danh sách options cho cả cột.
+            reason_options = get_leave_reason_options_for_edit(
                 globals().get('df_loai_nghi', pd.DataFrame()),
-                raw_detail['Lý do nghỉ'].tolist() if 'Lý do nghỉ' in raw_detail.columns else []
+                target_dates=(
+                    raw_detail_full['Ngày'].tolist()
+                    if 'Ngày' in raw_detail_full.columns else []
+                ),
+                role=st.session_state.get('current_role', ''),
+                extra_values=(
+                    raw_detail['Lý do nghỉ'].tolist()
+                    if 'Lý do nghỉ' in raw_detail.columns else []
+                ),
             )
 
             # V70: toàn bộ chỉnh sửa lịch trong Chi tiết danh sách nằm trong st.form.
@@ -28088,9 +28202,19 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
         # V74: ép đúng dtype trước st.data_editor để tương thích Streamlit mới.
         manage_visible = prepare_leave_editor_types(manage_visible)
 
-        manage_reason_options = get_leave_reason_options(
+        # V92.6.60: giống Chi tiết danh sách, dropdown sửa chỉ lấy lý do
+        # hợp lệ theo cột G/H của LoaiNghi cho ngày đang hiển thị.
+        manage_reason_options = get_leave_reason_options_for_edit(
             globals().get('df_loai_nghi', pd.DataFrame()),
-            manage_visible['Lý do nghỉ'].tolist() if 'Lý do nghỉ' in manage_visible.columns else []
+            target_dates=(
+                manage_raw_full['Ngày'].tolist()
+                if 'Ngày' in manage_raw_full.columns else []
+            ),
+            role=st.session_state.get('current_role', ''),
+            extra_values=(
+                manage_visible['Lý do nghỉ'].tolist()
+                if 'Lý do nghỉ' in manage_visible.columns else []
+            ),
         )
 
         manage_col_config = table_layout_column_config("leave_manage", list(manage_visible.columns))

@@ -1,4 +1,4 @@
-"""V86.12 - Email bắt buộc cho mọi Auto Update phạt + retry email lỗi.
+"""V93.1-PG1 - Auto Update dùng Sheet1 A:M single-source + email/retry.
 
 Thiết kế:
 - Cloud Scheduler gọi job này 1 lần/ngày lúc 20:00 Asia/Saigon.
@@ -27,6 +27,9 @@ import pandas as pd
 
 import timesoft_sync_job as ts
 
+# V93.1-PG1: ép nguồn TourVera hiện hành cho mọi hàm tái sử dụng từ timesoft_sync_job.
+ts.BANG_TOUR_FILE_ID = "151d1ueCwH2KXX-HPQF1uj340uWSCS2dW"
+
 SMTP_SENDER_EMAIL = "veraspabienhoa@gmail.com"
 SMTP_APP_PASSWORD = (os.getenv("SMTP_APP_PASSWORD", "") or "").strip()
 AUTO_CC_EMAIL = "veraspabienhoa@gmail.com"
@@ -39,8 +42,59 @@ EMAIL_LOG_HEADERS = [
 ]
 
 
+LEAVE_SHEET_HEADERS = [
+    "Ngày", "Thứ ngày", "Tên nhân viên", "Lý do nghỉ", "", "Loại nghỉ",
+    "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
+    "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật",
+]
+LEAVE_DATA_COLUMNS = [
+    "Ngày", "Thứ ngày", "Tên nhân viên", "Lý do nghỉ", "Loại nghỉ",
+    "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
+    "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật",
+]
+
+
+def _load_leave_catalog_new(client):
+    """Giữ API catalog cũ nhưng bổ sung type = Loại nghỉ từ cột C LoaiNghi."""
+    catalog = {}
+    ws = client.open_by_key(ts.SHEET_DU_PHONG_ID).worksheet("LoaiNghi")
+    rows = ws.get_all_values()
+    for row in rows[1:]:
+        vals = list(row)
+        name = ts._clean_reason(vals[1] if len(vals) > 1 else "")
+        if not name or ts._norm(name) in {"ly do nghi", "loai nghi", "nan", "none"}:
+            continue
+        catalog[ts._reason_key(name)] = {
+            "name": name,
+            "type": str(vals[2] if len(vals) > 2 else "").strip(),
+            "days": ts._number(vals[4] if len(vals) > 4 else 0, 0.0),
+            "penalty": ts._number(vals[5] if len(vals) > 5 else 0, 0.0, money=True),
+        }
+    return catalog
+
+
+def _sheet_rows_new(ws, source_id=None):
+    """Đọc Sheet1 A:M duy nhất. source_id chỉ giữ để tương thích lời gọi cũ."""
+    return ts._sheet_rows_a_to_m(ws)
+
+
+def _load_all_leave_rows_new(client):
+    """Chỉ đọc Sheet1 của SHEET_DU_PHONG_ID."""
+    return ts.load_all_leave_rows(client)
+
+
+def _next_primary_row(ws):
+    return ts._next_data_row(ws)
+
+
+def _save_auto_violation_new(client, d, employee, reason_item, detail, actor):
+    """Dùng writer A:M chuẩn của timesoft_sync_job."""
+    return ts.save_auto_violation(client, d, employee, reason_item, detail, actor)
+
+
+
 def _log(msg: str) -> None:
-    ts._log(f"V86.12 DAILY: {msg}")
+    ts._log(f"V93.1-PG1 DAILY: {msg}")
 
 
 def _is_support_reason(value) -> bool:
@@ -154,7 +208,7 @@ def _rebalance_primary_late_rows(client, affected_dates: set[date], catalog: dic
     if not affected_dates:
         return 0
     primary_ws = client.open_by_key(ts.SHEET_DU_PHONG_ID).get_worksheet(0)
-    rows = ts._sheet_rows_a_to_j(primary_ws)
+    rows = _sheet_rows_new(primary_ws, ts.SHEET_DU_PHONG_ID)
     reason_item = ts._catalog_item(catalog, "Đi trễ không phép") or {"penalty": 0}
     base_penalty = float(reason_item.get("penalty", 0) or 0)
     changed = 0
@@ -180,7 +234,7 @@ def _rebalance_primary_late_rows(client, affected_dates: set[date], catalog: dic
             old_detail = str(row.get("Chi tiết", "") or "").strip()
             if old_detail != new_detail or abs(old_penalty - new_penalty) > 0.1:
                 primary_ws.update(
-                    range_name=f"D{sheet_row}:G{sheet_row}",
+                    range_name=f"G{sheet_row}:J{sheet_row}",
                     values=[[
                         new_detail,
                         row.get("Số ngày tính", ""),
@@ -211,12 +265,12 @@ def reverse_supported_timesoft_penalties(client, catalog: dict) -> dict:
     có thể sửa phạt ở lần chạy ngày hôm sau.
     """
     result = {"reversed": 0, "rebalanced": 0, "errors": 0}
-    all_rows = ts.load_all_leave_rows(client)
+    all_rows = _load_all_leave_rows_new(client)
     supports = _support_index(all_rows)
     today = datetime.now(ts.VN_TZ).date()
     allowed_dates = {today, today - timedelta(days=1)}
     primary_ws = client.open_by_key(ts.SHEET_DU_PHONG_ID).get_worksheet(0)
-    primary_rows = ts._sheet_rows_a_to_j(primary_ws)
+    primary_rows = _sheet_rows_new(primary_ws, ts.SHEET_DU_PHONG_ID)
     to_delete: list[tuple[int, date, str, str]] = []
     affected_dates: set[date] = set()
 
@@ -282,11 +336,24 @@ def _read_added_row(client, add_msg: str) -> dict:
         return {}
     row_num = int(m.group(1))
     ws = client.open_by_key(ts.SHEET_DU_PHONG_ID).get_worksheet(0)
-    vals = ws.get(f"A{row_num}:J{row_num}")
+    vals = ws.get(f"A{row_num}:M{row_num}")
     row = list(vals[0]) if vals else []
-    row += [""] * max(0, 10 - len(row))
-    out = {ts.LEAVE_HEADERS[i]: row[i] for i in range(10)}
-    out["__row"] = row_num
+    row += [""] * max(0, 13 - len(row))
+    out = {
+        "Ngày": row[0],
+        "Thứ ngày": row[1],
+        "Tên nhân viên": row[2],
+        "Lý do nghỉ": row[3],
+        "Loại nghỉ": row[5],
+        "Chi tiết": row[6],
+        "Số ngày tính": row[7],
+        "Số ngày phép cộng dồn": row[8],
+        "Phạt vi phạm": row[9],
+        "Ngày cập nhật": row[10],
+        "Giờ cập nhật": row[11],
+        "Người cập nhật": row[12],
+        "__row": row_num,
+    }
     return out
 
 
@@ -360,7 +427,7 @@ def process_timesoft_today(client, cfg: dict, employee_map: dict, catalog: dict,
             detail += f" · Ca bắt đầu {shift_start}"
         if checkin_time:
             detail += f" · Check-in {checkin_time}"
-        ok, msg = ts.save_auto_violation(client, work_date, employee, reason_item, detail, DAILY_ACTOR_TS)
+        ok, msg = _save_auto_violation_new(client, work_date, employee, reason_item, detail, DAILY_ACTOR_TS)
         if ok and msg == "SKIP_DUPLICATE":
             result["skipped"] += 1
         elif ok:
@@ -425,7 +492,7 @@ def process_tour_today(client, cfg: dict, employee_map: dict, catalog: dict) -> 
             detail_parts.append(f"Giờ ra {str(row.get(out_col)).strip()}")
         if in_col is not None and str(row.get(in_col, "")).strip():
             detail_parts.append(f"Giờ vào {str(row.get(in_col)).strip()}")
-        ok, msg = ts.save_auto_violation(
+        ok, msg = _save_auto_violation_new(
             client, today, employee, reason_item, " · ".join(detail_parts), DAILY_ACTOR_TOUR
         )
         if ok and msg == "SKIP_DUPLICATE":
@@ -646,7 +713,7 @@ def pending_auto_penalty_rows(client, target_date: date | None = None) -> list[d
     sent = _sent_email_keys(client)
 
     ws = client.open_by_key(ts.SHEET_DU_PHONG_ID).get_worksheet(0)
-    rows = ts._sheet_rows_a_to_j(ws)
+    rows = _sheet_rows_new(ws, ts.SHEET_DU_PHONG_ID)
 
     pending = []
     for row in rows:
@@ -738,11 +805,11 @@ def run_daily() -> int:
             return 0
 
         employee_map = ts.load_employee_name_map(client)
-        catalog = ts.load_leave_catalog(client)
+        catalog = _load_leave_catalog_new(client)
         _log(f"Đã tải danh mục: employees={len(employee_map)}; leave_types={len(catalog)}")
 
         reverse_result = reverse_supported_timesoft_penalties(client, catalog)
-        live_rows = ts.load_all_leave_rows(client)
+        live_rows = _load_all_leave_rows_new(client)
         supports = _support_index(live_rows)
 
         today = datetime.now(ts.VN_TZ).date()

@@ -1,4 +1,4 @@
-# V92.6.19 - Export PDF phân ca NV+Leader A4 ngang, in 2 mặt theo mẫu (2026-08-21)
+# V92.6.20 - Đổi tên thời gian nghỉ + bỏ scroll phân ca + Auto Nghỉ không phép khi thiếu check-in (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -7923,6 +7923,236 @@ def _timesoft_late_vs_shift(row):
     return _parse_minutes_late_from_timesoft_row(row)
 
 
+
+ABSENCE_AUTO_UPDATE_CUTOFF_HOUR = 20
+ABSENCE_AUTO_ROLES = {"nhanvien", "leader"}
+
+
+def _timesoft_checkin_employee_keys_for_date(checkin_df, target_date):
+    """
+    Lấy tập nhân viên có ít nhất một dữ liệu check-in trong ngày.
+    API TimeSoft được gọi theo ngày nên nếu một row thiếu WorkDate vẫn tính cho target_date.
+    """
+    keys = set()
+    if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
+        return keys
+
+    for _, row in checkin_df.iterrows():
+        raw_date = _timesoft_row_value(
+            row,
+            ["WorkDateStr", "WorkDate", "CreateDateStr", "CreateDate"],
+        )
+        parsed_date = _parse_vn_date(raw_date)
+        if parsed_date is None and str(raw_date or "").strip():
+            try:
+                parsed = pd.to_datetime(raw_date, dayfirst=True, errors="coerce")
+                parsed_date = parsed.date() if pd.notna(parsed) else None
+            except Exception:
+                parsed_date = None
+        if parsed_date is not None and parsed_date != target_date:
+            continue
+
+        raw_name = _timesoft_row_value(
+            row,
+            [
+                "employeeInfo.Name", "EmployeeName", "employeeName",
+                "Name", "FullName",
+            ],
+        )
+        key = normalize_employee_match_name(raw_name)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _leave_coverage_employee_keys_for_date(leave_df, target_date):
+    """
+    Một nhân viên được coi là đã có lịch nghỉ hợp lệ cho quy tắc vắng mặt khi
+    cùng ngày có ít nhất một dòng Số ngày tính chính xác 0.5 hoặc 1.0.
+
+    Lưu ý schema A:M hiện tại: Số ngày tính là cột H.
+    Hàm dùng tên trường, không hard-code cột vật lý.
+    """
+    if not isinstance(leave_df, pd.DataFrame) or leave_df.empty:
+        return set()
+    required = {"Ngày", "Tên nhân viên", "Số ngày tính"}
+    if not required.issubset(set(leave_df.columns)):
+        return set()
+
+    d = leave_df.copy()
+    dates = pd.to_datetime(d["Ngày"], dayfirst=True, errors="coerce").dt.date
+    days = pd.to_numeric(d["Số ngày tính"], errors="coerce")
+    valid_days = days.apply(
+        lambda x: bool(pd.notna(x) and (abs(float(x) - 0.5) < 1e-9 or abs(float(x) - 1.0) < 1e-9))
+    )
+    d = d[dates.eq(target_date) & valid_days].copy()
+    return {
+        normalize_employee_match_name(x)
+        for x in d["Tên nhân viên"].astype(str).tolist()
+        if normalize_employee_match_name(x)
+    }
+
+
+def _active_shifted_absence_staff(credentials_df):
+    """
+    Chỉ xét Nhân viên + Leader đang làm việc và đã được phân ca.
+    Nhân sự Tạm thời nghỉ việc / Đã nghỉ việc hoặc chưa phân ca không bị Auto phạt vắng.
+    """
+    if not isinstance(credentials_df, pd.DataFrame) or credentials_df.empty:
+        return []
+
+    status_map = load_employment_status_map()
+    out = []
+    for _, row in credentials_df.iterrows():
+        employee = str(row.get("Tên nhân viên", "") or "").strip()
+        role = str(row.get("Phân quyền", "") or "").strip().lower()
+        shift = str(row.get("Ca làm việc", "") or "").strip()
+        if not employee or role not in ABSENCE_AUTO_ROLES or not shift:
+            continue
+
+        status = status_map.get(
+            normalize_login_name(employee),
+            EMPLOYMENT_STATUS_ACTIVE,
+        )
+        if status != EMPLOYMENT_STATUS_ACTIVE:
+            continue
+        out.append({
+            "employee": employee,
+            "employee_key": normalize_employee_match_name(employee),
+            "role": role,
+            "shift": shift,
+        })
+    return out
+
+
+def auto_update_absence_without_checkin_from_timesoft(
+    checkin_df,
+    target_date=None,
+    actor="AUTO UPDATE - TIMESOFT NGHỈ KHÔNG PHÉP",
+):
+    """
+    Auto Nghỉ không phép:
+    - nhân viên/leader đang làm việc + đã phân ca;
+    - không có bất kỳ check-in TimeSoft nào trong ngày;
+    - Sheet1 cùng ngày không có dòng của người đó với Số ngày tính = 0.5 hoặc 1;
+    - hôm nay chỉ kết luận từ 20:00 trở đi để Scheduler 15:00 không phạt nhầm.
+    - nếu toàn bộ snapshot check-in rỗng thì không phạt để tránh lỗi TimeSoft/API gây phạt hàng loạt.
+    """
+    result = _auto_result("TimeSoft nghỉ không phép")
+    cfg = load_auto_penalty_config()
+    if cfg.get("paused"):
+        result["paused"] = True
+        result["messages"].append("Auto Update đang tạm dừng bởi Admin.")
+        return result
+
+    target_date = target_date or get_vn_today()
+    now_vn = datetime.now(VN_TZ)
+
+    if target_date == now_vn.date() and now_vn.hour < ABSENCE_AUTO_UPDATE_CUTOFF_HOUR:
+        result["messages"].append(
+            f"Nghỉ không phép chỉ được đối soát từ {ABSENCE_AUTO_UPDATE_CUTOFF_HOUR:02d}:00 để tránh phạt nhầm trước khi hoàn tất ngày làm việc."
+        )
+        return result
+
+    # Guard quan trọng: không biến lỗi fetch TimeSoft thành "mọi người đều vắng".
+    if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
+        result["messages"].append(
+            "Snapshot chấm công TimeSoft đang rỗng; hệ thống bỏ qua Auto Nghỉ không phép để tránh phạt hàng loạt do lỗi dữ liệu."
+        )
+        return result
+
+    checkin_keys = _timesoft_checkin_employee_keys_for_date(checkin_df, target_date)
+    if not checkin_keys:
+        result["messages"].append(
+            "Không nhận diện được nhân viên nào trong snapshot TimeSoft của ngày; bỏ qua Auto Nghỉ không phép."
+        )
+        return result
+
+    try:
+        live_leave = _load_live_leave_registration_for_validation()
+    except Exception as exc:
+        result["errors"] += 1
+        result["messages"].append(f"Không đọc được lịch nghỉ LIVE: {exc}")
+        return result
+
+    covered_leave_keys = _leave_coverage_employee_keys_for_date(
+        live_leave, target_date
+    )
+
+    try:
+        creds = load_credentials_fresh()
+    except Exception:
+        creds = globals().get("df_credentials", pd.DataFrame())
+    staff = _active_shifted_absence_staff(creds)
+    if not staff:
+        result["messages"].append(
+            "Không tìm thấy Nhân viên + Leader đang làm việc và đã phân ca để đối soát."
+        )
+        return result
+
+    catalog = build_leave_reason_catalog(
+        globals().get("df_loai_nghi", pd.DataFrame())
+    )
+    reason_item = _auto_penalty_catalog_item("Nghỉ không phép", catalog)
+    if not reason_item:
+        result["errors"] += 1
+        result["messages"].append(
+            "Sheet LoaiNghi chưa có 'Nghỉ không phép', nên hệ thống không thể Auto Update phạt."
+        )
+        return result
+
+    reason = reason_item.get("name", "Nghỉ không phép")
+    base_penalty = float(reason_item.get("penalty", 0) or 0)
+    days = float(reason_item.get("days", 0) or 0)
+    weekday = _vn_weekday_label(target_date)
+    main_source = live_leave
+
+    for profile in staff:
+        employee = profile["employee"]
+        ekey = profile["employee_key"]
+
+        if ekey in checkin_keys:
+            continue
+        if ekey in covered_leave_keys:
+            continue
+
+        result["eligible"] += 1
+        detail = (
+            f"Auto Update TimeSoft · không có dữ liệu check-in · {weekday}"
+            " · Sheet1 không có lịch nghỉ Số ngày tính 0.5 hoặc 1"
+            f" · Ca {profile['shift']}"
+        )
+
+        ok, msg = save_lich_nghi_to_backup_sheet(
+            target_date.strftime("%d/%m/%Y"),
+            employee,
+            reason,
+            detail,
+            days,
+            0.0,
+            base_penalty,
+            actor,
+            df_main_source=main_source,
+        )
+        if ok:
+            result["added"] += 1
+        elif (
+            "đã có đúng lý do" in str(msg).lower()
+            or "không được đăng ký trùng" in str(msg).lower()
+            or "đã có loại nghỉ" in str(msg).lower()
+        ):
+            result["skipped"] += 1
+        else:
+            result["errors"] += 1
+            result["messages"].append(f"{employee}: {msg}")
+
+    if result["eligible"] == 0:
+        result["messages"].append(
+            f"{target_date.strftime('%d/%m/%Y')} ({weekday}): không có nhân viên đủ điều kiện Auto Nghỉ không phép."
+        )
+    return result
+
+
 def auto_update_checkin_late_from_timesoft(checkin_df, actor="AUTO UPDATE - TIMESOFT"):
     """Tự ghi Đi trễ không phép khi check-in muộn hơn ca quy định từ 5 phút trở lên."""
     result = _auto_result("TimeSoft")
@@ -8139,11 +8369,17 @@ def run_auto_penalty_now(tour_df=None, checkin_df=None, actor="AUTO UPDATE"):
         checkin_df,
         actor=f"{actor} - TIMESOFT NGHỈ GIỮA CA",
     ) if isinstance(checkin_df, pd.DataFrame) else _auto_result("TimeSoft nghỉ giữa ca")
+    r_absence = auto_update_absence_without_checkin_from_timesoft(
+        checkin_df,
+        target_date=get_vn_today(),
+        actor=f"{actor} - TIMESOFT NGHỈ KHÔNG PHÉP",
+    ) if isinstance(checkin_df, pd.DataFrame) else _auto_result("TimeSoft nghỉ không phép")
     r_ca1 = auto_update_ca1_cleaning_from_leave_data(actor=f"{actor} - CA1")
     return {
         "tour": r_tour,
         "timesoft": r_ts,
         "midshift": r_midshift,
+        "absence": r_absence,
         "ca1": r_ca1,
     }
 
@@ -20164,7 +20400,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                     "Ca làm việc": shift_name,
                     "Số nhân viên": count,
                     "Nghỉ giữa ca": _shift_break_enabled,
-                    "Duration nghỉ (phút)": _shift_break_duration,
+                    "Thời gian nghỉ giữa ca (phút)": _shift_break_duration,
                     "Gom FaceID (phút)": _shift_faceid_cluster,
                 })
 
@@ -20177,7 +20413,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                     "Ca làm việc": "Chưa phân ca",
                     "Số nhân viên": unassigned,
                     "Nghỉ giữa ca": "",
-                    "Duration nghỉ (phút)": "",
+                    "Thời gian nghỉ giữa ca (phút)": "",
                     "Gom FaceID (phút)": "",
                 })
 
@@ -20200,7 +20436,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
             st.info(
                 "Quy tắc này áp dụng theo từng ngày/từng người. "
                 "Không phải ngày nào nhân viên cũng bắt buộc nghỉ giữa ca. "
-                "Nếu có nghỉ, ngoài giới hạn Duration của ca còn phải quay lại trước giờ giới hạn."
+                "Nếu có nghỉ, ngoài giới hạn thời gian nghỉ giữa ca của ca còn phải quay lại trước giờ giới hạn."
             )
 
             _mc1, _mc2 = st.columns(2)
@@ -20233,7 +20469,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
             st.caption(
                 f"Ví dụ hiện tại: phải quay lại trước/đúng **{_mid_deadline}**; "
                 f"từ đủ **{int(_mid_late_threshold)} phút** sau giới hạn "
-                "sẽ tự xác định **Ra ngoài vào muộn**, kể cả chưa nghỉ đủ Duration."
+                "sẽ tự xác định **Ra ngoài vào muộn**, kể cả chưa nghỉ đủ thời gian nghỉ giữa ca."
             )
 
             if st.button(
@@ -20257,7 +20493,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
         with st.expander("☕ Mặc định nghỉ giữa ca theo bộ phận · dùng khi tạo ca mới", expanded=False):
             st.info(
                 "Đây là **giá trị mặc định** khi Admin tạo ca mới. "
-                "Sau khi tạo, mỗi ca có thể Bật/Tắt và đặt Duration riêng ngay trong form Tạo/Sửa ca. "
+                "Sau khi tạo, mỗi ca có thể Bật/Tắt và đặt thời gian nghỉ giữa ca riêng ngay trong form Tạo/Sửa ca. "
                 "TimeSoft: lần #2 = bắt đầu nghỉ; lần #3 = kết thúc nghỉ."
             )
 
@@ -20284,7 +20520,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                         "Bật / Tắt nghỉ giữa ca", width="medium"
                     ),
                     "Duration (phút)": st.column_config.NumberColumn(
-                        "Duration (phút)", min_value=1, max_value=600, step=5, format="%d"
+                        "Thời gian nghỉ giữa ca (phút)", min_value=1, max_value=600, step=5, format="%d"
                     ),
                 },
             )
@@ -20358,7 +20594,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                     _shift_list["Nghỉ giữa ca"] = _shift_list[
                         "Áp dụng nghỉ giữa ca"
                     ].apply(lambda x: "✅ Có" if bool(x) else "⛔ Không")
-                    _shift_list["Duration nghỉ (phút)"] = pd.to_numeric(
+                    _shift_list["Thời gian nghỉ giữa ca (phút)"] = pd.to_numeric(
                         _shift_list["Duration nghỉ giữa ca (phút)"],
                         errors="coerce",
                     ).fillna(0).astype(int)
@@ -20374,7 +20610,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                         "Giờ bắt đầu",
                         "Giờ kết thúc",
                         "Nghỉ giữa ca",
-                        "Duration nghỉ (phút)",
+                        "Thời gian nghỉ giữa ca (phút)",
                         "Gom FaceID (phút)",
                         "Ghi chú",
                         "Thứ tự",
@@ -20394,7 +20630,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                             "Giờ bắt đầu",
                             "Giờ kết thúc",
                             "Nghỉ giữa ca",
-                            "Duration nghỉ (phút)",
+                            "Thời gian nghỉ giữa ca (phút)",
                             "Gom FaceID (phút)",
                             "Ghi chú",
                             "Thứ tự",
@@ -20420,8 +20656,8 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                             "Nghỉ giữa ca": st.column_config.TextColumn(
                                 "Nghỉ giữa ca", width="small"
                             ),
-                            "Duration nghỉ (phút)": st.column_config.NumberColumn(
-                                "Duration nghỉ",
+                            "Thời gian nghỉ giữa ca (phút)": st.column_config.NumberColumn(
+                                "Thời gian nghỉ giữa ca",
                                 format="%d",
                                 width="small",
                             ),
@@ -20684,7 +20920,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                             )
                         with br2:
                             _break_duration = st.number_input(
-                                "Nghỉ tối đa (phút)",
+                                "Thời gian nghỉ giữa ca (phút)",
                                 min_value=1,
                                 max_value=600,
                                 value=int(_default_break_duration),
@@ -20692,7 +20928,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                                 disabled=not _break_enabled,
                                 key=f"shift_break_duration_{_safe_dep}_{_selected_id_key}_v92613",
                                 help=(
-                                    "Duration nghỉ tối đa. Thực tế <= Duration là đúng quy định."
+                                    "Thời gian nghỉ giữa ca tối đa. Thực tế <= thời gian quy định là đúng quy định."
                                 ),
                             )
                         with br3:
@@ -20712,7 +20948,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
 
                         if _break_enabled:
                             st.caption(
-                                f"✅ Nghỉ tối đa **{int(_break_duration)} phút** · "
+                                f"✅ Thời gian nghỉ giữa ca **{int(_break_duration)} phút** · "
                                 f"Gom FaceID trong **{int(_faceid_cluster_minutes)} phút** · "
                                 "Cụm đầu = vào ca; không dùng check-out cuối ngày."
                             )
@@ -20887,7 +21123,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                 part,
                 hide_index=True,
                 width='stretch',
-                height=min(700, max(160, len(part)*36+42)),
+                height=max(180, len(part)*36+58),
                 key=_editor_key,
                 column_config={
                     'Chọn': st.column_config.CheckboxColumn('Chọn', width='small'),
@@ -21951,15 +22187,25 @@ elif selected_page == "⏸️ Auto Update phạt" and st.session_state.current_r
             _auto_res = run_auto_penalty_now(
                 tour_df=_tour_now, checkin_df=_checkin_now, actor=f"AUTO UPDATE - {st.session_state.current_user}"
             )
-        rt, rs, rc = _auto_res['tour'], _auto_res['timesoft'], _auto_res['ca1']
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
-        m1.metric("Tour đủ ĐK", rt.get('eligible',0))
-        m2.metric("Tour đã thêm", rt.get('added',0))
-        m3.metric("TimeSoft đủ ĐK", rs.get('eligible',0))
-        m4.metric("TimeSoft đã thêm", rs.get('added',0))
-        m5.metric("Ca 1 đủ ĐK", rc.get('eligible',0))
-        m6.metric("Ca 1 đã thêm", rc.get('added',0))
-        all_msgs = (rt.get('messages') or []) + (rs.get('messages') or []) + (rc.get('messages') or [])
+        rt = _auto_res['tour']
+        rs = _auto_res['timesoft']
+        ra = _auto_res.get('absence', _auto_result("TimeSoft nghỉ không phép"))
+        rc = _auto_res['ca1']
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Tour đã thêm", rt.get('added',0))
+        m2.metric("Đi trễ đã thêm", rs.get('added',0))
+        m3.metric("Nghỉ KP đã thêm", ra.get('added',0))
+        m4.metric("Ca 1 đã thêm", rc.get('added',0))
+        st.caption(
+            f"Điều kiện: Tour {rt.get('eligible',0)} · Đi trễ {rs.get('eligible',0)} · "
+            f"Nghỉ không phép {ra.get('eligible',0)} · Ca1 {rc.get('eligible',0)}"
+        )
+        all_msgs = (
+            (rt.get('messages') or [])
+            + (rs.get('messages') or [])
+            + (ra.get('messages') or [])
+            + (rc.get('messages') or [])
+        )
         if all_msgs:
             st.caption(" | ".join(all_msgs[:10]))
 
@@ -21969,6 +22215,7 @@ elif selected_page == "⏸️ Auto Update phạt" and st.session_state.current_r
         "• Ra ngoài vào muộn: chỉ Auto Update khi cột **Vào trễ >= 5 phút**. "
         "Tên như **Cẩm Nhung *** được đối chiếu như **Cẩm Nhung**.  \n"
         "• TimeSoft: check-in được so trực tiếp với giờ bắt đầu ca. **Hỗ trợ Ca 1 2 tiếng = 120 phút; Ca 1 sau 0:0H 3 tiếng = 180 phút; Ca 2 sau 0:0H 1 tiếng = 60 phút**. Chỉ Auto phạt khi vượt mức Hỗ trợ; nếu không có Hỗ trợ thì ngưỡng là **>= 5 phút**.  \n"
+        "• **Auto Nghỉ không phép**: từ **20:00**, chỉ xét `nhanvien + leader` đang **Đang làm việc** và **đã phân ca**. Nếu người đó không có check-in TimeSoft trong ngày và Sheet1 không có dòng cùng ngày với **Số ngày tính = 0.5 hoặc 1**, hệ thống tự ghi **Nghỉ không phép**; Thứ ngày lấy theo ngày thực tế và tiền phạt lấy từ `LoaiNghi` + phạt lũy tiến của đúng ngày. Snapshot TimeSoft rỗng sẽ không phạt để tránh lỗi hàng loạt.  \n"
         "• **KHÔNG dọn vệ sinh ca 1**: chỉ áp dụng cho role `nhanvien` đang làm **Ca 1 trong tuần hiện tại**, "
         "không có **Hỗ trợ Ca 1 đi trễ 2 tiếng / Hỗ trợ Ca 1 đi trễ 3 tiếng / Hỗ trợ Ca 2 đi trễ 1 tiếng**, "
         "và hôm đó có **Đi trễ <=30 / <=60 / >60 đến <=120 phút** theo đúng loại nghỉ đã cấu hình.  \n"

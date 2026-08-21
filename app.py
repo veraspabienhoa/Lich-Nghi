@@ -1,4 +1,4 @@
-# V92.6.48 - Khoảng thời gian thành ô riêng + fix components.html key (2026-08-21)
+# V92.6.49 - VERA SPA size 36px cho Desktop và Mobile (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -12684,8 +12684,8 @@ def _ui_device_defaults(
 UI_THEME_DEFAULT = {
     # V87.3: Header thương hiệu riêng, cao hơn mặc định và chỉnh độc lập Desktop/Mobile.
     "brand_header": {
-        "desktop": _ui_device_defaults(28, 76, 14, 10, 7, "#222222", "#D9D9D9"),
-        "mobile":  _ui_device_defaults(28, 72, 10, 8, 7, "#222222", "#D9D9D9"),
+        "desktop": _ui_device_defaults(36, 76, 14, 10, 7, "#222222", "#D9D9D9"),
+        "mobile":  _ui_device_defaults(36, 72, 10, 8, 7, "#222222", "#D9D9D9"),
     },
     "main_title": {
         "desktop": _ui_device_defaults(28, 0, 10, 6, 6, "#222222", "#D9D9D9"),

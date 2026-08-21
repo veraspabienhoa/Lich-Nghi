@@ -1,4 +1,4 @@
-# V92.6.54 - Fix Excel snapshot export timezone-aware datetime (2026-08-21)
+# V92.6.55 - Upload Excel là nguồn lương ưu tiên số 1; tên file bất kỳ (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -17152,6 +17152,7 @@ def load_payroll_source_from_google_sheet():
 
 
 def load_payroll_source_from_uploaded_excel(uploaded_file):
+    """V92.6.55: không kiểm tra tên file; chỉ đọc và kiểm tra cấu trúc Excel bên trong."""
     try:
         if uploaded_file is None:
             return pd.DataFrame(), "Chưa chọn file dữ liệu lương."
@@ -24985,25 +24986,30 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
             with c_source:
                 source_mode = st.selectbox(
                     "Nguồn dữ liệu lương:",
-                    ["TimeSoft", "Upload file Excel", "Google Sheet mặc định"],
+                    ["Upload file Excel", "TimeSoft", "Google Sheet mặc định"],
                     index=0,
                     key="payroll_source_mode_v855", filter_mode="contains"
                 )
                 payroll_upload = None
-                if source_mode == "TimeSoft":
+                if source_mode == "Upload file Excel":
                     st.caption(
-                        "⭐ Nguồn mặc định: TimeSoft. Khi bấm Tính lương, hệ thống tự đăng nhập và Xuất file "
+                        "⭐ Nguồn ưu tiên số 1. Tên file Excel bất kỳ đều được; "
+                        "hệ thống chỉ kiểm tra cấu trúc dữ liệu bên trong file."
+                    )
+                    payroll_upload = st.file_uploader(
+                        "Upload file Excel (.xlsx/.xlsm)",
+                        type=["xlsx", "xlsm"],
+                        key="payroll_upload_file",
+                    )
+                elif source_mode == "TimeSoft":
+                    st.caption(
+                        "Nguồn số 2: TimeSoft. Khi bấm Tính lương, hệ thống tự đăng nhập và Xuất file "
                         "đúng kỳ, kiểm tra đúng format Excel mẫu rồi mới tính các dòng bắt đầu bằng 'Tip'."
                     )
                     if not timesoft_is_configured():
                         st.warning("⚠️ TimeSoft chưa được cấu hình đầy đủ trong Secrets.")
-                elif source_mode == "Upload file Excel":
-                    payroll_upload = st.file_uploader(
-                        "Upload file dulieuluong (.xlsx/.xlsm)", type=["xlsx", "xlsm"], key="payroll_upload_file",
-                        help=f"File phải có sheet '{PAYROLL_SOURCE_WORKSHEET}'."
-                    )
                 else:
-                    st.caption("Nguồn phụ: Google Sheet 1WtYsbEAlifL1PZ-nSGBojgL4Bnur-1vF")
+                    st.caption("Nguồn số 3: Google Sheet 1WtYsbEAlifL1PZ-nSGBojgL4Bnur-1vF")
 
             # Trạng thái trực quan cho quy trình tải dữ liệu & tính lương.
             if "payroll_process_message" not in st.session_state:

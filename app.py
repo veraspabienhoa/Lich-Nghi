@@ -1,4 +1,4 @@
-# V92.6.50 - TimeSoft Xuất file Excel thật đúng format mẫu để tính lương (2026-08-21)
+# V92.6.51 - Fix TimeSoft Tip exact B/F/G/I + fix penalty function arguments (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -16964,24 +16964,126 @@ def _timesoft_export_payroll_excel(start_date, end_date):
         return False, f"Không tự Xuất file TimeSoft: {type(e).__name__}: {e}", None, {}
 
 
+
+def _parse_timesoft_payroll_export_exact(file_path):
+    """
+    V92.6.51 - Đọc TRỰC TIẾP file Xuất TimeSoft đúng mẫu đã xác nhận.
+
+    Sheet: Báo cáo doanh thu hóa đơn
+    Header: dòng Excel 3
+    B = Thời gian
+    F = Sản phẩm/ Dịch vụ/ PT
+    G = Tổng tiền
+    I = NV tư vấn
+
+    Không dùng bộ dò schema/API cho nhánh Export Excel để tránh nhận diện sai.
+    """
+    okf, msgf, raw = _validate_timesoft_payroll_export_file(file_path)
+    if not okf:
+        return pd.DataFrame(), msgf, {"format_valid": False}
+
+    # Dữ liệu bắt đầu từ dòng Excel 4, vì dòng 3 là header.
+    data = raw.iloc[3:, :11].copy().reset_index(drop=True)
+    if data.empty:
+        return pd.DataFrame(), "File TimeSoft đúng format nhưng không có dòng dữ liệu sau header.", {
+            "format_valid": True,
+            "tip_count": 0,
+        }
+
+    out = pd.DataFrame({
+        "Thời gian": data.iloc[:, 1],
+        "Sản phẩm/ Dịch vụ/ PT": data.iloc[:, 5],
+        "Tổng tiền": data.iloc[:, 6],
+        "NV tư vấn": data.iloc[:, 8],
+    })
+
+    out["Thời gian"] = out["Thời gian"].astype(str).str.strip()
+    out["Sản phẩm/ Dịch vụ/ PT"] = out["Sản phẩm/ Dịch vụ/ PT"].astype(str).str.strip()
+    out["NV tư vấn"] = out["NV tư vấn"].astype(str).str.strip()
+    out["Tổng tiền"] = out["Tổng tiền"].apply(_money_to_float)
+
+    # Loại dòng trống hoàn toàn.
+    out = out[
+        out["Thời gian"].ne("")
+        | out["Sản phẩm/ Dịch vụ/ PT"].ne("")
+        | out["NV tư vấn"].ne("")
+        | out["Tổng tiền"].ne(0)
+    ].copy()
+
+    # Parse thời gian giống nguồn lương hiện tại.
+    out["Thời gian_DT"] = pd.to_datetime(
+        out["Thời gian"],
+        dayfirst=True,
+        errors="coerce",
+    )
+
+    # Tip được nhận diện theo đúng file mẫu: Tip_350, Tip_500, ...
+    _tip_norm = (
+        out["Sản phẩm/ Dịch vụ/ PT"]
+        .astype(str)
+        .str.strip()
+        .str.casefold()
+    )
+    tip_mask = _tip_norm.str.match(r"^tip(?:\b|[_\-\s])", na=False)
+    tip_count = int(tip_mask.sum())
+
+    if tip_count <= 0:
+        preview = ", ".join(
+            out["Sản phẩm/ Dịch vụ/ PT"]
+            .dropna().astype(str).str.strip()
+            .loc[lambda s: s.ne("")]
+            .drop_duplicates()
+            .head(12)
+            .tolist()
+        )
+        return pd.DataFrame(), (
+            "File TimeSoft đúng format nhưng không tìm thấy dòng Tip ở cột F. "
+            f"Giá trị đầu tiên đọc được ở cột F: {preview}"
+        ), {
+            "format_valid": True,
+            "tip_count": 0,
+        }
+
+    return out.reset_index(drop=True), "", {
+        "format_valid": True,
+        "tip_count": tip_count,
+        "rows": int(len(out)),
+        "format": "Excel TimeSoft thật · sheet Báo cáo doanh thu hóa đơn · header dòng 3 · B/F/G/I",
+    }
+
+
 def _load_payroll_source_from_timesoft_export(start_date, end_date):
-    ok,msg,file_path,meta = _timesoft_export_payroll_excel(start_date,end_date)
+    ok, msg, file_path, meta = _timesoft_export_payroll_excel(start_date, end_date)
     if not ok or not file_path:
         return pd.DataFrame(), msg, meta or {}
-    try:
-        raw = pd.read_excel(file_path, sheet_name=PAYROLL_SOURCE_WORKSHEET, header=None, engine="openpyxl")
-        source_df = _standardize_payroll_source(raw)
-    except Exception as e:
-        return pd.DataFrame(), f"Đã tải file TimeSoft nhưng không đọc được dữ liệu lương: {e}", meta or {}
-    if source_df.empty:
-        return pd.DataFrame(), "File TimeSoft đúng format nhưng không có dữ liệu tính lương trong kỳ đã chọn.", meta or {}
-    tip_mask = source_df["Sản phẩm/ Dịch vụ/ PT"].astype(str).str.strip().str.casefold().str.startswith("tip")
-    tip_count = int(tip_mask.sum())
-    if tip_count <= 0:
-        return pd.DataFrame(), "File TimeSoft đúng format nhưng không có dòng Tip; hệ thống dừng để tránh tính lương sai.", meta or {}
-    meta = dict(meta or {}); meta.update({"tip_count":tip_count,"source":"TimeSoft Export Excel","format":"Excel TimeSoft thật · sheet Báo cáo doanh thu hóa đơn · header dòng 3 · A:K"})
-    st.session_state["payroll_timesoft_mapping_v855"] = {"frame":"TimeSoft Export Excel","mapping":{"B · Thời gian":"Cột B","F · Sản phẩm/ Dịch vụ/ PT":"Cột F","G · Tổng tiền":"Cột G","I · NV tư vấn":"Cột I"},"tip_count":tip_count,"tip_match_count":0,"format":meta["format"]}
-    return source_df, "", meta
+
+    source_df, parse_err, parse_meta = _parse_timesoft_payroll_export_exact(file_path)
+    if parse_err:
+        merged_meta = dict(meta or {})
+        merged_meta.update(parse_meta or {})
+        return pd.DataFrame(), parse_err, merged_meta
+
+    merged_meta = dict(meta or {})
+    merged_meta.update(parse_meta or {})
+    merged_meta.update({
+        "source": "TimeSoft Export Excel",
+        "export_path": file_path,
+    })
+
+    tip_count = int(merged_meta.get("tip_count", 0) or 0)
+    st.session_state["payroll_timesoft_mapping_v855"] = {
+        "frame": "TimeSoft Export Excel · đọc trực tiếp B/F/G/I",
+        "mapping": {
+            "B · Thời gian": "Cột B",
+            "F · Sản phẩm/ Dịch vụ/ PT": "Cột F",
+            "G · Tổng tiền": "Cột G",
+            "I · NV tư vấn": "Cột I",
+        },
+        "tip_count": tip_count,
+        "tip_match_count": 0,
+        "format": merged_meta.get("format", ""),
+    }
+    return source_df, "", merged_meta
 
 
 def load_payroll_source_from_timesoft(start_date, end_date):
@@ -18310,7 +18412,7 @@ def render_admin_history_violation_management(
     with st.expander("⏭️ Tạm hoãn Vi phạm sang kỳ kế tiếp", expanded=False):
         _leave_for_defer = load_backup_sheet_data()
         _raw_penalty_map = _period_penalty_by_employee(
-            start_date, end_date, _leave_for_defer, None
+            start_date, end_date, _leave_for_defer
         )
         _due_map, _deferred_map, _active_debts = get_violation_debt_state(
             start_date,

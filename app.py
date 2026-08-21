@@ -1,4 +1,4 @@
-# V92.6.77 - STT44 Không check mặt cho G=0.5 không FaceID + Lê My/midshift dùng STT31 (2026-08-22)
+# V92.6.78 - Thống kê nhân sự + tối ưu Google Sheets quota 429 bằng batch/cache/backoff (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -4569,8 +4569,9 @@ LEAVE_ACTIVITY_LOG_HEADERS = [
 ]
 
 
+@st.cache_resource
 def _leave_activity_log_ws():
-    """Tạo/đọc worksheet audit. Không dùng sheet lịch chính để tránh trộn dữ liệu."""
+    """Tạo/đọc worksheet audit; cache Worksheet 5 phút để không đọc header ở mỗi log."""
     client = get_gspread_client()
     if not client:
         return None
@@ -5002,17 +5003,6 @@ def render_leave_activity_log_admin():
 
 
 
-def gspread_update_range(sheet, range_name, values, **kwargs):
-    """Tương thích cả gspread 5.x (range trước) và 6.x (values trước)."""
-    try:
-        major = int(str(getattr(gspread, '__version__', '5')).split('.')[0])
-    except Exception:
-        major = 5
-    if major >= 6:
-        return sheet.update(values, range_name, **kwargs)
-    return sheet.update(range_name, values, **kwargs)
-
-
 def _is_google_sheets_quota_error(exc):
     """Nhận diện lỗi quota/rate-limit của Google Sheets API."""
     msg = str(exc).lower()
@@ -5022,23 +5012,98 @@ def _is_google_sheets_quota_error(exc):
     )
 
 
-def _gs_call_with_backoff(func, *args, retries=5, **kwargs):
+def _gs_call_with_backoff(func, *args, retries=6, **kwargs):
     """
-    Gọi Google Sheets API với exponential backoff khi gặp 429.
-    Mục tiêu chính vẫn là GIẢM số request; retry chỉ là lớp bảo vệ khi quota đang tạm đầy.
+    Google Sheets exponential backoff cho lỗi 429: 1s -> 2s -> 4s -> 8s -> 16s.
+    Các lỗi khác được trả ngay, không retry mù.
     """
     last_exc = None
-    for attempt in range(max(1, int(retries))):
+    attempts = max(1, int(retries))
+    for attempt in range(attempts):
         try:
             return func(*args, **kwargs)
         except Exception as exc:
             last_exc = exc
-            if not _is_google_sheets_quota_error(exc) or attempt >= retries - 1:
+            if not _is_google_sheets_quota_error(exc) or attempt >= attempts - 1:
                 raise
-            # 2s -> 4s -> 8s -> 16s; chỉ dùng khi thật sự gặp 429.
-            time.sleep(min(2 ** (attempt + 1), 16))
+            time.sleep(min(2 ** attempt, 16))
     if last_exc is not None:
         raise last_exc
+
+
+def gspread_update_range(sheet, range_name, values, **kwargs):
+    """Tương thích gspread 5/6 và tự backoff khi Sheets trả 429."""
+    try:
+        major = int(str(getattr(gspread, '__version__', '5')).split('.')[0])
+    except Exception:
+        major = 5
+    if major >= 6:
+        return _gs_call_with_backoff(sheet.update, values, range_name, **kwargs)
+    return _gs_call_with_backoff(sheet.update, range_name, values, **kwargs)
+
+
+def gspread_batch_get_ranges(sheet, ranges):
+    """Đọc nhiều range trong MỘT HTTP request (spreadsheets.values.batchGet qua gspread)."""
+    ranges = [str(r) for r in (ranges or []) if str(r).strip()]
+    if not ranges:
+        return []
+    try:
+        return _gs_call_with_backoff(sheet.batch_get, ranges)
+    except AttributeError:
+        # Gspread rất cũ: fallback tương thích.
+        return [_gs_call_with_backoff(sheet.get, r) for r in ranges]
+
+
+def gspread_batch_update_ranges(sheet, updates, value_input_option='USER_ENTERED'):
+    """Ghi nhiều range trong một request; fallback từng range nếu gspread quá cũ."""
+    payload = []
+    for item in updates or []:
+        if not isinstance(item, dict):
+            continue
+        rng = str(item.get('range', '')).strip()
+        vals = item.get('values', [])
+        if rng:
+            payload.append({'range': rng, 'values': vals})
+    if not payload:
+        return None
+    try:
+        return _gs_call_with_backoff(
+            sheet.batch_update, payload, value_input_option=value_input_option
+        )
+    except (AttributeError, TypeError):
+        out = None
+        for item in payload:
+            out = gspread_update_range(
+                sheet, item['range'], item['values'], value_input_option=value_input_option
+            )
+        return out
+
+
+def gspread_batch_delete_rows(sheet, row_indices):
+    """Xóa nhiều dòng vật lý bằng một spreadsheets.batchUpdate; request xếp giảm dần để không lệch index."""
+    rows = sorted({int(x) for x in (row_indices or []) if int(x) >= 1}, reverse=True)
+    if not rows:
+        return 0
+    try:
+        sheet_id = int(getattr(sheet, 'id'))
+        requests = [
+            {'deleteDimension': {'range': {
+                'sheetId': sheet_id, 'dimension': 'ROWS',
+                'startIndex': row_num - 1, 'endIndex': row_num,
+            }}}
+            for row_num in rows
+        ]
+        spreadsheet = getattr(sheet, 'spreadsheet')
+        _gs_call_with_backoff(spreadsheet.batch_update, {'requests': requests})
+        return len(rows)
+    except Exception as exc:
+        if _is_google_sheets_quota_error(exc):
+            raise
+        deleted = 0
+        for row_num in rows:
+            _gs_call_with_backoff(sheet.delete_rows, row_num)
+            deleted += 1
+        return deleted
 
 
 def _get_employment_status_worksheet():
@@ -5691,10 +5756,26 @@ def _canonical_leave_field_for_header(header):
     return LEAVE_HEADER_ALIASES.get(normalize_login_name(raw), raw)
 
 
+_LEAVE_HEADER_CACHE_V92678 = {}
+
 def _get_leave_sheet_headers(sheet_dp, strict=True):
-    """Đọc A1:M1 làm nguồn sự thật; không tự sửa header/cột."""
-    current = _gs_call_with_backoff(sheet_dp.get, LEAVE_MAIN_HEADER_RANGE)
-    headers = list(current[0]) if current else []
+    """
+    Đọc A1:M1 làm nguồn sự thật; cache header 5 phút vì schema gần như không đổi.
+    Việc này loại bỏ nhiều read request lặp lại trong các thao tác sửa/xóa/log.
+    """
+    cache_key = (
+        str(SHEET_DU_PHONG_ID),
+        str(getattr(sheet_dp, 'id', '') or getattr(sheet_dp, 'title', 'MainData')),
+    )
+    now_ts = time.time()
+    cached = _LEAVE_HEADER_CACHE_V92678.get(cache_key)
+    if cached and (now_ts - float(cached.get('ts', 0))) < 300:
+        headers = list(cached.get('headers', []))
+    else:
+        current = _gs_call_with_backoff(sheet_dp.get, LEAVE_MAIN_HEADER_RANGE)
+        headers = list(current[0]) if current else []
+        headers = headers[:13] + [""] * max(0, 13 - len(headers))
+        _LEAVE_HEADER_CACHE_V92678[cache_key] = {'ts': now_ts, 'headers': list(headers)}
     headers = headers[:13] + [""] * max(0, 13 - len(headers))
     if strict:
         mapped = {
@@ -7999,6 +8080,14 @@ def get_shift_dataframe(credentials_df):
             d[c] = ''
     roles = {"nhanvien", "leader", "letan", "quanly", "locker", "tapvu"}
     d = d[d['Phân quyền'].astype(str).str.strip().str.lower().isin(roles)].copy()
+    # V92.6.78: danh sách chia ca chỉ chứa nhân sự Đang làm việc; thống kê riêng vẫn đếm tạm nghỉ/đã nghỉ.
+    try:
+        _status_map_shift = load_employment_status_map()
+        d = d[d['Tên nhân viên'].astype(str).apply(
+            lambda n: _status_map_shift.get(normalize_login_name(n), EMPLOYMENT_STATUS_ACTIVE) == EMPLOYMENT_STATUS_ACTIVE
+        )].copy()
+    except Exception:
+        pass
     d['Bộ phận'] = d['Phân quyền'].apply(_shift_department_label)
     d = d[cols].copy()
 
@@ -8737,6 +8826,56 @@ def normalize_employment_status_value(value, default=EMPLOYMENT_STATUS_ACTIVE):
     return EMPLOYMENT_STATUS_ALIASES.get(key, default)
 
 
+def build_staff_statistics_v92678(credentials_df):
+    """Thống kê toàn bộ hồ sơ nhân sự (không tính admin), kể cả tạm nghỉ/đã nghỉ."""
+    roles = {"nhanvien", "leader", "letan", "quanly", "locker", "tapvu"}
+    if credentials_df is None or not isinstance(credentials_df, pd.DataFrame) or credentials_df.empty:
+        empty = pd.DataFrame(columns=["Bộ phận", "Đang làm việc", "Tạm thời nghỉ việc", "Đã nghỉ việc", "Tổng"])
+        return {"total": 0, "active": 0, "temp": 0, "left": 0, "departments": empty}
+    d = credentials_df.copy()
+    for col in ["Tên nhân viên", "Phân quyền"]:
+        if col not in d.columns:
+            d[col] = ''
+    d['Phân quyền'] = d['Phân quyền'].astype(str).str.strip().str.lower()
+    d = d[d['Phân quyền'].isin(roles)].copy()
+    status_map = load_employment_status_map()
+    d['Trạng thái làm việc'] = d['Tên nhân viên'].astype(str).apply(
+        lambda n: status_map.get(normalize_login_name(n), EMPLOYMENT_STATUS_ACTIVE)
+    )
+    d['Bộ phận'] = d['Phân quyền'].apply(_shift_department_label)
+
+    rows = []
+    for dep in SHIFT_DEPARTMENT_ORDER:
+        dd = d[d['Bộ phận'].eq(dep)]
+        rows.append({
+            'Bộ phận': dep,
+            'Đang làm việc': int(dd['Trạng thái làm việc'].eq(EMPLOYMENT_STATUS_ACTIVE).sum()),
+            'Tạm thời nghỉ việc': int(dd['Trạng thái làm việc'].eq(EMPLOYMENT_STATUS_TEMP).sum()),
+            'Đã nghỉ việc': int(dd['Trạng thái làm việc'].eq(EMPLOYMENT_STATUS_LEFT).sum()),
+            'Tổng': int(len(dd)),
+        })
+    return {
+        'total': int(len(d)),
+        'active': int(d['Trạng thái làm việc'].eq(EMPLOYMENT_STATUS_ACTIVE).sum()),
+        'temp': int(d['Trạng thái làm việc'].eq(EMPLOYMENT_STATUS_TEMP).sum()),
+        'left': int(d['Trạng thái làm việc'].eq(EMPLOYMENT_STATUS_LEFT).sum()),
+        'departments': pd.DataFrame(rows),
+    }
+
+
+def render_staff_statistics_v92678(credentials_df, key_prefix='staff_stats'):
+    stats = build_staff_statistics_v92678(credentials_df)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric('Tổng số nhân viên', stats['total'])
+    c2.metric('Đang làm việc', stats['active'])
+    c3.metric('Tạm thời nghỉ việc', stats['temp'])
+    c4.metric('Đã nghỉ việc', stats['left'])
+    st.caption('Tổng số nhân sự không tính tài khoản Admin. Bảng dưới thống kê đầy đủ từng bộ phận, kể cả người tạm nghỉ/đã nghỉ.')
+    st.dataframe(
+        stats['departments'], hide_index=True, width='stretch', height='content',
+    )
+
+
 def build_staff_list_dataframe(credentials_df):
     """Danh sách nhân sự chuẩn: tên A→Z, role chuẩn hóa, trạng thái theo 3 mức mới."""
     if credentials_df is None or not isinstance(credentials_df, pd.DataFrame) or credentials_df.empty:
@@ -9041,44 +9180,28 @@ def batch_import_staff_list(import_df, updated_by, actor_role="admin"):
 
 # --- TẢI DỮ LIỆU TỪ GOOGLE SHEET DỰ PHÒNG ---
 def _load_backup_sheet_data_from_sheets():
-    """Đọc MainData A:M theo header thực tế."""
+    """Đọc MainData bằng batchGet; chỉ 1 read request cho header + toàn bộ A:M."""
     expected = LEAVE_DATA_COLUMNS
     try:
         client = get_gspread_client()
         if not client:
             return pd.DataFrame(columns=expected + ["__source_sheet_id", "__source_row"])
         sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        headers = _ensure_leave_sheet_schema(sheet)
-        values = _gs_call_with_backoff(sheet.get, LEAVE_MAIN_RANGE)
-        if not values or len(values) < 2:
-            return pd.DataFrame(columns=expected + ["__source_sheet_id", "__source_row"])
-        rows = []
-        for sheet_row, raw in enumerate(values[1:], start=2):
-            vals = list(raw[:13]) + [""] * max(0, 13 - len(raw))
-            if not any(str(v).strip() for v in vals):
-                continue
-            item = _leave_sheet_row_to_record(vals, headers)
-            if not item.get("Thứ ngày"):
-                item["Thứ ngày"] = _vn_weekday_label(item.get("Ngày", ""))
-            if not item.get("Loại nghỉ"):
-                item["Loại nghỉ"] = _leave_type_for_reason(item.get("Lý do nghỉ", ""))
-            item["__source_sheet_id"] = SHEET_DU_PHONG_ID
-            item["__source_row"] = sheet_row
-            rows.append(item)
-        return pd.DataFrame(rows) if rows else pd.DataFrame(
-            columns=expected + ["__source_sheet_id", "__source_row"]
-        )
+        return _read_leave_sheet_with_source(sheet, SHEET_DU_PHONG_ID)
     except Exception:
         return pd.DataFrame(columns=expected + ["__source_sheet_id", "__source_row"])
 
-@st.cache_data(ttl=45, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def load_backup_sheet_data():
-    """V75: đọc qua PostgreSQL dùng chung giữa các Cloud Run instance; Google Sheets là nguồn đồng bộ dự phòng."""
+    """
+    Cache MainData 120 giây. Nếu PostgreSQL được bật, snapshot dùng chung giữa các Cloud Run instance;
+    nếu không, Streamlit giữ cache trong process. Mọi thao tác ghi/xóa đều gọi clear cache ngay.
+    """
     if vpg is not None and _vpg_is_enabled():
         return vpg.load_dataset(
             "leave_primary",
             _load_backup_sheet_data_from_sheets,
-            ttl_seconds=int(os.getenv("VERA_PG_TTL_LEAVE_PRIMARY", "45")),
+            ttl_seconds=int(os.getenv("VERA_PG_TTL_LEAVE_PRIMARY", "120")),
         )
     return _load_backup_sheet_data_from_sheets()
 
@@ -9957,8 +10080,8 @@ def delete_backup_row(row_index_1_based, updated_by=None):
             if group_key:
                 affected_groups.add(group_key)
 
-        sheet.delete_rows(row_index_1_based)
-        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor) if affected_groups else 0
+        gspread_batch_delete_rows(sheet, [row_index_1_based])
+        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor, primary_sheet=sheet) if affected_groups else 0
         if deleted_row is not None:
             write_leave_activity_log(
                 "XÓA", actor, before_row=deleted_row, after_row=None,
@@ -9969,6 +10092,12 @@ def delete_backup_row(row_index_1_based, updated_by=None):
             return True, f"Đã xóa lịch nghỉ và tự xếp lại thứ tự/phạt cho {rebalanced} bản ghi còn lại."
         return True, "Đã xóa lịch nghỉ thành công!"
     except Exception as e:
+        if _is_google_sheets_quota_error(e):
+            return False, (
+                "Google Sheets đang vượt quota API (429). Hệ thống đã tự retry 1s → 2s → 4s → 8s → 16s. "
+                "Hãy chờ khoảng 1 phút rồi thử lại. Nếu lỗi lặp lại thường xuyên, cần tăng quota Read requests per minute per user "
+                "cho Google Sheets API của project 589916994342."
+            )
         return False, f"Lỗi xóa dòng: {e}"
 
 def _find_schedule_row_index(sheet, original_row):
@@ -13205,13 +13334,30 @@ def _load_live_primary_leave_sheet(client):
     return combine_leave_sources_for_daily_stats(df_primary)
 
 def _read_leave_sheet_with_source(sheet, source_id):
-    """Đọc A:M theo header thực tế; giữ raw row để sửa an toàn."""
+    """
+    Đọc MainData A:M và header bằng MỘT batchGet; giữ raw row để sửa/xóa an toàn.
+    V92.6.78: giảm 2 read request xuống 1 request cho mỗi lần đọc LIVE.
+    """
     expected = LEAVE_DATA_COLUMNS
     try:
-        headers = _get_leave_sheet_headers(sheet, strict=True)
-        values = _gs_call_with_backoff(sheet.get, LEAVE_MAIN_RANGE)
+        blocks = gspread_batch_get_ranges(sheet, [LEAVE_MAIN_HEADER_RANGE, LEAVE_MAIN_RANGE])
+        header_block = blocks[0] if len(blocks) > 0 else []
+        values = blocks[1] if len(blocks) > 1 else []
+        headers = list(header_block[0]) if header_block else []
+        headers = headers[:13] + [""] * max(0, 13 - len(headers))
+        mapped = {
+            _canonical_leave_field_for_header(h)
+            for h in headers if str(h or '').strip()
+        }
+        missing = sorted(LEAVE_REQUIRED_FIELDS - mapped)
+        if missing:
+            raise ValueError(
+                'MainData A:M thiếu header bắt buộc: ' + ', '.join(missing)
+            )
         if not values or len(values) < 2:
-            return pd.DataFrame(columns=expected + ["__source_sheet_id", "__source_row", "__raw_values"])
+            empty_df = pd.DataFrame(columns=expected + ["__source_sheet_id", "__source_row", "__raw_values"])
+            empty_df.attrs['sheet_headers'] = headers
+            return empty_df
         rows = []
         for sheet_row, raw in enumerate(values[1:], start=2):
             vals = list(raw[:13]) + [""] * max(0, 13 - len(raw))
@@ -13226,9 +13372,11 @@ def _read_leave_sheet_with_source(sheet, source_id):
             item["__source_row"] = int(sheet_row)
             item["__raw_values"] = vals
             rows.append(item)
-        return pd.DataFrame(rows) if rows else pd.DataFrame(
+        out_df = pd.DataFrame(rows) if rows else pd.DataFrame(
             columns=expected + ["__source_sheet_id", "__source_row", "__raw_values"]
         )
+        out_df.attrs['sheet_headers'] = headers
+        return out_df
     except Exception:
         return pd.DataFrame(columns=expected + ["__source_sheet_id", "__source_row", "__raw_values"])
 
@@ -13269,8 +13417,11 @@ def _existing_base_penalty(row, catalog):
     return max(0.0, float(current_total) - float(old_extra))
 
 
-def rebalance_progressive_penalty_groups(client, affected_groups, updated_by):
-    """Xếp lại Người Thứ X/phạt lũy tiến trên MainData chính; ghi các cột G:M."""
+def rebalance_progressive_penalty_groups(client, affected_groups, updated_by, primary_sheet=None):
+    """
+    Xếp lại Người Thứ X/phạt lũy tiến trên MainData.
+    V92.6.78: một batchGet để đọc + một batchUpdate để ghi, không GET từng dòng.
+    """
     clean_groups = set()
     for item in affected_groups or []:
         try:
@@ -13282,19 +13433,26 @@ def rebalance_progressive_penalty_groups(client, affected_groups, updated_by):
     if not clean_groups:
         return 0
 
-    primary_sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+    primary_sheet = primary_sheet or client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
     raw_all = _read_leave_sheet_with_source(primary_sheet, SHEET_DU_PHONG_ID)
     if raw_all is None or raw_all.empty:
         return 0
     raw_all['_reb_date'] = raw_all['Ngày'].apply(normalize_schedule_date)
     raw_all['_reb_reason'] = raw_all['Lý do nghỉ'].astype(str).apply(get_progressive_penalty_reason)
 
+    # Header đi kèm DataFrame attrs từ cùng batchGet, không phát sinh read request thứ hai.
+    sheet_headers = list(raw_all.attrs.get('sheet_headers', []) or [])
+    sheet_headers = sheet_headers[:13] + [''] * max(0, 13 - len(sheet_headers))
+    if not any(str(x).strip() for x in sheet_headers):
+        raise ValueError('Không đọc được header MainData để tính lại phạt lũy tiến.')
+
     catalog = build_leave_reason_catalog(globals().get('df_loai_nghi', pd.DataFrame()))
     now_vn = datetime.now(VN_TZ)
     actor = str(updated_by or 'Hệ thống')
     update_date = now_vn.strftime('%d/%m/%Y')
     update_time = now_vn.strftime('%H:%M:%S')
-    updated_physical_rows = 0
+    pending_updates = []
+    pending_logs = []
 
     for ngay, canonical in sorted(clean_groups):
         group = raw_all[(raw_all['_reb_date'] == ngay) & (raw_all['_reb_reason'] == canonical)].copy()
@@ -13324,51 +13482,48 @@ def rebalance_progressive_penalty_groups(client, affected_groups, updated_by):
             user_note = _strip_generated_progressive_prefix(physical.get('Chi tiết', ''))
             new_detail = f"{prefix} | {user_note}" if user_note else prefix
 
-            current = primary_sheet.get(f"A{row_idx}:M{row_idx}")
-            existing = list(current[0]) if current else [""] * 13
-            updated_record = physical.to_dict() if hasattr(physical, "to_dict") else dict(physical)
+            existing = physical.get('__raw_values', [])
+            if not isinstance(existing, list):
+                try:
+                    existing = list(existing)
+                except Exception:
+                    existing = [''] * 13
+            updated_record = physical.to_dict() if hasattr(physical, 'to_dict') else dict(physical)
             updated_record.update({
-                "Chi tiết": new_detail,
-                "Phạt vi phạm": new_penalty,
-                "Ngày cập nhật": update_date,
-                "Giờ cập nhật": update_time,
-                "Người cập nhật": actor,
+                'Chi tiết': new_detail,
+                'Phạt vi phạm': new_penalty,
+                'Ngày cập nhật': update_date,
+                'Giờ cập nhật': update_time,
+                'Người cập nhật': actor,
             })
-            sheet_headers = _get_leave_sheet_headers(primary_sheet, strict=True)
             safe_values = _leave_record_to_sheet_row(
-                updated_record,
-                sheet_headers=sheet_headers,
-                existing_values=existing,
+                updated_record, sheet_headers=sheet_headers, existing_values=existing
             )
-            gspread_update_range(
-                primary_sheet,
-                f"A{row_idx}:M{row_idx}",
-                [safe_values],
-                value_input_option='USER_ENTERED',
-            )
-            updated_physical_rows += 1
+            pending_updates.append({
+                'range': f'A{row_idx}:M{row_idx}',
+                'values': [safe_values],
+            })
 
-            # Chỉ tạo log TỰ TÍNH LẠI khi Người Thứ/Chi tiết hoặc tiền phạt thật sự đổi.
-            _reb_before_detail = str(physical.get("Chi tiết", "") or "")
-            _reb_after_detail = str(updated_record.get("Chi tiết", "") or "")
-            _reb_before_penalty = _parse_leave_number(physical.get("Phạt vi phạm", 0), 0.0, money=True)
-            _reb_after_penalty = _parse_leave_number(updated_record.get("Phạt vi phạm", 0), 0.0, money=True)
-            if (
-                _reb_before_detail != _reb_after_detail
-                or abs(float(_reb_before_penalty) - float(_reb_after_penalty)) > 1e-9
-            ):
-                write_leave_activity_log(
-                    "TỰ TÍNH LẠI",
-                    actor,
-                    before_row=physical,
-                    after_row=updated_record,
-                    source="Hệ thống tính lại Người Thứ / Phạt lũy tiến",
-                    note=f"Rebalance nhóm {canonical} ngày {ngay}.",
-                )
+            before_detail = str(physical.get('Chi tiết', '') or '')
+            after_detail = str(updated_record.get('Chi tiết', '') or '')
+            before_penalty = _parse_leave_number(physical.get('Phạt vi phạm', 0), 0.0, money=True)
+            after_penalty = _parse_leave_number(updated_record.get('Phạt vi phạm', 0), 0.0, money=True)
+            if before_detail != after_detail or abs(float(before_penalty) - float(after_penalty)) > 1e-9:
+                pending_logs.append((physical, updated_record, canonical, ngay))
 
-    if updated_physical_rows:
+    if pending_updates:
+        gspread_batch_update_ranges(primary_sheet, pending_updates, value_input_option='USER_ENTERED')
+
+    for physical, updated_record, canonical, ngay in pending_logs:
+        write_leave_activity_log(
+            'TỰ TÍNH LẠI', actor, before_row=physical, after_row=updated_record,
+            source='Hệ thống tính lại Người Thứ / Phạt lũy tiến',
+            note=f'Rebalance nhóm {canonical} ngày {ngay}.',
+        )
+
+    if pending_updates:
         _clear_leave_data_caches()
-    return updated_physical_rows
+    return len(pending_updates)
 
 def update_schedule_record(original_row, edited_row, updated_by):
     """
@@ -13467,7 +13622,7 @@ def update_schedule_record(original_row, edited_row, updated_by):
         new_group = _progressive_group_key(recalculated)
         if new_group:
             affected_groups.add(new_group)
-        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, updated_by)
+        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, updated_by, primary_sheet=target)
 
         # Đọc lại đúng trạng thái SAU cùng sau rebalance để audit chính xác.
         _audit_after_row = recalculated
@@ -13556,12 +13711,9 @@ def delete_schedule_records(original_rows, updated_by=None):
                     except Exception:
                         pass
 
-        deleted = 0
-        for idx in sorted(set(indices), reverse=True):
-            _gs_call_with_backoff(target.delete_rows, idx)
-            deleted += 1
+        deleted = gspread_batch_delete_rows(target, indices)
 
-        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor) if affected_groups else 0
+        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor, primary_sheet=target) if affected_groups else 0
 
         if deleted <= 0:
             _clear_leave_data_caches()
@@ -13613,6 +13765,14 @@ def delete_schedule_records(original_rows, updated_by=None):
             )
         return True, f"Đã xóa {deleted} dòng lịch nghỉ." + _audit_suffix
     except Exception as e:
+        if _is_google_sheets_quota_error(e):
+            return False, (
+                "Google Sheets đang vượt hạn mức API đọc (429). Hệ thống đã tự thử lại theo "
+                "1s → 2s → 4s → 8s → 16s nhưng quota vẫn chưa hồi phục. "
+                "Vui lòng chờ khoảng 1 phút rồi thử lại; dữ liệu chưa bị xóa dở bởi lỗi đọc này. "
+                "Nếu lỗi lặp lại thường xuyên, hãy tăng quota Read requests per minute per user của Google Sheets API "
+                "trong project 589916994342."
+            )
         return False, f"Lỗi xóa lịch nghỉ: {e}"
 
 def download_file_from_google_drive(id, destination):
@@ -25028,6 +25188,8 @@ elif selected_page == "👤 Hồ sơ cá nhân":
     pass  # Nội dung hồ sơ đã hiển thị ở phía trên.
 elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access("shift"):
     st.subheader("⏰ Thiết lập ca làm việc")
+    render_staff_statistics_v92678(df_credentials, "shift_staff_stats")
+    st.markdown("---")
     _can_shift_def = action_access("shift_definition_edit")
     _can_shift_break = action_access("shift_break_config_edit")
     _can_shift_assign = action_access("shift_assignment_edit")
@@ -26039,6 +26201,8 @@ elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff
     _can_staff_export = action_access("staff_export")
     _can_staff_import = action_access("staff_import")
     st.subheader("👥 Danh sách nhân sự")
+    render_staff_statistics_v92678(df_credentials, "staff_list_stats")
+    st.markdown("---")
     staff_source_df = build_staff_list_dataframe(df_credentials)
 
     # V88.2: tài khoản có Phân quyền = quanly chỉ Admin được nhìn thấy.

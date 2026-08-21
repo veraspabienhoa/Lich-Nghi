@@ -1,4 +1,4 @@
-# V92.6.73 - Ưu tiên TimeSoft nghỉ giữa ca + Auto phạt quá Duration + email vi phạm (2026-08-22)
+# V92.6.75 - Chặn Auto Nghỉ KP khi MainData G có 0.5/1 + tạm dừng email Auto + nhãn xanh (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -2837,6 +2837,11 @@ AUTO_PENALTY_CONFIG_KEY = "AUTO_PENALTY"
 AUTO_PENALTY_RUNNING = "RUNNING"
 AUTO_PENALTY_PAUSED = "PAUSED"
 
+# V92.6.75 - điều khiển riêng việc gửi email do Auto Update tạo ra.
+# Không ảnh hưởng email đăng ký lịch nghỉ thủ công / audit khác.
+AUTO_EMAIL_CONFIG_KEY_V92675 = "AUTO_EMAIL"
+AUTO_EMAIL_CONFIG_ROW_V92675 = 4
+
 # V92.6.69 - Lịch Auto Update chuẩn: 15:00 + 20:00 + 21:00 (giờ Việt Nam).
 # - 15:00: Auto Update ban ngày.
 # - 20:00: giữ nguyên Auto Update tối, bao gồm điều kiện Auto Nghỉ không phép từ 20:00.
@@ -4034,6 +4039,33 @@ def _auto_penalty_cc_emails_v92673(credentials_df=None):
     return sorted(emails)
 
 
+def _append_auto_update_email_log_v92674(employee, email_to, cc_text, reason, status, detail, count=1):
+    """Lưu bằng chứng gửi email Auto Update vào worksheet AutoUpdateEmailLog."""
+    try:
+        client = get_gspread_client()
+        if not client:
+            return
+        ss = client.open_by_key(SHEET_DU_PHONG_ID)
+        try:
+            ws = ss.worksheet("AutoUpdateEmailLog")
+        except Exception:
+            ws = ss.add_worksheet(title="AutoUpdateEmailLog", rows=2000, cols=12)
+        wanted = ["Ngày", "Tên nhân viên", "Email", "CC", "Số dòng mới", "Lý do", "Trạng thái", "Thời gian gửi", "Chi tiết"]
+        header = _gs_call_with_backoff(ws.row_values, 1)
+        if header[:len(wanted)] != wanted:
+            gspread_update_range(ws, "A1:I1", [wanted])
+        now_vn = datetime.now(VN_TZ)
+        row = [
+            now_vn.strftime("%d/%m/%Y"), str(employee or ""), str(email_to or ""),
+            str(cc_text or ""), int(count or 0), str(reason or ""), str(status or ""),
+            now_vn.strftime("%H:%M:%S"), str(detail or ""),
+        ]
+        target = len(_gs_call_with_backoff(ws.get_all_values)) + 1
+        gspread_update_range(ws, f"A{target}:I{target}", [row])
+    except Exception:
+        pass
+
+
 def send_auto_penalty_notification_email_v92673(
     employee_username,
     work_date,
@@ -4050,10 +4082,17 @@ def send_auto_penalty_notification_email_v92673(
     if amount <= 0:
         return True, "Không gửi email vì Phạt vi phạm = 0."
 
+    _mail_cfg_v92675 = load_auto_email_config_v92675()
+    if _mail_cfg_v92675.get("paused"):
+        return False, (
+            "Gửi mail tự động của Auto Update đang TẠM DỪNG bởi Admin; "
+            "dòng phạt vẫn được lưu và có thể gửi bù sau khi mở lại."
+        )
+
     try:
         # Dùng cache hồ sơ gần nhất để một lượt Auto nhiều nhân viên không ép đọc lại
         # Google/PostgreSQL cho từng email; cache hiện tại vẫn đủ mới cho thông tin liên hệ.
-        creds = load_credentials_recent()
+        creds = load_credentials_fresh_for_email()
         to_email = latest_email_from_credentials(creds, employee_username)
         if not to_email or "@" not in to_email:
             return False, f"{employee_username} chưa có Email hợp lệ trong hồ sơ."
@@ -5416,6 +5455,72 @@ def is_auto_penalty_paused():
     return bool(load_auto_penalty_config().get("paused", False))
 
 
+def load_auto_email_config_v92675():
+    """Đọc LIVE trạng thái gửi email Auto Update từ CauHinhAutoPhat dòng 4."""
+    default = {
+        "paused": False, "status": AUTO_PENALTY_RUNNING,
+        "updated_date": "", "updated_time": "", "updated_by": "", "error": "",
+    }
+    try:
+        ws = _get_auto_penalty_config_worksheet()
+        if ws is None:
+            default["error"] = "Chưa cấu hình Google Sheets."
+            return default
+        rng = f"A{AUTO_EMAIL_CONFIG_ROW_V92675}:F{AUTO_EMAIL_CONFIG_ROW_V92675}"
+        vals = _gs_call_with_backoff(ws.get, rng)
+        row = list(vals[0]) if vals else []
+        if not row or str(row[0] or "").strip() != AUTO_EMAIL_CONFIG_KEY_V92675:
+            now = datetime.now(VN_TZ)
+            row = [
+                AUTO_EMAIL_CONFIG_KEY_V92675, AUTO_PENALTY_RUNNING, "",
+                now.strftime("%d/%m/%Y"), now.strftime("%H:%M:%S"), "Hệ thống",
+            ]
+            gspread_update_range(ws, rng, [row], value_input_option="USER_ENTERED")
+        row += [""] * max(0, 6 - len(row))
+        status = str(row[1] or AUTO_PENALTY_RUNNING).strip().upper()
+        return {
+            "paused": status == AUTO_PENALTY_PAUSED,
+            "status": status,
+            "updated_date": str(row[3] or ""),
+            "updated_time": str(row[4] or ""),
+            "updated_by": str(row[5] or ""),
+            "error": "",
+        }
+    except Exception as e:
+        default["error"] = str(e)
+        return default
+
+
+def set_auto_email_paused_v92675(paused, updated_by):
+    """Tạm dừng/mở lại CHỈ email tự động của Auto Update."""
+    try:
+        ws = _get_auto_penalty_config_worksheet()
+        if ws is None:
+            return False, "Chưa cấu hình quyền kết nối Google Sheets."
+        now = datetime.now(VN_TZ)
+        status = AUTO_PENALTY_PAUSED if bool(paused) else AUTO_PENALTY_RUNNING
+        rng = f"A{AUTO_EMAIL_CONFIG_ROW_V92675}:F{AUTO_EMAIL_CONFIG_ROW_V92675}"
+        gspread_update_range(ws, rng, [[
+            AUTO_EMAIL_CONFIG_KEY_V92675, status, "",
+            now.strftime("%d/%m/%Y"), now.strftime("%H:%M:%S"),
+            str(updated_by or "Admin"),
+        ]], value_input_option="USER_ENTERED")
+        state_vi = "TẠM DỪNG" if paused else "HOẠT ĐỘNG"
+        return True, f"Gửi mail tự động của Auto Update đã chuyển sang {state_vi}."
+    except Exception as e:
+        return False, f"Không cập nhật được trạng thái gửi mail Auto Update: {e}"
+
+
+def is_auto_email_paused_v92675():
+    return bool(load_auto_email_config_v92675().get("paused", False))
+
+
+def _auto_email_result_status_v92675(ok, message):
+    if "tạm dừng" in normalize_login_name(message):
+        return "PAUSED"
+    return "SUCCESS" if ok else "ERROR"
+
+
 def _midshift_auto_window_text_v92668():
     # Giữ tên helper cũ để tương thích các call hiện hữu.
     return "21:00"
@@ -5594,7 +5699,7 @@ def _get_leave_sheet_headers(sheet_dp, strict=True):
         missing = sorted(LEAVE_REQUIRED_FIELDS - mapped)
         if missing:
             raise ValueError(
-                "Sheet1 A:M thiếu header bắt buộc: "
+                "MainData A:M thiếu header bắt buộc: "
                 + ", ".join(missing)
                 + ". Hệ thống không tự sửa header để tránh làm mất dữ liệu."
             )
@@ -5745,7 +5850,7 @@ def _ensure_leave_sheet_header(sheet_dp):
     return _ensure_leave_sheet_schema(sheet_dp)
 
 def admin_sync_excel_to_gsheet_overwrite():
-    """Phiên bản 1: chuyển Excel LichNghi A:J cũ sang schema Sheet1 A:M mới và ghi đè từ hàng 2."""
+    """Phiên bản 1: chuyển Excel LichNghi A:J cũ sang schema MainData A:M mới và ghi đè từ hàng 2."""
     try:
         client = get_gspread_client()
         if not client:
@@ -8930,7 +9035,7 @@ def batch_import_staff_list(import_df, updated_by, actor_role="admin"):
 
 # --- TẢI DỮ LIỆU TỪ GOOGLE SHEET DỰ PHÒNG ---
 def _load_backup_sheet_data_from_sheets():
-    """Đọc Sheet1 A:M theo header thực tế."""
+    """Đọc MainData A:M theo header thực tế."""
     expected = LEAVE_DATA_COLUMNS
     try:
         client = get_gspread_client()
@@ -9675,9 +9780,29 @@ def _unexcused_ordinal_and_bonus(df_sources, ngay):
     return _progressive_ordinal_and_bonus(df_sources, ngay, "Nghỉ không phép")
 
 
+def _auto_update_collect_record_v92674(record, email_ok=None, email_msg=""):
+    """Thu thập dòng Auto Update vừa ghi trong đúng lượt hiện tại (manual/scheduler)."""
+    try:
+        collector = st.session_state.get("_auto_update_active_collector_v92674")
+        if isinstance(collector, list):
+            item = dict(record or {})
+            if email_ok is True:
+                item["Email cá nhân"] = "Đã gửi"
+            elif email_ok is False and "tạm dừng" in normalize_login_name(email_msg):
+                item["Email cá nhân"] = "Tạm dừng"
+            elif email_ok is False:
+                item["Email cá nhân"] = "Lỗi"
+            else:
+                item["Email cá nhân"] = "Chưa gửi"
+            item["Chi tiết email"] = str(email_msg or "")
+            collector.append(item)
+    except Exception:
+        pass
+
+
 def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, updated_by, df_main_source=None):
     """
-    V92.6.16: ghi DUY NHẤT vào Sheet1 chính theo schema A:M.
+    V92.6.16: ghi DUY NHẤT vào MainData chính theo schema A:M.
     Ghi theo header A1:M1 thực tế.
     """
     try:
@@ -9694,6 +9819,26 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
 
         live_backup = _live_sheet_to_leave_df(sheet_dp)
         combined_live = combine_leave_sources_for_daily_stats(live_backup)
+
+        # V92.6.75 - lớp chặn thứ hai ngay tại điểm ghi: Auto Update tuyệt đối không
+        # được tạo `Nghỉ không phép` nếu MainData LIVE cùng ngày/NV đã có G=0.5 hoặc 1.
+        _actor_key_guard_v92675 = str(updated_by or "").strip().upper()
+        if _actor_key_guard_v92675.startswith("AUTO UPDATE") and is_nghi_khong_phep_reason(loai_nghi):
+            _guard_date_v92675 = _parse_vn_date(ngay)
+            _guard_df_v92675, _guard_err_v92675 = _load_main_data_absence_guard_v92675(sheet_dp)
+            if _guard_df_v92675 is None:
+                return False, (
+                    "Auto Update an toàn: không ghi Nghỉ không phép vì không đối chiếu được MainData LIVE. "
+                    + str(_guard_err_v92675 or "")
+                )
+            _covered_guard_v92675 = _leave_coverage_employee_keys_for_date(
+                _guard_df_v92675, _guard_date_v92675
+            ) if _guard_date_v92675 else set()
+            if normalize_employee_match_name(nv) in _covered_guard_v92675:
+                return False, (
+                    f"Nhân viên '{nv}' đã có loại nghỉ trong MainData ngày {normalize_schedule_date(ngay)} "
+                    "với cột G (Số ngày tính) = 0.5 hoặc 1; Auto Update không được ghi Nghỉ không phép."
+                )
 
         if _leave_exists_in_sources(combined_live, ngay, nv, loai_nghi):
             return False, f"Nhân viên '{nv}' đã có đúng lý do '{clean_leave_reason_display(loai_nghi)}' trong ngày {ngay}. Lý do khác vẫn được phép ghi riêng."
@@ -9735,10 +9880,10 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
             note=(ordinal_note if ordinal_note else "Đăng ký lịch nghỉ"),
         )
 
-        # V92.6.73: email Auto Update được đặt tại điểm ghi dữ liệu trung tâm.
-        # Nhờ vậy Tour / Đi trễ / Nghỉ KP / Nghỉ giữa ca / Ca1 đều gửi cùng một cách
-        # sau khi Sheet1 đã ghi thành công và chỉ khi tổng Phạt vi phạm > 0.
+        # Email Auto Update được đặt tại điểm ghi dữ liệu trung tâm.
+        # V92.6.75: có công tắc tạm dừng riêng cho email; dữ liệu phạt vẫn ghi bình thường.
         auto_email_msg_v92673 = ""
+        auto_email_ok_v92673 = None
         actor_key_v92673 = str(updated_by or "").strip().upper()
         if actor_key_v92673.startswith("AUTO UPDATE") and save_penalty > 0:
             auto_email_ok_v92673, auto_email_msg_v92673 = (
@@ -9751,13 +9896,25 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
                     actor=updated_by,
                 )
             )
+            _auto_mail_status_v92675 = _auto_email_result_status_v92675(
+                auto_email_ok_v92673, auto_email_msg_v92673
+            )
             write_leave_activity_log(
                 "EMAIL AUTO PHẠT",
                 updated_by,
                 before_row=None,
                 after_row=record,
-                status=("SUCCESS" if auto_email_ok_v92673 else "ERROR"),
+                status=_auto_mail_status_v92675,
                 note=auto_email_msg_v92673,
+            )
+            _append_auto_update_email_log_v92674(
+                nv, "", "", record.get("Lý do nghỉ", loai_nghi),
+                _auto_mail_status_v92675, auto_email_msg_v92673, count=1
+            )
+
+        if actor_key_v92673.startswith("AUTO UPDATE"):
+            _auto_update_collect_record_v92674(
+                record, email_ok=auto_email_ok_v92673, email_msg=auto_email_msg_v92673
             )
 
         _clear_leave_data_caches()
@@ -9768,7 +9925,7 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
                 f"tổng phạt {save_penalty:,.0f} VNĐ."
             )
         else:
-            base_msg_v92673 = "Đã ghi nhận lịch nghỉ thành công vào Sheet1 chính."
+            base_msg_v92673 = "Đã ghi nhận lịch nghỉ thành công vào MainData chính."
         if auto_email_msg_v92673:
             base_msg_v92673 += f" Email: {auto_email_msg_v92673}"
         return True, base_msg_v92673
@@ -9776,7 +9933,7 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         return False, f"Lỗi ghi dữ liệu: {e}"
 
 def delete_backup_row(row_index_1_based, updated_by=None):
-    """Xóa 1 dòng Sheet1 chính và tự xếp lại Người Thứ X/phạt lũy tiến nếu cần."""
+    """Xóa 1 dòng MainData chính và tự xếp lại Người Thứ X/phạt lũy tiến nếu cần."""
     try:
         client = get_gspread_client()
         sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
@@ -10417,7 +10574,9 @@ def _outside_late_reason_for_minutes(minutes, catalog=None):
 def _auto_result(source):
     return {
         "source": source, "added": 0, "skipped": 0, "errors": 0,
-        "eligible": 0, "messages": [], "paused": False, "unmatched": []
+        "eligible": 0, "messages": [], "paused": False, "unmatched": [],
+        # V92.6.74: giữ chi tiết các dòng vừa ghi để chạy tay có thể Export/Email tổng hợp.
+        "added_records": [],
     }
 
 CA1_CLEANING_REASON = "KHÔNG dọn vệ sinh ca 1"
@@ -10767,6 +10926,53 @@ ABSENCE_AUTO_UPDATE_CUTOFF_HOUR = 20
 ABSENCE_AUTO_ROLES = {"nhanvien", "leader"}
 
 
+def _load_main_data_absence_guard_v92675(sheet=None):
+    """
+    Đọc TRỰC TIẾP MainData để quyết định Auto Nghỉ không phép.
+
+    Đây là lớp an toàn fail-closed:
+    - không dùng PostgreSQL/cache cho quyết định vắng mặt;
+    - xác nhận cột G thật sự là `Số ngày tính`;
+    - nếu Google Sheet lỗi/không đọc được thì TRẢ LỖI và không Auto phạt.
+    """
+    try:
+        if sheet is None:
+            client = get_gspread_client()
+            if not client:
+                return None, "Không kết nối được Google Sheets để đối chiếu MainData."
+            ss = client.open_by_key(SHEET_DU_PHONG_ID)
+            try:
+                sheet = ss.worksheet("MainData")
+            except Exception:
+                sheet = ss.get_worksheet(0)
+
+        headers = _get_leave_sheet_headers(sheet, strict=True)
+        if len(headers) < 7 or _canonical_leave_field_for_header(headers[6]) != "Số ngày tính":
+            actual = str(headers[6] if len(headers) >= 7 else "").strip()
+            return None, (
+                "MainData không đúng schema an toàn: cột G phải là 'Số ngày tính'"
+                + (f" nhưng hiện là '{actual}'." if actual else ".")
+            )
+
+        values = _gs_call_with_backoff(sheet.get, LEAVE_MAIN_RANGE)
+        if not values:
+            return None, "Không đọc được A:M của MainData."
+
+        rows = []
+        for raw in values[1:]:
+            vals = list(raw[:13]) + [""] * max(0, 13 - len(raw))
+            if not any(str(v).strip() for v in vals):
+                continue
+            item = _leave_sheet_row_to_record(vals, headers)
+            if not item.get("Thứ ngày"):
+                item["Thứ ngày"] = _vn_weekday_label(item.get("Ngày", ""))
+            rows.append(item)
+        df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=LEAVE_DATA_COLUMNS)
+        return combine_leave_sources_for_daily_stats(df), ""
+    except Exception as e:
+        return None, f"Lỗi đọc MainData LIVE để đối chiếu nghỉ: {e}"
+
+
 def _timesoft_checkin_employee_keys_for_date(checkin_df, target_date):
     """
     Lấy tập nhân viên có ít nhất một dữ liệu check-in trong ngày.
@@ -10809,8 +11015,8 @@ def _leave_coverage_employee_keys_for_date(leave_df, target_date):
     Một nhân viên được coi là đã có lịch nghỉ hợp lệ cho quy tắc vắng mặt khi
     cùng ngày có ít nhất một dòng Số ngày tính chính xác 0.5 hoặc 1.0.
 
-    Lưu ý schema A:M hiện tại: Số ngày tính là cột H.
-    Hàm dùng tên trường, không hard-code cột vật lý.
+    Lưu ý schema MainData hiện tại: Số ngày tính là cột G.
+    Hàm vẫn dùng tên trường sau khi đã xác nhận header G để tránh lệch cột.
     """
     if not isinstance(leave_df, pd.DataFrame) or leave_df.empty:
         return set()
@@ -10873,7 +11079,7 @@ def auto_update_absence_without_checkin_from_timesoft(
     Auto Nghỉ không phép:
     - nhân viên/leader đang làm việc + đã phân ca;
     - không có bất kỳ check-in TimeSoft nào trong ngày;
-    - Sheet1 cùng ngày không có dòng của người đó với Số ngày tính = 0.5 hoặc 1;
+    - MainData cột G cùng ngày không có dòng của người đó với Số ngày tính = 0.5 hoặc 1;
     - hôm nay chỉ kết luận từ 20:00 trở đi để Scheduler 15:00 không phạt nhầm.
     - nếu toàn bộ snapshot check-in rỗng thì không phạt để tránh lỗi TimeSoft/API gây phạt hàng loạt.
     """
@@ -10907,16 +11113,17 @@ def auto_update_absence_without_checkin_from_timesoft(
         )
         return result
 
-    try:
-        live_leave = _load_live_leave_registration_for_validation()
-    except Exception as exc:
+    # V92.6.75: quyết định Auto Nghỉ KP bắt buộc đối chiếu MainData LIVE trước.
+    # Không dùng cache/PG vì nếu cache lỗi/rỗng giả có thể phạt nhầm người đã nghỉ Có phép.
+    live_leave, _leave_guard_err_v92675 = _load_main_data_absence_guard_v92675()
+    if live_leave is None:
         result["errors"] += 1
-        result["messages"].append(f"Không đọc được lịch nghỉ LIVE: {exc}")
+        result["messages"].append(
+            f"AN TOÀN: bỏ qua Auto Nghỉ không phép vì chưa đối chiếu được MainData LIVE. {_leave_guard_err_v92675}"
+        )
         return result
 
-    covered_leave_keys = _leave_coverage_employee_keys_for_date(
-        live_leave, target_date
-    )
+    covered_leave_keys = _leave_coverage_employee_keys_for_date(live_leave, target_date)
 
     try:
         creds = load_credentials_fresh()
@@ -10958,7 +11165,7 @@ def auto_update_absence_without_checkin_from_timesoft(
         result["eligible"] += 1
         detail = (
             f"Auto Update TimeSoft · không có dữ liệu check-in · {weekday}"
-            " · Sheet1 không có lịch nghỉ Số ngày tính 0.5 hoặc 1"
+            " · MainData cột G không có lịch nghỉ Số ngày tính 0.5 hoặc 1"
             f" · Ca {profile['shift']}"
         )
 
@@ -11235,7 +11442,234 @@ def _merge_auto_result_v92672(target, source):
     target["paused"] = bool(target.get("paused")) or bool(source.get("paused"))
     target.setdefault("messages", []).extend(source.get("messages") or [])
     target.setdefault("unmatched", []).extend(source.get("unmatched") or [])
+    target.setdefault("added_records", []).extend(source.get("added_records") or [])
     return target
+
+
+def _auto_update_export_excel_v92674(records_df, start_date=None, end_date=None):
+    """Excel chi tiết Auto Update: header màu, AutoFilter, fit cột, freeze title."""
+    output = io.BytesIO()
+    df = records_df.copy() if isinstance(records_df, pd.DataFrame) else pd.DataFrame(records_df or [])
+    preferred = [
+        "Ngày", "Thứ ngày", "Tên nhân viên", "Lý do nghỉ", "Loại nghỉ", "Chi tiết",
+        "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
+        "Giờ cập nhật", "Người cập nhật", "Email cá nhân", "Chi tiết email",
+    ]
+    cols = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
+    if cols:
+        df = df[cols]
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="AutoUpdate_ChiTiet")
+        ws = writer.book["AutoUpdate_ChiTiet"]
+        from openpyxl.styles import PatternFill, Font, Alignment
+        from openpyxl.utils import get_column_letter
+        header_fill = PatternFill("solid", fgColor="1890FF")
+        header_font = Font(color="FFFFFF", bold=True)
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        for col_idx, col_cells in enumerate(ws.columns, start=1):
+            max_len = 0
+            for cell in col_cells:
+                val = "" if cell.value is None else str(cell.value)
+                max_len = max(max_len, len(val))
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max(max_len + 2, 10), 45)
+        if "Phạt vi phạm" in df.columns:
+            pcol = list(df.columns).index("Phạt vi phạm") + 1
+            for row in range(2, ws.max_row + 1):
+                ws.cell(row=row, column=pcol).number_format = '#,##0'
+    output.seek(0)
+    return output.getvalue()
+
+
+def _send_auto_update_summary_email_v92674(records_df, start_date, end_date, actor="AUTO UPDATE - ADMIN"):
+    """Gửi báo cáo tổng hợp sau chạy Auto Update thủ công tới email quản trị."""
+    try:
+        df = records_df.copy() if isinstance(records_df, pd.DataFrame) else pd.DataFrame(records_df or [])
+        if df.empty:
+            return True, "Không có dòng mới nên không gửi email tổng hợp."
+        if is_auto_email_paused_v92675():
+            return False, "Gửi mail tự động của Auto Update đang TẠM DỪNG; chưa gửi email tổng hợp."
+        smtp_email, smtp_password = get_smtp_sender_credentials()
+        if not smtp_email or not smtp_password:
+            return False, "Chưa cấu hình SMTP để gửi email tổng hợp Auto Update."
+        recipient = "veraspabienhoa@gmail.com"
+        total_penalty = pd.to_numeric(df.get("Phạt vi phạm", 0), errors="coerce").fillna(0).sum() if "Phạt vi phạm" in df.columns else 0
+        rows_html = []
+        for _, r in df.iterrows():
+            rows_html.append(
+                "<tr>"
+                f"<td>{html.escape(str(r.get('Ngày','')))}</td>"
+                f"<td>{html.escape(str(r.get('Tên nhân viên','')))}</td>"
+                f"<td>{html.escape(str(r.get('Lý do nghỉ','')))}</td>"
+                f"<td>{html.escape(str(r.get('Chi tiết','')))}</td>"
+                f"<td style='text-align:right'>{float(r.get('Phạt vi phạm',0) or 0):,.0f}</td>"
+                f"<td>{html.escape(str(r.get('Email cá nhân','')))}</td>"
+                "</tr>"
+            )
+        start_text = start_date.strftime("%d/%m/%Y") if hasattr(start_date, "strftime") else str(start_date)
+        end_text = end_date.strftime("%d/%m/%Y") if hasattr(end_date, "strftime") else str(end_date)
+        body = f"""
+        <html><body style='font-family:Arial,sans-serif'>
+        <h3>VERA SPA · BÁO CÁO AUTO UPDATE PHẠT</h3>
+        <p><b>Khoảng đối soát:</b> {start_text} → {end_text}</p>
+        <p><b>Người chạy:</b> {html.escape(str(actor))}</p>
+        <p><b>Số trường hợp mới:</b> {len(df)}<br>
+           <b>Tổng tiền phạt:</b> {float(total_penalty):,.0f} VNĐ</p>
+        <table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse'>
+          <tr style='background:#1890FF;color:white;font-weight:bold'>
+            <th>Ngày</th><th>Nhân viên</th><th>Lý do</th><th>Chi tiết</th><th>Phạt</th><th>Email cá nhân</th>
+          </tr>
+          {''.join(rows_html)}
+        </table>
+        </body></html>
+        """
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = f"[VERA SPA] Báo cáo Auto Update · {len(df)} trường hợp · {start_text} - {end_text}"
+        msg["From"] = f"VERA SPA <{smtp_email}>"
+        msg["To"] = recipient
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(body, "html", "utf-8"))
+        msg.attach(alt)
+        excel_bytes = _auto_update_export_excel_v92674(df, start_date, end_date)
+        attachment = MIMEApplication(excel_bytes, _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        attachment.add_header("Content-Disposition", "attachment", filename=f"AutoUpdate_{start_text.replace('/','-')}_{end_text.replace('/','-')}.xlsx")
+        msg.attach(attachment)
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(smtp_email, smtp_password)
+        server.sendmail(smtp_email, [recipient], msg.as_string())
+        server.quit()
+        _append_auto_update_email_log_v92674(
+            "TỔNG HỢP AUTO UPDATE", recipient, "", "Báo cáo tổng hợp", "SUCCESS",
+            f"Khoảng {start_text} → {end_text}; {len(df)} trường hợp; tổng phạt {float(total_penalty):,.0f} VNĐ", count=len(df)
+        )
+        return True, f"Đã gửi email tổng hợp tới {recipient}."
+    except Exception as e:
+        return False, f"Lỗi gửi email tổng hợp Auto Update: {e}"
+
+
+def _retry_missing_auto_penalty_emails_v92674(records_df, actor="AUTO UPDATE - ADMIN"):
+    """Gửi bù email cá nhân cho các dòng vừa thêm nhưng email tại điểm ghi chưa thành công."""
+    df = records_df.copy() if isinstance(records_df, pd.DataFrame) else pd.DataFrame(records_df or [])
+    if df.empty:
+        return df, []
+    if is_auto_email_paused_v92675():
+        df = df.copy()
+        if "Email cá nhân" in df.columns:
+            mask = ~df["Email cá nhân"].astype(str).eq("Đã gửi")
+            df.loc[mask, "Email cá nhân"] = "Tạm dừng"
+            df.loc[mask, "Chi tiết email"] = "Gửi mail tự động của Auto Update đang TẠM DỪNG."
+        return df, ["Gửi mail tự động đang TẠM DỪNG; chưa gửi bù email cá nhân."]
+    messages = []
+    for idx, r in df.iterrows():
+        try:
+            penalty = float(r.get("Phạt vi phạm", 0) or 0)
+        except Exception:
+            penalty = 0
+        if penalty <= 0:
+            continue
+        if str(r.get("Email cá nhân", "")).strip() == "Đã gửi":
+            continue
+        ok, msg = send_auto_penalty_notification_email_v92673(
+            r.get("Tên nhân viên", ""), r.get("Ngày", ""), r.get("Lý do nghỉ", ""),
+            r.get("Chi tiết", ""), penalty, actor=actor,
+        )
+        df.at[idx, "Email cá nhân"] = "Đã gửi" if ok else "Lỗi"
+        df.at[idx, "Chi tiết email"] = msg
+        write_leave_activity_log(
+            "EMAIL AUTO PHẠT", actor, before_row=None, after_row=r.to_dict(),
+            status=_auto_email_result_status_v92675(ok, msg), note=f"Gửi bù cuối lượt chạy tay: {msg}",
+        )
+        _append_auto_update_email_log_v92674(
+            r.get("Tên nhân viên", ""), "", "", r.get("Lý do nghỉ", ""),
+            _auto_email_result_status_v92675(ok, msg), f"Gửi bù cuối lượt chạy tay: {msg}", count=1
+        )
+        messages.append(msg)
+    return df, messages
+
+
+def _auto_update_unsent_records_v92674(start_date, end_date):
+    """Tìm các phạt Auto Update trong MainData chưa có EMAIL AUTO PHẠT SUCCESS."""
+    try:
+        client = get_gspread_client()
+        if not client:
+            return pd.DataFrame()
+        ss = client.open_by_key(SHEET_DU_PHONG_ID)
+        try:
+            ws = ss.worksheet("MainData")
+        except Exception:
+            ws = ss.get_worksheet(0)
+        d = _live_sheet_to_leave_df(ws)
+        if not isinstance(d, pd.DataFrame) or d.empty:
+            return pd.DataFrame()
+        _all_main_v92675 = d.copy()
+        d = d.copy()
+        d["_date"] = pd.to_datetime(d.get("Ngày"), errors="coerce", dayfirst=True).dt.date
+        d["_penalty"] = pd.to_numeric(d.get("Phạt vi phạm", 0), errors="coerce").fillna(0)
+        d = d[
+            d["_date"].between(start_date, end_date)
+            & d["_penalty"].gt(0)
+            & d.get("Người cập nhật", "").astype(str).str.upper().str.startswith("AUTO UPDATE")
+        ].copy()
+        if d.empty:
+            return d
+        log = load_leave_activity_log()
+        success_keys = set()
+        if isinstance(log, pd.DataFrame) and not log.empty:
+            q = log[
+                log.get("Hành động", "").astype(str).eq("EMAIL AUTO PHẠT")
+                & log.get("Trạng thái", "").astype(str).str.upper().eq("SUCCESS")
+            ]
+            for _, r in q.iterrows():
+                success_keys.add((
+                    normalize_schedule_date(r.get("Ngày lịch nghỉ", "")),
+                    normalize_login_name(r.get("Tên nhân viên", "")),
+                    normalize_leave_reason(r.get("Lý do sau", "") or r.get("Lý do trước", "")),
+                ))
+        keep=[]
+        for _,r in d.iterrows():
+            # V92.6.75: tuyệt đối không gửi bù một email `Nghỉ không phép` đã được
+            # phát hiện là mâu thuẫn với MainData cùng ngày có G=0.5 hoặc 1.
+            if is_nghi_khong_phep_reason(r.get("Lý do nghỉ", "")):
+                _rd_v92675 = _parse_vn_date(r.get("Ngày", ""))
+                _covered_v92675 = (
+                    _leave_coverage_employee_keys_for_date(_all_main_v92675, _rd_v92675)
+                    if _rd_v92675 else set()
+                )
+                if normalize_employee_match_name(r.get("Tên nhân viên", "")) in _covered_v92675:
+                    keep.append(False)
+                    continue
+            k=(normalize_schedule_date(r.get("Ngày","")), normalize_login_name(r.get("Tên nhân viên","")), normalize_leave_reason(r.get("Lý do nghỉ","")))
+            keep.append(k not in success_keys)
+        return d.loc[keep].drop(columns=["_date","_penalty"], errors="ignore")
+    except Exception:
+        return pd.DataFrame()
+
+
+def _send_unsent_auto_penalty_range_v92674(start_date, end_date, actor):
+    if is_auto_email_paused_v92675():
+        return 0, 0, ["Gửi mail tự động của Auto Update đang TẠM DỪNG. Hãy mở lại trước khi gửi bù."]
+    d = _auto_update_unsent_records_v92674(start_date, end_date)
+    if not isinstance(d, pd.DataFrame) or d.empty:
+        return 0, 0, ["Không có email Auto phạt nào cần gửi bù trong phạm vi đã chọn."]
+    ok_count=0; fail_count=0; msgs=[]
+    for _,r in d.iterrows():
+        try: penalty=float(str(r.get("Phạt vi phạm",0)).replace(",",""))
+        except Exception: penalty=0
+        ok,msg=send_auto_penalty_notification_email_v92673(
+            r.get("Tên nhân viên",""), r.get("Ngày",""), r.get("Lý do nghỉ",""), r.get("Chi tiết",""), penalty, actor=actor
+        )
+        _retry_status_v92675 = _auto_email_result_status_v92675(ok, msg)
+        write_leave_activity_log("EMAIL AUTO PHẠT", actor, before_row=None, after_row=r.to_dict(), status=_retry_status_v92675, note=f"Gửi bù theo phạm vi: {msg}")
+        _append_auto_update_email_log_v92674(r.get("Tên nhân viên",""), "", "", r.get("Lý do nghỉ",""), _retry_status_v92675, f"Gửi bù theo phạm vi: {msg}", count=1)
+        if ok: ok_count+=1
+        else: fail_count+=1
+        msgs.append(msg)
+    return ok_count, fail_count, msgs
 
 
 def run_auto_penalty_range_v92672(start_date, end_date, actor="AUTO UPDATE - ADMIN RANGE"):
@@ -12659,7 +13093,7 @@ def recalculate_schedule_fields(original_row, edited_row, updated_by, all_leave_
 
 
 def _load_live_primary_leave_sheet(client):
-    """V92.6.16: đọc DUY NHẤT Sheet1 chính A:M và giữ đúng số dòng vật lý."""
+    """V92.6.16: đọc DUY NHẤT MainData chính A:M và giữ đúng số dòng vật lý."""
     primary = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
     df_primary = _read_leave_sheet_with_source(primary, SHEET_DU_PHONG_ID)
     return combine_leave_sources_for_daily_stats(df_primary)
@@ -12730,7 +13164,7 @@ def _existing_base_penalty(row, catalog):
 
 
 def rebalance_progressive_penalty_groups(client, affected_groups, updated_by):
-    """Xếp lại Người Thứ X/phạt lũy tiến trên Sheet1 chính; ghi các cột G:M."""
+    """Xếp lại Người Thứ X/phạt lũy tiến trên MainData chính; ghi các cột G:M."""
     clean_groups = set()
     for item in affected_groups or []:
         try:
@@ -12982,7 +13416,7 @@ def update_schedule_record(original_row, edited_row, updated_by):
         return False, f"Lỗi cập nhật lịch nghỉ: {e}"
 
 def delete_schedule_records(original_rows, updated_by=None):
-    """V92.6.16: xóa record CHỈ ở Sheet1 chính A:M."""
+    """V92.6.16: xóa record CHỈ ở MainData chính A:M."""
     try:
         client = get_gspread_client()
         if not client:
@@ -17926,7 +18360,7 @@ def ensure_employee_in_tichluy(employee_name, start_work_date=None):
 def ensure_employee_in_leave_employee_list(employee_name, start_work_date=None):
     """
     Đồng bộ nhân viên mới sang file lịch nghỉ 1Kz0... vào sheet DanhSachNV.
-    Không chèn dòng giả vào Sheet1 A:M vì Sheet1 là dữ liệu lịch nghỉ nghiệp vụ.
+    Không chèn dòng giả vào MainData A:M vì Sheet1 là dữ liệu lịch nghỉ nghiệp vụ.
     """
     try:
         name = str(employee_name or '').strip()
@@ -21383,6 +21817,31 @@ button.vera-save-action-v89:disabled {{opacity:.55!important;filter:grayscale(.0
 }}
 </style>
 """,unsafe_allow_html=True)
+# V92.6.75 - hai label nghiệp vụ lịch nghỉ dùng cùng nền xanh bóng với nút Ghi/Save.
+st.markdown("""
+<style id="vera-leave-blue-labels-v92675">
+.st-key-sb_chosen_date_v92633_single [data-testid="stWidgetLabel"],
+.st-key-leave_stats_time_filter [data-testid="stWidgetLabel"],
+.st-key-leave_manage_time_filter [data-testid="stWidgetLabel"] {
+    background:linear-gradient(180deg,#E9F9FF 0%,#BCEBFF 30%,#92DAFB 62%,#72C7F2 100%)!important;
+    border:1px solid #4EA9E7!important;
+    border-radius:10px!important;
+    box-shadow:0 5px 12px rgba(17,111,181,.22),inset 0 1px 0 rgba(255,255,255,.96)!important;
+    color:#000000!important;
+}
+.st-key-sb_chosen_date_v92633_single [data-testid="stWidgetLabel"] p,
+.st-key-leave_stats_time_filter [data-testid="stWidgetLabel"] p,
+.st-key-leave_manage_time_filter [data-testid="stWidgetLabel"] p,
+.st-key-sb_chosen_date_v92633_single [data-testid="stWidgetLabel"] span,
+.st-key-leave_stats_time_filter [data-testid="stWidgetLabel"] span,
+.st-key-leave_manage_time_filter [data-testid="stWidgetLabel"] span {
+    color:#000000!important;
+    font-family:'Roboto',Arial,sans-serif!important;
+    font-weight:700!important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 _save_labels_json=json.dumps(_save_btn_cfg.get("labels",{}),ensure_ascii=False)
 components.html(f"""
 <script>
@@ -26288,6 +26747,23 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
     if cfg.get('error'):
         st.warning(f"Không đọc được cấu hình Auto Update đầy đủ: {cfg.get('error')}")
 
+    _mail_cfg_v92675 = load_auto_email_config_v92675()
+    _mail_paused_v92675 = bool(_mail_cfg_v92675.get("paused"))
+    if _mail_paused_v92675:
+        st.warning(
+            "📧 Gửi mail tự động của Auto Update đang TẠM DỪNG. "
+            "Hệ thống vẫn ghi phạt bình thường nhưng không gửi mail cá nhân/tổng hợp cho đến khi mở lại."
+        )
+    else:
+        st.success("📧 Gửi mail tự động của Auto Update đang HOẠT ĐỘNG.")
+    st.caption(
+        f"Mail Auto cập nhật gần nhất: {_mail_cfg_v92675.get('updated_date','')} "
+        f"{_mail_cfg_v92675.get('updated_time','')} · "
+        f"{_mail_cfg_v92675.get('updated_by','') or 'Hệ thống'}"
+    )
+    if _mail_cfg_v92675.get("error"):
+        st.warning(f"Không đọc được cấu hình gửi mail Auto: {_mail_cfg_v92675.get('error')}")
+
     st.markdown("#### 🔎 Phạm vi chạy Auto Update thủ công")
     _auto_today_v92672 = get_vn_today()
     _auto_dates_v92672 = _timesoft_available_snapshot_dates()
@@ -26338,7 +26814,30 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         "Scheduler 15:00/20:00/21:00 vẫn chỉ chạy ngày hiện tại."
     )
 
-    c_auto1, c_auto2 = st.columns(2)
+    _unsent_preview_v92674 = _auto_update_unsent_records_v92674(_auto_start_v92672, _auto_end_v92672)
+    if isinstance(_unsent_preview_v92674, pd.DataFrame) and not _unsent_preview_v92674.empty:
+        st.warning(f"📧 Có {len(_unsent_preview_v92674)} phạt Auto Update trong phạm vi đã chọn chưa có log gửi email thành công.")
+        if st.button(
+            "📧 Gửi bù email phạt chưa gửi", use_container_width=True,
+            key="retry_unsent_auto_email_v92674", disabled=_mail_paused_v92675,
+            help="Mở lại gửi mail tự động trước nếu chức năng mail đang tạm dừng.",
+        ):
+            with st.spinner("Đang gửi bù email Auto Update..."):
+                _ok_retry_v92674, _fail_retry_v92674, _msgs_retry_v92674 = _send_unsent_auto_penalty_range_v92674(
+                    _auto_start_v92672, _auto_end_v92672, actor=f"AUTO UPDATE - {st.session_state.current_user} - GỬI BÙ EMAIL"
+                )
+            if _fail_retry_v92674 == 0:
+                st.success(f"Đã gửi bù {_ok_retry_v92674} email.")
+            else:
+                st.warning(f"Gửi thành công {_ok_retry_v92674}; lỗi {_fail_retry_v92674}.")
+            if _msgs_retry_v92674:
+                st.caption(" | ".join(_msgs_retry_v92674[:12]))
+            try:
+                load_leave_activity_log.clear()
+            except Exception:
+                pass
+
+    c_auto1, c_auto_mail_v92675, c_auto2 = st.columns(3)
     with c_auto1:
         if paused:
             if st.button("▶️ Mở lại Auto Update phạt", use_container_width=True, type="primary", key="resume_auto_penalty_v84", disabled=not _can_auto_control):
@@ -26352,6 +26851,25 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
                 (st.success if ok else st.error)(msg)
                 if ok:
                     rerun_current_view()
+    with c_auto_mail_v92675:
+        if _mail_paused_v92675:
+            if st.button(
+                "📧 Mở lại gửi mail tự động", use_container_width=True,
+                key="resume_auto_email_v92675", disabled=not _can_auto_control,
+            ):
+                ok, msg = set_auto_email_paused_v92675(False, st.session_state.current_user)
+                (st.success if ok else st.error)(msg)
+                if ok:
+                    rerun_current_view()
+        else:
+            if st.button(
+                "⏸️ Tạm dừng gửi mail tự động", use_container_width=True,
+                key="pause_auto_email_v92675", disabled=not _can_auto_control,
+            ):
+                ok, msg = set_auto_email_paused_v92675(True, st.session_state.current_user)
+                (st.success if ok else st.error)(msg)
+                if ok:
+                    rerun_current_view()
     with c_auto2:
         run_now = st.button(
             "▶️ Chạy Auto Update ngay", use_container_width=True,
@@ -26360,14 +26878,33 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         )
 
     if run_now:
+        # V92.6.74: collector chỉ tồn tại trong đúng lượt chạy tay này.
+        st.session_state["_auto_update_active_collector_v92674"] = []
         with st.spinner(
             f"Đang chạy Auto Update {_auto_start_v92672.strftime('%d/%m/%Y')} → {_auto_end_v92672.strftime('%d/%m/%Y')}..."
         ):
+            _auto_actor_v92674 = f"AUTO UPDATE - {st.session_state.current_user}"
             _auto_res = run_auto_penalty_range_v92672(
                 _auto_start_v92672,
                 _auto_end_v92672,
-                actor=f"AUTO UPDATE - {st.session_state.current_user}",
+                actor=_auto_actor_v92674,
             )
+        _auto_added_records_v92674 = list(st.session_state.pop("_auto_update_active_collector_v92674", []) or [])
+        _auto_added_df_v92674 = pd.DataFrame(_auto_added_records_v92674)
+        if not _auto_added_df_v92674.empty:
+            _auto_added_df_v92674, _retry_msgs_v92674 = _retry_missing_auto_penalty_emails_v92674(
+                _auto_added_df_v92674, actor=_auto_actor_v92674
+            )
+            st.session_state["auto_update_last_added_df_v92674"] = _auto_added_df_v92674
+            st.session_state["auto_update_last_range_v92674"] = (_auto_start_v92672, _auto_end_v92672)
+            _sum_ok_v92674, _sum_msg_v92674 = _send_auto_update_summary_email_v92674(
+                _auto_added_df_v92674, _auto_start_v92672, _auto_end_v92672, actor=_auto_actor_v92674
+            )
+            st.session_state["auto_update_last_summary_email_v92674"] = (_sum_ok_v92674, _sum_msg_v92674)
+        else:
+            st.session_state["auto_update_last_added_df_v92674"] = pd.DataFrame()
+            st.session_state["auto_update_last_range_v92674"] = (_auto_start_v92672, _auto_end_v92672)
+            st.session_state["auto_update_last_summary_email_v92674"] = (True, "Không có dòng mới nên không gửi email tổng hợp.")
         rt = _auto_res['tour']
         rs = _auto_res['timesoft']
         rm = _auto_res.get('midshift', _auto_result("TimeSoft nghỉ giữa ca"))
@@ -26397,18 +26934,44 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         if all_msgs:
             st.caption(" | ".join(all_msgs[:15]))
 
+    # V92.6.74: giữ danh sách kết quả gần nhất cho đến lần chạy tay kế tiếp.
+    _last_added_v92674 = st.session_state.get("auto_update_last_added_df_v92674")
+    if isinstance(_last_added_v92674, pd.DataFrame) and not _last_added_v92674.empty:
+        st.markdown("#### 📋 Danh sách Auto Update vừa thêm")
+        st.dataframe(_last_added_v92674, use_container_width=True, hide_index=True)
+        _last_range_v92674 = st.session_state.get("auto_update_last_range_v92674") or (_auto_start_v92672, _auto_end_v92672)
+        _lr_start_v92674, _lr_end_v92674 = _last_range_v92674
+        _export_auto_v92674 = _auto_update_export_excel_v92674(
+            _last_added_v92674, _lr_start_v92674, _lr_end_v92674
+        )
+        _d1_v92674, _d2_v92674 = st.columns(2)
+        with _d1_v92674:
+            st.download_button(
+                "📥 Export danh sách Auto Update · Excel",
+                data=_export_auto_v92674,
+                file_name=f"AutoUpdate_{_lr_start_v92674.strftime('%Y-%m-%d')}_{_lr_end_v92674.strftime('%Y-%m-%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="download_auto_update_added_v92674",
+            )
+        with _d2_v92674:
+            _sum_status_v92674 = st.session_state.get("auto_update_last_summary_email_v92674")
+            if isinstance(_sum_status_v92674, (tuple, list)) and len(_sum_status_v92674) >= 2:
+                (_ok_sum_v92674, _msg_sum_v92674) = _sum_status_v92674[:2]
+                (st.success if _ok_sum_v92674 else st.warning)(_msg_sum_v92674)
+
     st.markdown("#### Quy tắc V84.7")
     st.write(
         "• **Lịch Cloud Scheduler: 15:00 + 20:00 + 21:00 hằng ngày**. Lượt **15:00** chạy Auto ban ngày; lượt **20:00** giữ Auto tối và Auto Nghỉ không phép; lượt **21:00 chuyên kiểm tra nghỉ giữa ca** và tác vụ này chỉ chạy **1 lần/ngày**. Scheduler luôn xử lý ngày hiện tại. Nút **Chạy Auto Update ngay** của Admin chạy theo bộ lọc Hôm qua/Hôm nay/Tuần/Tháng/Tất cả/Tùy chỉnh.  \n"
         "• Ra ngoài vào muộn: chỉ Auto Update khi cột **Vào trễ >= 5 phút**. "
         "Tên như **Cẩm Nhung *** được đối chiếu như **Cẩm Nhung**.  \n"
         "• TimeSoft: check-in được so trực tiếp với giờ bắt đầu ca. **Hỗ trợ Ca 1 2 tiếng = 120 phút; Ca 1 sau 0:0H 3 tiếng = 180 phút; Ca 2 sau 0:0H 1 tiếng = 60 phút**. Chỉ Auto phạt khi vượt mức Hỗ trợ; nếu không có Hỗ trợ thì ngưỡng là **>= 5 phút**.  \n"
-        "• **Auto Nghỉ không phép**: từ **20:00**, chỉ xét `nhanvien + leader` đang **Đang làm việc** và **đã phân ca**. Nếu người đó không có check-in TimeSoft trong ngày và Sheet1 không có dòng cùng ngày với **Số ngày tính = 0.5 hoặc 1**, hệ thống tự ghi **Nghỉ không phép**; Thứ ngày lấy theo ngày thực tế và tiền phạt lấy từ `LoaiNghi` + phạt lũy tiến của đúng ngày. Snapshot TimeSoft rỗng sẽ không phạt để tránh lỗi hàng loạt.  \n"
+        "• **Auto Nghỉ không phép**: từ **20:00**, chỉ xét `nhanvien + leader` đang **Đang làm việc** và **đã phân ca**. Nếu người đó không có check-in TimeSoft trong ngày và MainData LIVE không có dòng cùng ngày với **cột G · Số ngày tính = 0.5 hoặc 1**, hệ thống tự ghi **Nghỉ không phép**; Thứ ngày lấy theo ngày thực tế và tiền phạt lấy từ `LoaiNghi` + phạt lũy tiến của đúng ngày. Snapshot TimeSoft rỗng sẽ không phạt để tránh lỗi hàng loạt.  \n"
         "• **KHÔNG dọn vệ sinh ca 1**: chỉ áp dụng cho role `nhanvien` đang làm **Ca 1 trong tuần hiện tại**, "
         "không có **Hỗ trợ Ca 1 đi trễ 2 tiếng / Hỗ trợ Ca 1 đi trễ 3 tiếng / Hỗ trợ Ca 2 đi trễ 1 tiếng**, "
         "và hôm đó có **Đi trễ <=30 / <=60 / >60 đến <=120 phút** theo đúng loại nghỉ đã cấu hình.  \n"
-        "• Tiền phạt và Số ngày tính lấy trực tiếp từ sheet **LoaiNghi**; dữ liệu phạt ghi vào Sheet1 A:M và không tạo trùng cùng Ngày + Nhân viên + Lý do.  \n"
-        "• **Email cho mọi Auto Update có Phạt vi phạm > 0**: gửi ngay sau khi Sheet1 ghi thành công tới nhân viên; CC `veraspabienhoa@gmail.com + quanly + letan`. Kết quả gửi email được ghi vào Nhật ký lịch nghỉ.  \n"
+        "• Tiền phạt và Số ngày tính lấy trực tiếp từ sheet **LoaiNghi**; dữ liệu phạt ghi vào MainData A:M và không tạo trùng cùng Ngày + Nhân viên + Lý do.  \n"
+        "• **Email cho mọi Auto Update có Phạt vi phạm > 0**: gửi ngay sau khi MainData ghi thành công tới nhân viên; CC `veraspabienhoa@gmail.com + quanly + letan`. Admin có nút **Tạm dừng gửi mail tự động** độc lập với Auto Update phạt; khi mail đang dừng, dữ liệu phạt vẫn ghi nhưng email được để lại để gửi bù sau. Khi chạy tay, hệ thống gửi bù email cá nhân và email tổng hợp khi mail đang hoạt động.  \n"
         "• **Nghỉ giữa ca ưu tiên TimeSoft tuyệt đối**: có đủ cặp FaceID TimeSoft thì dùng TimeSoft; chỉ khi TimeSoft chưa đủ dữ liệu ra/vào mới fallback TourVera R:V hoặc nguồn khác. Vượt Duration nghỉ hoặc vượt giờ quay lại cuối cùng từ đủ ngưỡng đều được tính `Ra ngoài vào muộn`."
     )
 

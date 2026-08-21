@@ -1,4 +1,4 @@
-# V92.6.61 - Ẩn ngoại lệ/hủy trên web + reset Lý do nghỉ + cho đổi CÓ/KHÔNG phép cùng ngày (2026-08-22)
+# V92.6.62 - Fix ô Lý do nghỉ/Loại nghỉ lịch sử hiển thị trắng trong Data Editor (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -4552,12 +4552,34 @@ def get_postgres_runtime_status():
 # V92.6.16 - HELPERS SCHEMA SHEET1 LỊCH NGHỈ A:M
 # ==========================================================
 def _leave_type_for_reason(reason, source_df=None):
-    """Lấy Loại nghỉ từ sheet LoaiNghi: cột B=Lý do nghỉ -> cột C=Loại nghỉ."""
+    """
+    Lấy Loại nghỉ từ LoaiNghi: cột B=Lý do nghỉ -> cột C=Loại nghỉ.
+
+    V92.6.62 - dữ liệu lịch sử có thể dùng tên cũ không còn khớp chính xác với
+    LoaiNghi hiện tại (ví dụ ``Nghỉ phép`` hoặc ``Nghỉ không phép CUỐI TUẦN``).
+    Nếu lý do KHÔNG tồn tại trong mapping hiện tại thì suy ra nhóm hiển thị từ tên cũ.
+    Nếu lý do có tồn tại trong mapping nhưng cột C cố ý để trống thì vẫn giữ trống.
+    """
     try:
         mapping = _leave_reason_type_map(
             source_df if isinstance(source_df, pd.DataFrame) else globals().get('df_loai_nghi', pd.DataFrame())
         )
-        return clean_leave_reason_display(mapping.get(normalize_leave_reason(reason), ''))
+        key = normalize_leave_reason(reason)
+        if key in mapping:
+            return clean_leave_reason_display(mapping.get(key, ''))
+
+        # Fallback CHỈ dành cho tên lịch sử không còn trong danh mục hiện tại.
+        # Không dùng fallback nếu LoaiNghi hiện tại có dòng tương ứng nhưng Loại nghỉ để trống.
+        legacy = normalize_login_name(clean_leave_reason_display(reason))
+        if not legacy:
+            return ''
+        if 'khong phep' in legacy:
+            return 'Không phép'
+        if 'phat sinh' in legacy:
+            return 'Phát sinh'
+        if 'co phep' in legacy or legacy == 'nghi phep':
+            return 'Có phép'
+        return ''
     except Exception:
         return ''
 
@@ -9942,9 +9964,9 @@ def _leave_type_series_from_reason(df):
     d = df.copy()
     if 'Lý do nghỉ' not in d.columns:
         return pd.Series([''] * len(d), index=d.index, dtype=str)
-    mapping = _leave_reason_type_map(globals().get('df_loai_nghi', pd.DataFrame()))
+    _type_source_v92662 = globals().get('df_loai_nghi', pd.DataFrame())
     return d['Lý do nghỉ'].astype(str).apply(
-        lambda v: clean_leave_reason_display(mapping.get(normalize_leave_reason(v), ''))
+        lambda v: _leave_type_for_reason(v, _type_source_v92662)
     )
 
 
@@ -9967,9 +9989,11 @@ def add_source_leave_type_column(df):
     # Làm sạch Lý do nghỉ để khớp đúng với cột B của danh mục.
     d['Lý do nghỉ'] = d['Lý do nghỉ'].apply(clean_leave_reason_display)
 
-    reason_type_map = _leave_reason_type_map(globals().get('df_loai_nghi', pd.DataFrame()))
+    # V92.6.62: dùng helper có fallback cho tên lịch sử không còn khớp chính xác
+    # với LoaiNghi hiện tại, tránh cột Loại nghỉ bị trắng dù Lý do nghỉ vẫn có dữ liệu.
+    _type_source_v92662 = globals().get('df_loai_nghi', pd.DataFrame())
     type_values = d['Lý do nghỉ'].apply(
-        lambda v: reason_type_map.get(normalize_leave_reason(v), "")
+        lambda v: _leave_type_for_reason(v, _type_source_v92662)
     )
 
     if 'Loại nghỉ' in d.columns:
@@ -10019,16 +10043,15 @@ def get_leave_reason_options(source_df=None, extra_values=None):
 
 def get_leave_reason_options_for_edit(source_df=None, target_dates=None, role=None, extra_values=None):
     """
-    V92.6.60 - Dropdown sửa trực tiếp lịch nghỉ phải tuân thủ LoaiNghi:
-      - cột G = ngày/thứ được phép nhập;
-      - cột H = role được phép nhập.
+    V92.6.62 - Dropdown sửa trực tiếp lịch nghỉ:
+      - các LÝ DO MỚI trong dropdown vẫn lọc theo cột G (ngày/thứ) và H (role);
+      - nhưng mọi giá trị LỊCH SỬ đang có trong bảng phải được thêm nguyên văn vào
+        ``options`` để Streamlit SelectboxColumn hiển thị được dữ liệu cũ.
 
-    st.data_editor chỉ hỗ trợ một danh sách options cho cả cột. Vì vậy nếu bảng đang
-    hiển thị nhiều ngày, chỉ giữ các lý do hợp lệ cho TẤT CẢ ngày đang hiển thị. Khi
-    lọc về một ngày (trường hợp sửa lịch thông thường), dropdown chính xác theo ngày đó.
-
-    `extra_values` chỉ được giữ nếu chính lý do lịch sử đó vẫn map về một dòng LoaiNghi
-    hợp lệ theo G/H; không đưa lý do sai thứ/ngày trở lại dropdown chỉ để giữ giá trị cũ.
+    Streamlit sẽ render ô SelectboxColumn thành trắng nếu giá trị hiện tại không tồn tại
+    chính xác trong ``options``. Vì vậy ``extra_values`` ở đây là ngoại lệ CHỈ ĐỂ HIỂN THỊ.
+    Nếu user thực sự đổi sang một lý do không hợp lệ, validate_schedule_edit_permission()
+    và rule engine LoaiNghi vẫn chặn khi bấm Lưu.
     """
     source = source_df if isinstance(source_df, pd.DataFrame) else globals().get('df_loai_nghi', pd.DataFrame())
     catalog = build_leave_reason_catalog(source)
@@ -10068,21 +10091,11 @@ def get_leave_reason_options_for_edit(source_df=None, target_dates=None, role=No
         if _allowed(item):
             _append(item.get('name', ''))
 
-    # Giữ đúng cách viết lịch sử (nếu có) nhưng CHỈ khi lý do đó hợp lệ cho ngày/role.
+    # V92.6.62: luôn giữ NGUYÊN chuỗi lịch sử đang tồn tại trong bảng.
+    # Đây chỉ là compatibility/display fix cho SelectboxColumn; KHÔNG miễn validation khi Lưu.
     if extra_values is not None:
         for value in extra_values:
-            item = catalog.get(normalize_leave_reason(value))
-            if item is None:
-                wanted = normalize_login_name(clean_leave_reason_display(value))
-                item = next(
-                    (
-                        candidate for candidate in catalog.values()
-                        if normalize_login_name(candidate.get('name', '')) == wanted
-                    ),
-                    None,
-                )
-            if _allowed(item):
-                _append(value)
+            _append(value)
 
     return options
 

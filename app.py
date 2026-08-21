@@ -1,4 +1,4 @@
-# V92.6.34 - Toàn bộ thông báo/Xác nhận Nhập lịch nghỉ bằng popup (2026-08-21)
+# V92.6.35 - Làm sạch thông báo popup lịch nghỉ, bỏ lỗi kỹ thuật/rule dài (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -21028,6 +21028,65 @@ LEAVE_REG_POPUP_KEY_V92634 = "_leave_registration_popup_v92634"
 LEAVE_REG_POPUP_ACTION_KEY_V92634 = "_leave_registration_popup_action_v92634"
 
 
+
+def _clean_leave_popup_text_v92635(value):
+    """
+    V92.6.35 - Chỉ giữ nội dung người dùng cần đọc trong popup lịch nghỉ.
+    """
+    s = str(value or "").strip()
+    if not s:
+        return ""
+
+    # Bỏ tiền tố kỹ thuật.
+    s = re.sub(
+        r"^\s*❌?\s*(?:LỖI\s+GOOGLE\s+SHEETS|Lỗi\s+Google\s+Sheets|"
+        r"Lỗi\s+ghi\s+dữ\s+liệu|GOOGLE\s+SHEETS)\s*:\s*",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+
+    # Nếu chỉ còn phần "ngoại lệ..." thì không hiển thị.
+    if re.match(r"^\s*(?:ngoại\s+lệ|ngoai\s+le)\s*:", s, flags=re.IGNORECASE):
+        return ""
+
+    # Cắt bỏ phần mô tả rule kỹ thuật nối phía sau.
+    cut_patterns = [
+        r"\s*[·|]\s*(?:ngoại\s+lệ|ngoai\s+le)\s*:",
+        r"\s*[·|]\s*Hủy\s*:",
+        r"\s*[·|]\s*Huy\s*:",
+        r"\s+Ngoại\s+lệ\s*:",
+        r"\s+Ngoai\s+le\s*:",
+    ]
+    cut_at = None
+    for pat in cut_patterns:
+        m = re.search(pat, s, flags=re.IGNORECASE)
+        if m and (cut_at is None or m.start() < cut_at):
+            cut_at = m.start()
+    if cut_at is not None:
+        s = s[:cut_at].strip()
+
+    # Nếu toàn bộ chuỗi là mô tả Đăng ký/Hủy thì bỏ.
+    if re.match(r"^\s*Đăng\s+ký\s*:", s, flags=re.IGNORECASE) and re.search(
+        r"\bHủy\s*:", s, flags=re.IGNORECASE
+    ):
+        return ""
+
+    s = s.replace("**", "").strip()
+    s = re.sub(r"^\s*❌\s*", "", s)
+    s = re.sub(r"\s{2,}", " ", s).strip(" ·|-")
+    return s
+
+
+def _clean_leave_popup_list_v92635(values):
+    cleaned = []
+    for item in (values or []):
+        msg = _clean_leave_popup_text_v92635(item)
+        if msg and msg not in cleaned:
+            cleaned.append(msg)
+    return cleaned
+
+
 def _set_leave_registration_popup_v92634(
     kind,
     message="",
@@ -21043,11 +21102,11 @@ def _set_leave_registration_popup_v92634(
         return
     st.session_state[LEAVE_REG_POPUP_KEY_V92634] = {
         "kind": str(kind or "info"),
-        "title": str(title or ""),
-        "message": str(message or ""),
-        "errors": [str(x) for x in (errors or []) if str(x).strip()],
-        "warnings": [str(x) for x in (warnings or []) if str(x).strip()],
-        "notes": [str(x) for x in (notes or []) if str(x).strip()],
+        "title": _clean_leave_popup_text_v92635(title),
+        "message": _clean_leave_popup_text_v92635(message),
+        "errors": _clean_leave_popup_list_v92635(errors),
+        "warnings": _clean_leave_popup_list_v92635(warnings),
+        "notes": _clean_leave_popup_list_v92635(notes),
     }
 
 
@@ -26220,7 +26279,9 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 chosen_leave_type = str(_reason_meta.get("leave_type", "") or "")
                 configured_violation_detail = str(_reason_meta.get("detail", "") or "")
                 penalty_configured_from_sheet = bool(_reason_meta.get("penalty_configured", False))
-                st.caption("⏳ " + leave_notice_policy_text(chosen_loai))
+                st.caption(
+                    "⏳ Qui định sẽ được kiểm tra khi bấm Ghi Lịch Nghỉ."
+                )
 
             _configured_detail_norm = normalize_login_name(configured_violation_detail)
             requires_manual_penalty = "can nhap so tien" in _configured_detail_norm
@@ -26540,8 +26601,8 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                             st.session_state.pop(_pending_key_v92632, None)
                             _set_leave_registration_popup_v92634(
                                 "error",
-                                "❌ Không ghi được lịch nghỉ vào Google Sheets.",
-                                title="Lỗi khi lưu",
+                                "Không lưu được lịch nghỉ. Vui lòng thử lại.",
+                                title="Không thể lưu",
                                 errors=[_save_error_v92634],
                             )
                         else:

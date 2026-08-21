@@ -1,4 +1,4 @@
-# V92.6.33 - Tìm NV/Lý do không dấu + reset sau Xác nhận ghi (2026-08-21)
+# V92.6.32 - Đăng ký nghỉ 2 bước, không đối chiếu LIVE khi nhập liệu (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1306,26 +1306,6 @@ def remove_vietnamese_accents(value):
 def normalize_login_name(value):
     """Tên đăng nhập: không phân biệt dấu, HOA/thường; không ép kiểu số."""
     return " ".join(remove_vietnamese_accents(str(value)).strip().split()).casefold()
-
-
-def filter_options_accent_insensitive(options, query, cleaner=None):
-    """
-    V92.6.33: lọc danh sách không phân biệt dấu/HOA-thường.
-    Ví dụ gõ "anh thu" vẫn tìm được "Anh Thư";
-    gõ "nghi khong phep" vẫn tìm được "Nghỉ KHÔNG phép".
-    Chỉ lọc dữ liệu đang có trong bộ nhớ, không gọi Google Sheet/PostgreSQL.
-    """
-    values = list(options or [])
-    needle = normalize_login_name(query)
-    if not needle:
-        return values
-
-    result = []
-    for value in values:
-        display = cleaner(value) if callable(cleaner) else str(value or "")
-        if needle in normalize_login_name(display):
-            result.append(value)
-    return result
 
 def clean_employee_match_name(value):
     """
@@ -25862,12 +25842,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
     _leave_reset_pending = bool(st.session_state.pop("_leave_registration_reset_pending_v884", False))
     if _leave_reset_pending:
         for _reset_key in [
-            "sb_chosen_date",
-            "sb_chosen_nv",
-            "sb_loai_nghi_live",
-            "leave_employee_search_v92633",
-            "leave_reason_search_v92633",
-            "_leave_registration_pending_v92632",
+            "sb_chosen_date", "sb_chosen_nv", "sb_loai_nghi_live",
             "leave_reg_detail_input_v884",
         ]:
             st.session_state.pop(_reset_key, None)
@@ -25951,33 +25926,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             else:
                 start_date = end_date = chosen_dates
 
-            # V92.6.33: tìm Tên nhân viên có dấu hoặc không dấu.
-            # Chỉ lọc list all_users đã có trong memory; không tải dữ liệu đối chiếu LIVE.
-            if is_admin_letan:
-                _employee_search_v92633 = st.text_input(
-                    "🔎 Tìm nhân viên:",
-                    key="leave_employee_search_v92633",
-                    placeholder="Có thể gõ không dấu, ví dụ: anh thu",
-                    help="Tìm không phân biệt dấu và chữ HOA/thường.",
-                )
-                _filtered_users_v92633 = filter_options_accent_insensitive(
-                    all_users,
-                    _employee_search_v92633,
-                )
-                list_nv_input = ["-- Chọn nhân viên --"] + _filtered_users_v92633
-                _selected_nv_state_v92633 = st.session_state.get("sb_chosen_nv")
-                if (
-                    _selected_nv_state_v92633
-                    and _selected_nv_state_v92633 not in list_nv_input
-                ):
-                    st.session_state.pop("sb_chosen_nv", None)
-
-            chosen_nv = st.selectbox(
-                "Chọn nhân viên:",
-                list_nv_input,
-                key="sb_chosen_nv",
-                filter_mode="contains",
-            )
+            chosen_nv = st.selectbox("Chọn nhân viên:", list_nv_input, key="sb_chosen_nv", filter_mode="contains")
 
             # --- BỘ LỌC ĐỘNG LÝ DO NGHỈ THEO RULE ENGINE LoaiNghi A:N ---
             list_loai_nghi = []
@@ -26021,32 +25970,11 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     "Hệ thống đọc trực tiếp G/H của LoaiNghi và không dùng danh mục dự phòng."
                 )
 
-            # V92.6.33: tìm Lý do nghỉ có dấu hoặc không dấu.
-            # Ví dụ: "nghi khong phep" -> "Nghỉ KHÔNG phép".
-            _reason_search_v92633 = st.text_input(
-                "🔎 Tìm lý do nghỉ:",
-                key="leave_reason_search_v92633",
-                placeholder="Có thể gõ không dấu, ví dụ: nghi khong phep",
-                help="Tìm không phân biệt dấu và chữ HOA/thường; không đọc dữ liệu LIVE.",
-            )
-            _filtered_reasons_v92633 = filter_options_accent_insensitive(
-                list_loai_nghi,
-                _reason_search_v92633,
-                cleaner=clean_leave_reason_display,
-            )
-            _reason_options_v92633 = ["-- Chọn lý do nghỉ --"] + _filtered_reasons_v92633
-            _selected_reason_state_v92633 = st.session_state.get("sb_loai_nghi_live")
-            if (
-                _selected_reason_state_v92633
-                and _selected_reason_state_v92633 not in _reason_options_v92633
-            ):
-                st.session_state.pop("sb_loai_nghi_live", None)
-
             with st.container():
                 st.markdown('<div id="vera-leave-reason-selectbox"></div>', unsafe_allow_html=True)
                 chosen_loai = st.selectbox(
                     "Lý do nghỉ:",
-                    _reason_options_v92633,
+                    ["-- Chọn lý do nghỉ --"] + list_loai_nghi,
                     key="sb_loai_nghi_live",
                     filter_mode="contains",
                 )
@@ -26447,8 +26375,6 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                             st.session_state[
                                 "_leave_registration_flash_notes_v884"
                             ] = _flash_notes
-                            # V92.6.33: lượt rerun kế tiếp sẽ xóa Tên nhân viên,
-                            # Lý do nghỉ và cả 2 ô tìm kiếm về trạng thái mặc định.
                             st.session_state[
                                 "_leave_registration_reset_pending_v884"
                             ] = True

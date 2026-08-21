@@ -1,4 +1,4 @@
-"""V93.2-PG1 - Auto Update dùng Sheet1 A:L single-source + email/retry.
+"""V93.2 - Auto Update A:M + Auto Nghỉ không phép khi thiếu check-in.
 
 Thiết kế:
 - Cloud Scheduler gọi job này 1 lần/ngày lúc 20:00 Asia/Saigon.
@@ -27,7 +27,7 @@ import pandas as pd
 
 import timesoft_sync_job as ts
 
-# V93.2-PG1: ép nguồn TourVera hiện hành cho mọi hàm tái sử dụng từ timesoft_sync_job.
+# V93.2: nguồn TourVera hiện hành + Auto vắng mặt sau 20:00.
 ts.BANG_TOUR_FILE_ID = "151d1ueCwH2KXX-HPQF1uj340uWSCS2dW"
 
 SMTP_SENDER_EMAIL = "veraspabienhoa@gmail.com"
@@ -36,6 +36,9 @@ AUTO_CC_EMAIL = "veraspabienhoa@gmail.com"
 EMAIL_LOG_WORKSHEET = "AutoUpdateEmailLog"
 DAILY_ACTOR_TS = "AUTO UPDATE 15:00/20:00 - TIMESOFT"
 DAILY_ACTOR_TOUR = "AUTO UPDATE 15:00/20:00 - BẢNG TOUR"
+DAILY_ACTOR_ABSENCE = "AUTO UPDATE 20:00 - NGHỈ KHÔNG PHÉP"
+ABSENCE_AUTO_UPDATE_CUTOFF_HOUR = 20
+ABSENCE_AUTO_ROLES = {"nhanvien", "leader"}
 EMAIL_LOG_HEADERS = [
     "Ngày", "Tên nhân viên", "Email", "CC", "Số dòng mới", "Lý do",
     "Trạng thái", "Thời gian gửi", "Chi tiết"
@@ -74,8 +77,8 @@ def _load_leave_catalog_new(client):
 
 
 def _sheet_rows_new(ws, source_id=None):
-    """Đọc Sheet1 A:L duy nhất. source_id chỉ giữ để tương thích lời gọi cũ."""
-    return ts._sheet_rows_a_to_l(ws)
+    """Đọc Sheet1 A:M duy nhất. source_id chỉ giữ để tương thích lời gọi cũ."""
+    return ts._sheet_rows_a_to_m(ws)
 
 
 def _load_all_leave_rows_new(client):
@@ -88,13 +91,13 @@ def _next_primary_row(ws):
 
 
 def _save_auto_violation_new(client, d, employee, reason_item, detail, actor):
-    """Dùng writer A:L chuẩn của timesoft_sync_job."""
+    """Dùng writer A:M chuẩn của timesoft_sync_job."""
     return ts.save_auto_violation(client, d, employee, reason_item, detail, actor)
 
 
 
 def _log(msg: str) -> None:
-    ts._log(f"V93.2-PG1 DAILY: {msg}")
+    ts._log(f"V93.2 DAILY: {msg}")
 
 
 def _is_support_reason(value) -> bool:
@@ -234,7 +237,7 @@ def _rebalance_primary_late_rows(client, affected_dates: set[date], catalog: dic
             old_detail = str(row.get("Chi tiết", "") or "").strip()
             if old_detail != new_detail or abs(old_penalty - new_penalty) > 0.1:
                 primary_ws.update(
-                    range_name=f"F{sheet_row}:I{sheet_row}",
+                    range_name=f"G{sheet_row}:J{sheet_row}",
                     values=[[
                         new_detail,
                         row.get("Số ngày tính", ""),
@@ -336,25 +339,174 @@ def _read_added_row(client, add_msg: str) -> dict:
         return {}
     row_num = int(m.group(1))
     ws = client.open_by_key(ts.SHEET_DU_PHONG_ID).get_worksheet(0)
-    vals = ws.get(f"A{row_num}:L{row_num}")
+    vals = ws.get(f"A{row_num}:M{row_num}")
     row = list(vals[0]) if vals else []
-    row += [""] * max(0, 12 - len(row))
+    row += [""] * max(0, 13 - len(row))
     out = {
         "Ngày": row[0],
         "Thứ ngày": row[1],
         "Tên nhân viên": row[2],
         "Lý do nghỉ": row[3],
-        "Loại nghỉ": row[4],
-        "Chi tiết": row[5],
-        "Số ngày tính": row[6],
-        "Số ngày phép cộng dồn": row[7],
-        "Phạt vi phạm": row[8],
-        "Ngày cập nhật": row[9],
-        "Giờ cập nhật": row[10],
-        "Người cập nhật": row[11],
+        "Loại nghỉ": row[5],
+        "Chi tiết": row[6],
+        "Số ngày tính": row[7],
+        "Số ngày phép cộng dồn": row[8],
+        "Phạt vi phạm": row[9],
+        "Ngày cập nhật": row[10],
+        "Giờ cập nhật": row[11],
+        "Người cập nhật": row[12],
         "__row": row_num,
     }
     return out
+
+
+
+def _employment_status_map(client) -> dict[str, str]:
+    """Đọc TrangThaiNhanSu; mặc định nhân sự không có dòng trạng thái là Đang làm việc."""
+    out = {}
+    try:
+        ss = client.open_by_key(ts.SHEET_MAT_KHAU_ID)
+        ws = ss.worksheet("TrangThaiNhanSu")
+        vals = ws.get_all_values()
+        for row in vals[1:]:
+            name = str(row[1] if len(row) > 1 else "").strip()
+            status = str(row[2] if len(row) > 2 else "").strip()
+            if name:
+                out[ts._employee_key(name)] = ts._norm(status)
+    except Exception as exc:
+        _log(f"ABSENCE status WARN: {type(exc).__name__}")
+    return out
+
+
+def _active_shifted_staff(client) -> list[dict]:
+    """Chỉ nhanvien/leader đang làm việc và có Ca làm việc."""
+    ws = client.open_by_key(ts.SHEET_MAT_KHAU_ID).get_worksheet(0)
+    vals = ws.get_all_values()
+    if len(vals) <= 1:
+        return []
+
+    statuses = _employment_status_map(client)
+    active_key = ts._norm("Đang làm việc")
+    temp_key = ts._norm("Tạm thời nghỉ việc")
+    left_key = ts._norm("Đã nghỉ việc")
+
+    out = []
+    for row in vals[1:]:
+        name = str(row[1] if len(row) > 1 else "").strip()
+        role = ts._norm(row[3] if len(row) > 3 else "")
+        shift = str(row[14] if len(row) > 14 else "").strip()
+        if not name or role not in ABSENCE_AUTO_ROLES or not shift:
+            continue
+        status = statuses.get(ts._employee_key(name), active_key)
+        if status in {temp_key, left_key} or status != active_key:
+            continue
+        out.append({"name": name, "key": ts._employee_key(name), "role": role, "shift": shift})
+    return out
+
+
+def _checkin_keys_today(checkin_df: pd.DataFrame, target_date: date) -> set[str]:
+    keys = set()
+    if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
+        return keys
+    for _, row in checkin_df.iterrows():
+        raw_date = ts._timesoft_row_value(
+            row, ["WorkDateStr", "WorkDate", "CreateDateStr", "CreateDate"]
+        )
+        parsed = ts._parse_date(raw_date)
+        if parsed is not None and parsed != target_date:
+            continue
+        raw_name = ts._timesoft_row_value(
+            row, ["employeeInfo.Name", "EmployeeName", "employeeName", "Name", "FullName"]
+        )
+        key = ts._employee_key(raw_name)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _covered_leave_keys(rows: list[dict], target_date: date) -> set[str]:
+    """Có lịch nghỉ hợp lệ khi cùng ngày Số ngày tính = 0.5 hoặc 1."""
+    out = set()
+    for row in rows or []:
+        if ts._parse_date(row.get("Ngày")) != target_date:
+            continue
+        days = ts._number(row.get("Số ngày tính"), 0.0)
+        if not (abs(float(days) - 0.5) < 1e-9 or abs(float(days) - 1.0) < 1e-9):
+            continue
+        key = ts._employee_key(row.get("Tên nhân viên"))
+        if key:
+            out.add(key)
+    return out
+
+
+def process_absence_without_checkin_today(
+    client,
+    catalog: dict,
+    checkin_df: pd.DataFrame,
+) -> tuple[dict, list[dict]]:
+    """
+    Sau 20:00: nhanvien/leader active + có ca, không check-in và không có lịch
+    Số ngày tính 0.5/1 -> Auto Nghỉ không phép.
+    """
+    result = {"eligible": 0, "added": 0, "skipped": 0, "errors": 0}
+    added_rows = []
+    now = datetime.now(ts.VN_TZ)
+    today = now.date()
+
+    if now.hour < ABSENCE_AUTO_UPDATE_CUTOFF_HOUR:
+        _log("ABSENCE: chưa tới 20:00 -> bỏ qua để tránh phạt nhầm.")
+        return result, added_rows
+
+    # Không biến lỗi TimeSoft/API thành phạt hàng loạt.
+    if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
+        _log("ABSENCE SAFE-SKIP: snapshot check-in rỗng.")
+        return result, added_rows
+
+    checkin_keys = _checkin_keys_today(checkin_df, today)
+    if not checkin_keys:
+        _log("ABSENCE SAFE-SKIP: không nhận diện được tên nhân viên trong snapshot.")
+        return result, added_rows
+
+    rows = _load_all_leave_rows_new(client)
+    covered_keys = _covered_leave_keys(rows, today)
+    staff = _active_shifted_staff(client)
+
+    reason_item = catalog.get(ts._reason_key("Nghỉ không phép"))
+    if not reason_item:
+        result["errors"] += 1
+        _log("ABSENCE ERROR: LoaiNghi chưa có 'Nghỉ không phép'.")
+        return result, added_rows
+
+    weekday = ts._weekday_vi(today)
+
+    for profile in staff:
+        if profile["key"] in checkin_keys:
+            continue
+        if profile["key"] in covered_keys:
+            continue
+
+        result["eligible"] += 1
+        detail = (
+            f"Auto Update TimeSoft · không có dữ liệu check-in · {weekday}"
+            " · Sheet1 không có lịch nghỉ Số ngày tính 0.5 hoặc 1"
+            f" · Ca {profile['shift']}"
+        )
+        ok, msg = _save_auto_violation_new(
+            client, today, profile["name"], reason_item, detail, DAILY_ACTOR_ABSENCE
+        )
+        if ok and msg == "SKIP_DUPLICATE":
+            result["skipped"] += 1
+        elif ok:
+            result["added"] += 1
+            added = _read_added_row(client, msg)
+            if added:
+                added_rows.append(added)
+            _log(f"ABSENCE ADDED: {profile['name']} · {today}")
+        else:
+            result["errors"] += 1
+            _log(f"ABSENCE ERROR: {profile['name']}: {msg}")
+
+    return result, added_rows
 
 
 def process_timesoft_today(client, cfg: dict, employee_map: dict, catalog: dict, supports: dict, checkin_df: pd.DataFrame) -> tuple[dict, list[dict]]:
@@ -818,6 +970,9 @@ def run_daily() -> int:
         _log(f"TimeSoft hôm nay: checkin_rows={len(checkin_df)}; total={checkin_meta.get('Total')}")
 
         ts_result, ts_added = process_timesoft_today(client, cfg, employee_map, catalog, supports, checkin_df)
+        absence_result, absence_added = process_absence_without_checkin_today(
+            client, catalog, checkin_df
+        )
         tour_result, tour_added = process_tour_today(client, cfg, employee_map, catalog)
         # V86.12: KHÔNG chỉ gửi theo added_rows của lượt hiện tại.
         # Quét toàn bộ Auto Update phạt hôm nay chưa có log SENT để:
@@ -830,6 +985,7 @@ def run_daily() -> int:
             "Hoàn tất Auto Update 15:00/20:00: "
             f"TimeSoft eligible={ts_result['eligible']} added={ts_result['added']} skipped={ts_result['skipped']} "
             f"support_skipped={ts_result['support_skipped']} errors={ts_result['errors']}; "
+            f"Absence eligible={absence_result['eligible']} added={absence_result['added']} skipped={absence_result['skipped']} errors={absence_result['errors']}; "
             f"Tour eligible={tour_result['eligible']} added={tour_result['added']} skipped={tour_result['skipped']} errors={tour_result['errors']}; "
             f"Reverse={reverse_result['reversed']}; Emails sent={email_result['sent']} failed={email_result['failed']}"
         )

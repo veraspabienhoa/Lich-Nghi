@@ -1,4 +1,4 @@
-# V92.6.37 - Bỏ toàn bộ tooltip hover trang Lịch nghỉ cho mọi tài khoản (2026-08-21)
+# V92.6.38 - Fix thống kê CÓ phép, Excel download, Admin sửa trực tiếp toàn bộ cột (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -10929,13 +10929,23 @@ def update_schedule_record(original_row, edited_row, updated_by):
             affected_groups.add(old_group)
 
         live_all = _load_live_primary_leave_sheet(client)
-        recalculated = recalculate_schedule_fields(
-            original_row,
-            edited_row,
-            updated_by,
-            all_leave_data=live_all,
-            source_df=globals().get('df_loai_nghi', pd.DataFrame()),
-        )
+        _actor_role_direct_v92638 = str(
+            st.session_state.get("current_role", "") or ""
+        ).strip().lower()
+        _admin_direct_v92638 = _actor_role_direct_v92638 == "admin"
+
+        if _admin_direct_v92638:
+            # V92.6.38: Admin sửa trực tiếp toàn bộ cột hiển thị.
+            # Không tự tính lại Loại nghỉ / Số ngày / Phạt / metadata để đè giá trị Admin nhập.
+            recalculated = edited_row.copy()
+        else:
+            recalculated = recalculate_schedule_fields(
+                original_row,
+                edited_row,
+                updated_by,
+                all_leave_data=live_all,
+                source_df=globals().get('df_loai_nghi', pd.DataFrame()),
+            )
 
         ngay = normalize_schedule_date(recalculated.get('Ngày', ''))
         nv = str(recalculated.get('Tên nhân viên', '')).strip()
@@ -10948,8 +10958,9 @@ def update_schedule_record(original_row, edited_row, updated_by):
             return False, f"'{nv}' đã có đúng lý do '{lydo}' trong ngày {ngay}. Có thể ghi thêm nếu là lý do khác."
 
         recalculated['Ngày'] = ngay
-        recalculated['Thứ ngày'] = _vn_weekday_label(ngay)
-        recalculated['Loại nghỉ'] = _leave_type_for_reason(lydo)
+        if not _admin_direct_v92638:
+            recalculated['Thứ ngày'] = _vn_weekday_label(ngay)
+            recalculated['Loại nghỉ'] = _leave_type_for_reason(lydo)
 
         target = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
         sheet_headers = _get_leave_sheet_headers(target, strict=True)
@@ -10972,10 +10983,14 @@ def update_schedule_record(original_row, edited_row, updated_by):
         )
         gspread_update_range(target, f'A{row_idx}:M{row_idx}', [new_values], raw=False)
 
-        new_group = _progressive_group_key(recalculated)
-        if new_group:
-            affected_groups.add(new_group)
-        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, updated_by)
+        if _admin_direct_v92638:
+            # Admin đã nhập trực tiếp tất cả giá trị, không cho rebalance ghi đè Chi tiết/Phạt.
+            rebalanced = 0
+        else:
+            new_group = _progressive_group_key(recalculated)
+            if new_group:
+                affected_groups.add(new_group)
+            rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, updated_by)
 
         # Đọc lại đúng trạng thái SAU cùng sau rebalance để audit chính xác.
         _audit_after_row = recalculated
@@ -26413,8 +26428,14 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
         filtered_df = detail_all_df.copy()
 
     # --- THỐNG KÊ ---
-    excluded_keywords = ["đi trễ", "di tre", "không dọn vệ sinh", "khong don ve sinh", "lỗi vi phạm", "loi vi pham", "qua tour", "xuống phòng", "xuong phong", "ra sớm", "ra som", "vào muộn", "vao muon", "đi tua", "di tua", "ngưng nhận", "ngung nhan", "hỗ trợ ca", "ho tro ca"]
-    def is_excluded(r): return any(kw in str(r).lower() for kw in excluded_keywords)
+    # V92.6.38: phân nhóm trực tiếp bằng cùng Rule Engine đang dùng cho nghiệp vụ.
+    # Không loại "Đi trễ CP/CÓ phép" ra trước khi đếm nữa.
+    # Vì vậy một dòng Đi trễ CP vẫn thuộc nhóm CÓ phép và được tính vào thống kê.
+    def _stats_leave_group_v92638(reason):
+        return _daily_leave_group(
+            reason,
+            reason_type_map=_leave_reason_type_map(globals().get('df_loai_nghi', pd.DataFrame())),
+        )
 
     # Nguồn riêng cho "Thống kê chi tiết theo từng ngày": chỉ nhân sự Đang làm việc.
     daily_all_df = _filter_active_employees_for_leave_stats(detail_all_df.copy())
@@ -26425,46 +26446,27 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             daily_filtered_df = daily_filtered_df[
                 daily_filtered_df['Tên nhân viên'].astype(str).apply(normalize_login_name) == normalize_login_name(selected_nv)
             ]
+        daily_filtered_df['__stats_group_v92638'] = daily_filtered_df['Lý do nghỉ'].astype(str).apply(_stats_leave_group_v92638)
+        daily_thuc_nghi = daily_filtered_df[
+            daily_filtered_df['__stats_group_v92638'].isin(['co_phep', 'phat_sinh', 'khong_phep'])
+        ].copy()
     else:
         daily_filtered_df = daily_all_df.copy()
-
-    daily_thuc_nghi = (
-        daily_filtered_df[~daily_filtered_df['Lý do nghỉ'].apply(is_excluded)].copy()
-        if not daily_filtered_df.empty else pd.DataFrame(columns=daily_all_df.columns)
-    )
+        daily_thuc_nghi = pd.DataFrame(columns=list(daily_all_df.columns) + ['__stats_group_v92638'])
 
     stats_filtered_df = _filter_active_employees_for_leave_stats(filtered_df.copy())
     if stats_filtered_df.empty:
         df_thuc_nghi = phat_sinh_df = khong_phep_df = co_phep_df = pd.DataFrame(columns=stats_filtered_df.columns if hasattr(stats_filtered_df, 'columns') else [])
         tong_phat = 0.0
     else:
-        df_thuc_nghi = stats_filtered_df[~stats_filtered_df['Lý do nghỉ'].apply(is_excluded)].copy()
-        if df_thuc_nghi.empty:
-            phat_sinh_df = khong_phep_df = co_phep_df = pd.DataFrame(columns=stats_filtered_df.columns)
-        else:
-            # V86.7: thống kê PHÂN NHÓM TRỰC TIẾP theo nội dung cột `Lý do nghỉ`.
-            # - chứa "có phép"    -> CÓ phép
-            # - chứa "phát sinh"  -> PHÁT SINH
-            # - chứa "không phép" -> KHÔNG phép
-            _reason_norm = df_thuc_nghi['Lý do nghỉ'].astype(str).apply(normalize_login_name)
-
-            _is_phat_sinh = _reason_norm.str.contains('phat sinh', na=False)
-            _is_khong_phep = _reason_norm.str.contains('khong phep', na=False)
-
-            # V86.8: nhóm CÓ phép nếu Lý do nghỉ chứa một trong:
-            # CÓ phép, CP, Nghỉ phép, Nghỉ đám hiếu.
-            # Loại trừ rõ các dòng đã thuộc PHÁT SINH hoặc KHÔNG phép để tránh đếm chồng.
-            _is_co_phep = (
-                _reason_norm.str.contains('co phep', na=False)
-                | _reason_norm.str.contains(r'(^|\s)cp($|\s)', na=False, regex=True)
-                | _reason_norm.str.contains('nghi phep', na=False)
-                | _reason_norm.str.contains('nghi dam hieu', na=False)
-            ) & (~_is_phat_sinh) & (~_is_khong_phep)
-
-            phat_sinh_df = df_thuc_nghi[_is_phat_sinh].copy()
-            khong_phep_df = df_thuc_nghi[_is_khong_phep].copy()
-            co_phep_df = df_thuc_nghi[_is_co_phep].copy()
-        tong_phat = stats_filtered_df['Phạt vi phạm'].sum()
+        stats_filtered_df['__stats_group_v92638'] = stats_filtered_df['Lý do nghỉ'].astype(str).apply(_stats_leave_group_v92638)
+        df_thuc_nghi = stats_filtered_df[
+            stats_filtered_df['__stats_group_v92638'].isin(['co_phep', 'phat_sinh', 'khong_phep'])
+        ].copy()
+        phat_sinh_df = df_thuc_nghi[df_thuc_nghi['__stats_group_v92638'].eq('phat_sinh')].copy()
+        khong_phep_df = df_thuc_nghi[df_thuc_nghi['__stats_group_v92638'].eq('khong_phep')].copy()
+        co_phep_df = df_thuc_nghi[df_thuc_nghi['__stats_group_v92638'].eq('co_phep')].copy()
+        tong_phat = pd.to_numeric(stats_filtered_df['Phạt vi phạm'], errors='coerce').fillna(0).sum()
 
     # V92.6.34: cột/số liệu Phạt vi phạm chỉ Admin được xem.
     # Không dùng permission override employee_penalty_view tại khu vực Lịch nghỉ.
@@ -26484,22 +26486,13 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
         daily_limit_flags = []
         for d in sorted(daily_filtered_df['Ngày'].dropna().unique()):
             day_df = daily_filtered_df[daily_filtered_df['Ngày'] == d]
-            day_thuc_nghi = day_df[~day_df['Lý do nghỉ'].apply(is_excluded)]
-            # V86.7: đếm theo nội dung cột `Lý do nghỉ` đúng như quy định nghiệp vụ.
-            d_reason = day_thuc_nghi['Lý do nghỉ'].astype(str).apply(normalize_login_name)
+            day_thuc_nghi = day_df[
+                day_df['__stats_group_v92638'].isin(['co_phep', 'phat_sinh', 'khong_phep'])
+            ].copy()
 
-            d_is_phat_sinh = d_reason.str.contains('phat sinh', na=False)
-            d_is_khong_phep = d_reason.str.contains('khong phep', na=False)
-            d_is_co_phep = (
-                d_reason.str.contains('co phep', na=False)
-                | d_reason.str.contains(r'(^|\s)cp($|\s)', na=False, regex=True)
-                | d_reason.str.contains('nghi phep', na=False)
-                | d_reason.str.contains('nghi dam hieu', na=False)
-            ) & (~d_is_phat_sinh) & (~d_is_khong_phep)
-
-            count_co_phep = int(d_is_co_phep.sum())
-            count_phat_sinh = int(d_is_phat_sinh.sum())
-            count_khong_phep = int(d_is_khong_phep.sum())
+            count_co_phep = int(day_thuc_nghi['__stats_group_v92638'].eq('co_phep').sum())
+            count_phat_sinh = int(day_thuc_nghi['__stats_group_v92638'].eq('phat_sinh').sum())
+            count_khong_phep = int(day_thuc_nghi['__stats_group_v92638'].eq('khong_phep').sum())
             is_weekend = d.weekday() >= 5
             _day_limits = _daily_leave_quota_limits(d)
 
@@ -26922,13 +26915,18 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
         with col_download:
             st.write("")
             if not export_df.empty:
+                # V92.6.38: tạo bytes Excel trong RAM và download không rerun trang.
+                # Tránh link tạm bị mất khi Streamlit rerun ngay lúc bấm tải.
+                _leave_export_bytes_v92638 = to_excel(df_for_excel)
                 st.download_button(
                     "📥 Tải Dữ Liệu Lọc Xuống (Excel)",
-                    data=to_excel(df_for_excel),
+                    data=_leave_export_bytes_v92638,
                     disabled=not _can_leave_export,
                     file_name=f"Vera-Spa_{start_date.strftime('%d%m%Y')}_to_{end_date.strftime('%d%m%Y')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
+                    use_container_width=True,
+                    on_click="ignore",
+                    key=f"leave_export_xlsx_v92638_{start_date}_{end_date}_{selected_nv}",
                 )
             else:
                 st.button("📥 Tải Dữ Liệu Lọc Xuống (Excel)", disabled=True, use_container_width=True)
@@ -27065,15 +27063,22 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
                 "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
             ]
-            disabled_cols = [c for c in derived_cols if c in editor_df.columns]
-            if "Loại nghỉ" in editor_df.columns:
-                disabled_cols.append("Loại nghỉ")
-            if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and "Tên nhân viên" in editor_df.columns:
-                disabled_cols.append("Tên nhân viên")
+            _detail_role = str(st.session_state.current_role).strip().lower()
+            if _detail_role == "admin":
+                # V92.6.38: Admin được sửa trực tiếp TẤT CẢ cột đang hiển thị.
+                # Hai cột nội bộ Quyền xóa/Lý do khóa vẫn ẩn và không cần chỉnh.
+                disabled_cols = [
+                    c for c in ["Quyền xóa", "Lý do khóa"] if c in editor_df.columns
+                ]
+            else:
+                disabled_cols = [c for c in derived_cols if c in editor_df.columns]
+                if "Loại nghỉ" in editor_df.columns:
+                    disabled_cols.append("Loại nghỉ")
+                if st.session_state.current_role in EMPLOYEE_LIKE_ROLES and "Tên nhân viên" in editor_df.columns:
+                    disabled_cols.append("Tên nhân viên")
 
             # Chỉ Admin hoặc tài khoản có quyền sửa trực tiếp mới được sửa cell.
             # Các tài khoản còn lại vẫn được tick "Chọn" để yêu cầu xóa theo quy định từng dòng.
-            _detail_role = str(st.session_state.current_role).strip().lower()
             _detail_can_edit_cells = (
                 _can_leave_detail_edit
                 and (
@@ -27112,7 +27117,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 )
             if "Thứ ngày" in editor_df.columns:
                 detail_col_config["Thứ ngày"] = st.column_config.TextColumn(
-                    "Thứ ngày", disabled=True, width=layout_width("leave_detail", "Thứ ngày", "small")
+                    "Thứ ngày", disabled=(_detail_role != "admin"), width=layout_width("leave_detail", "Thứ ngày", "small")
                 )
             if "Lý do nghỉ" in editor_df.columns:
                 detail_col_config["Lý do nghỉ"] = st.column_config.SelectboxColumn(
@@ -27121,28 +27126,28 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 )
             if "Loại nghỉ" in editor_df.columns:
                 detail_col_config["Loại nghỉ"] = st.column_config.TextColumn(
-                    "Loại nghỉ", disabled=True,
+                    "Loại nghỉ", disabled=(_detail_role != "admin"),
                     width=layout_width("leave_detail", "Loại nghỉ", "medium"),
                 )
             if "Số ngày tính" in editor_df.columns:
                 detail_col_config["Số ngày tính"] = st.column_config.NumberColumn(
-                    "Số ngày tính", step=0.5, format="%.1f", disabled=True,
+                    "Số ngày tính", step=0.5, format="%.1f", disabled=(_detail_role != "admin"),
                     width=layout_width("leave_detail", "Số ngày tính", "small")
                 )
             if "Số ngày phép cộng dồn" in editor_df.columns:
                 detail_col_config["Số ngày phép cộng dồn"] = st.column_config.NumberColumn(
-                    "Số ngày phép cộng dồn", step=0.5, format="%.1f", disabled=True,
+                    "Số ngày phép cộng dồn", step=0.5, format="%.1f", disabled=(_detail_role != "admin"),
                     width=layout_width("leave_detail", "Số ngày phép cộng dồn", "small")
                 )
             if "Phạt vi phạm" in editor_df.columns:
                 detail_col_config["Phạt vi phạm"] = st.column_config.NumberColumn(
-                    "Phạt vi phạm", step=50000, format="%.0f", disabled=True,
+                    "Phạt vi phạm", step=50000, format="%.0f", disabled=(_detail_role != "admin"),
                     width=layout_width("leave_detail", "Phạt vi phạm", "small")
                 )
             for _c in ["Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"]:
                 if _c in editor_df.columns:
                     detail_col_config[_c] = st.column_config.TextColumn(
-                        _c, disabled=True, width=layout_width("leave_detail", _c, "small")
+                        _c, disabled=(_detail_role != "admin"), width=layout_width("leave_detail", _c, "small")
                     )
 
             with st.form(f"detail_schedule_batch_form_v{editor_version}", clear_on_submit=False):

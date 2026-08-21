@@ -1,4 +1,4 @@
-"""V93.1-PG1 - Auto Update dùng Sheet1 A:M single-source + email/retry.
+"""V93.2-PG1 - Auto Update dùng Sheet1 A:L single-source + email/retry.
 
 Thiết kế:
 - Cloud Scheduler gọi job này 1 lần/ngày lúc 20:00 Asia/Saigon.
@@ -27,7 +27,7 @@ import pandas as pd
 
 import timesoft_sync_job as ts
 
-# V93.1-PG1: ép nguồn TourVera hiện hành cho mọi hàm tái sử dụng từ timesoft_sync_job.
+# V93.2-PG1: ép nguồn TourVera hiện hành cho mọi hàm tái sử dụng từ timesoft_sync_job.
 ts.BANG_TOUR_FILE_ID = "151d1ueCwH2KXX-HPQF1uj340uWSCS2dW"
 
 SMTP_SENDER_EMAIL = "veraspabienhoa@gmail.com"
@@ -74,8 +74,8 @@ def _load_leave_catalog_new(client):
 
 
 def _sheet_rows_new(ws, source_id=None):
-    """Đọc Sheet1 A:M duy nhất. source_id chỉ giữ để tương thích lời gọi cũ."""
-    return ts._sheet_rows_a_to_m(ws)
+    """Đọc Sheet1 A:L duy nhất. source_id chỉ giữ để tương thích lời gọi cũ."""
+    return ts._sheet_rows_a_to_l(ws)
 
 
 def _load_all_leave_rows_new(client):
@@ -88,13 +88,13 @@ def _next_primary_row(ws):
 
 
 def _save_auto_violation_new(client, d, employee, reason_item, detail, actor):
-    """Dùng writer A:M chuẩn của timesoft_sync_job."""
+    """Dùng writer A:L chuẩn của timesoft_sync_job."""
     return ts.save_auto_violation(client, d, employee, reason_item, detail, actor)
 
 
 
 def _log(msg: str) -> None:
-    ts._log(f"V93.1-PG1 DAILY: {msg}")
+    ts._log(f"V93.2-PG1 DAILY: {msg}")
 
 
 def _is_support_reason(value) -> bool:
@@ -234,7 +234,7 @@ def _rebalance_primary_late_rows(client, affected_dates: set[date], catalog: dic
             old_detail = str(row.get("Chi tiết", "") or "").strip()
             if old_detail != new_detail or abs(old_penalty - new_penalty) > 0.1:
                 primary_ws.update(
-                    range_name=f"G{sheet_row}:J{sheet_row}",
+                    range_name=f"F{sheet_row}:I{sheet_row}",
                     values=[[
                         new_detail,
                         row.get("Số ngày tính", ""),
@@ -336,22 +336,22 @@ def _read_added_row(client, add_msg: str) -> dict:
         return {}
     row_num = int(m.group(1))
     ws = client.open_by_key(ts.SHEET_DU_PHONG_ID).get_worksheet(0)
-    vals = ws.get(f"A{row_num}:M{row_num}")
+    vals = ws.get(f"A{row_num}:L{row_num}")
     row = list(vals[0]) if vals else []
-    row += [""] * max(0, 13 - len(row))
+    row += [""] * max(0, 12 - len(row))
     out = {
         "Ngày": row[0],
         "Thứ ngày": row[1],
         "Tên nhân viên": row[2],
         "Lý do nghỉ": row[3],
-        "Loại nghỉ": row[5],
-        "Chi tiết": row[6],
-        "Số ngày tính": row[7],
-        "Số ngày phép cộng dồn": row[8],
-        "Phạt vi phạm": row[9],
-        "Ngày cập nhật": row[10],
-        "Giờ cập nhật": row[11],
-        "Người cập nhật": row[12],
+        "Loại nghỉ": row[4],
+        "Chi tiết": row[5],
+        "Số ngày tính": row[6],
+        "Số ngày phép cộng dồn": row[7],
+        "Phạt vi phạm": row[8],
+        "Ngày cập nhật": row[9],
+        "Giờ cập nhật": row[10],
+        "Người cập nhật": row[11],
         "__row": row_num,
     }
     return out

@@ -1,4 +1,4 @@
-# V92.6.66 - Nút Ghi/Save xanh bóng + reset chắc chắn Lý do nghỉ sau khi lưu (2026-08-22)
+# V92.6.69 - Khôi phục Auto Update 15:00 + 20:00 + 21:00; 21:00 chuyên nghỉ giữa ca (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -835,18 +835,28 @@ def _timesoft_background_status_row():
     return {}
 
 
-def _timesoft_checkin_display_df(df, include_midshift_break=True):
+def _timesoft_checkin_display_df(
+    df,
+    include_midshift_break=True,
+    raw_punch_df=None,
+    tour_df=None,
+):
     """
-    V92.6.65 - Bảng chấm công Snapshot dùng chung dữ liệu TimeSoft và engine nghỉ giữa ca.
+    V92.6.67 - Bảng chấm công Snapshot + theo dõi nghỉ giữa ca.
 
-    Khi include_midshift_break=True, bổ sung 3 cột:
+    Bổ sung 4 cột:
       - Giờ ra nghỉ giữa ca
       - Giờ vào lại
+      - Số phút nghỉ giữa ca
       - Trạng thái nghỉ giữa ca
 
-    Dữ liệu nghỉ giữa ca KHÔNG tự suy đoán bằng một công thức mới. Hàm gọi lại
-    calculate_midshift_break_from_timesoft(), tức cùng engine đang dùng cho Auto Update
-    "Ra ngoài vào muộn" để giao diện và nghiệp vụ luôn cho cùng một kết quả.
+    Nguồn xác định:
+      1) FaceID chi tiết TimeSoft (nếu Admin đã nạp file `lich-su-checkin`);
+      2) đối chiếu TourVera cột R:V để nhận diện trường hợp ra ngoài nhưng thiếu FaceID;
+      3) dữ liệu tổng hợp TimeSoft hiện có làm fallback.
+
+    FaceID trong khung 23:00 ngày làm việc -> 02:00 ngày hôm sau được coi là
+    check-out cuối ca và KHÔNG dùng làm cặp nghỉ giữa ca.
     """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
@@ -876,7 +886,7 @@ def _timesoft_checkin_display_df(df, include_midshift_break=True):
         "StartWorkTime": "Giờ bắt đầu ca",
         "EndWorkTime": "Giờ kết thúc ca",
         "MachineTimeCheckInStr": "Check-in",
-        "MachineTimeCheckOutStr": "Check-out",
+        "MachineTimeCheckOutStr": "FaceID cuối TimeSoft",
         "GoWorkTypeName": "Trạng thái vào",
         "LastCheckInTypeName": "Trạng thái ra",
         "TotalMinuteInGoLate": "Phút đi trễ",
@@ -886,65 +896,124 @@ def _timesoft_checkin_display_df(df, include_midshift_break=True):
     }
     out = out.rename(columns=rename)
 
-    # V92.6.65: gắn kết quả nghỉ giữa ca vào đúng Nhân viên + Ngày.
+    # V92.6.67: TimeSoft SearchElastic đặt mốc FaceID cuối vào field CheckOut,
+    # nhưng ở VERA mốc trước 23:00 thường là FaceID giữa ca chứ không phải về cuối ngày.
+    # Chỉ công nhận check-out cuối ca nếu nằm trong cửa sổ 23:00 -> 02:00 hôm sau.
+    if "FaceID cuối TimeSoft" in out.columns:
+        _checkout_end_v92667 = []
+        for _, _raw_checkout_v92667 in df.iterrows():
+            _work_date_checkout_v92667 = _timesoft_work_date_from_row(_raw_checkout_v92667)
+            _checkout_raw_v92667 = _timesoft_row_value(
+                _raw_checkout_v92667,
+                ["MachineTimeCheckOutStr", "CheckOutTimeStr", "CheckOutTime"],
+            )
+            _checkout_dt_v92667 = None
+            try:
+                _parsed_checkout_v92667 = pd.to_datetime(
+                    _checkout_raw_v92667, errors="coerce", dayfirst=True
+                )
+                if not pd.isna(_parsed_checkout_v92667):
+                    _checkout_dt_v92667 = pd.Timestamp(_parsed_checkout_v92667).to_pydatetime()
+                    if _checkout_dt_v92667.tzinfo is None:
+                        _checkout_dt_v92667 = _checkout_dt_v92667.replace(tzinfo=VN_TZ)
+            except Exception:
+                _checkout_dt_v92667 = None
+            if _is_end_shift_checkout_v92667(
+                _checkout_dt_v92667, _work_date_checkout_v92667
+            ):
+                _checkout_end_v92667.append(
+                    _checkout_dt_v92667.strftime("%d/%m/%Y %H:%M:%S")
+                )
+            else:
+                _checkout_end_v92667.append("")
+
+        _face_last_pos_v92667 = out.columns.get_loc("FaceID cuối TimeSoft") + 1
+        out.insert(
+            _face_last_pos_v92667,
+            "Check-out cuối ca",
+            _checkout_end_v92667,
+        )
+
     if include_midshift_break:
         out["Giờ ra nghỉ giữa ca"] = ""
         out["Giờ vào lại"] = ""
+        out["Số phút nghỉ giữa ca"] = ""
         out["Trạng thái nghỉ giữa ca"] = ""
         try:
-            _cred_break_v92665 = load_credentials_recent()
-            _break_df_v92665 = calculate_midshift_break_from_timesoft(
-                df, _cred_break_v92665
+            # FaceID chi tiết được nạp thủ công từ trang Snapshot/Đồng bộ TimeSoft.
+            if raw_punch_df is None:
+                _raw_session_v92667 = st.session_state.get(
+                    "timesoft_raw_faceid_df_v92667"
+                )
+                if isinstance(_raw_session_v92667, pd.DataFrame):
+                    raw_punch_df = _raw_session_v92667
+
+            # TourVera là nguồn đối chiếu hiện trường. load_bang_tour_input đã cache 300 giây.
+            if tour_df is None:
+                try:
+                    _tour_v92667, _tour_err_v92667 = load_bang_tour_input()
+                    if isinstance(_tour_v92667, pd.DataFrame) and not _tour_v92667.empty:
+                        tour_df = _tour_v92667
+                except Exception:
+                    tour_df = None
+
+            _cred_break_v92667 = load_credentials_recent()
+            _break_df_v92667 = calculate_midshift_break_from_timesoft(
+                df,
+                _cred_break_v92667,
+                raw_punch_df=raw_punch_df,
+                tour_df=tour_df,
             )
 
-            if isinstance(_break_df_v92665, pd.DataFrame) and not _break_df_v92665.empty:
-                _break_map_v92665 = {}
-                for _, _br_v92665 in _break_df_v92665.iterrows():
-                    _br_name_v92665 = normalize_login_name(
-                        _br_v92665.get("Tên nhân viên", "")
+            if isinstance(_break_df_v92667, pd.DataFrame) and not _break_df_v92667.empty:
+                _break_map_v92667 = {}
+                for _, _br_v92667 in _break_df_v92667.iterrows():
+                    _br_name_v92667 = normalize_login_name(
+                        _br_v92667.get("Tên nhân viên", "")
                     )
-                    _br_date_raw_v92665 = _br_v92665.get("Ngày", "")
-                    _br_date_v92665 = pd.to_datetime(
-                        _br_date_raw_v92665, errors="coerce", dayfirst=True
+                    _br_date_v92667 = pd.to_datetime(
+                        _br_v92667.get("Ngày", ""), errors="coerce", dayfirst=True
                     )
-                    if not _br_name_v92665 or pd.isna(_br_date_v92665):
+                    if not _br_name_v92667 or pd.isna(_br_date_v92667):
                         continue
-                    _break_map_v92665[(
-                        _br_name_v92665,
-                        _br_date_v92665.date().isoformat(),
+                    _break_map_v92667[(
+                        _br_name_v92667,
+                        _br_date_v92667.date().isoformat(),
                     )] = {
-                        "out": str(_br_v92665.get("Bắt đầu nghỉ", "") or ""),
-                        "in": str(_br_v92665.get("Kết thúc nghỉ", "") or ""),
-                        "status": str(_br_v92665.get("Trạng thái", "") or ""),
+                        "out": str(_br_v92667.get("Bắt đầu nghỉ", "") or ""),
+                        "in": str(_br_v92667.get("Kết thúc nghỉ", "") or ""),
+                        "minutes": _br_v92667.get("Số phút nghỉ giữa ca", ""),
+                        "status": str(_br_v92667.get("Trạng thái", "") or ""),
                     }
 
-                _break_out_v92665 = []
-                _break_in_v92665 = []
-                _break_status_v92665 = []
-                for _idx_v92665, _raw_v92665 in df.iterrows():
-                    _name_v92665 = str(_timesoft_row_value(
-                        _raw_v92665,
+                _vals_out, _vals_in, _vals_min, _vals_status = [], [], [], []
+                for _, _raw_v92667 in df.iterrows():
+                    _name_v92667 = str(_timesoft_row_value(
+                        _raw_v92667,
                         [
                             "employeeInfo.Name", "EmployeeName",
                             "Tên nhân viên", "Nhân viên", "Name",
                         ],
                     ) or "").strip()
-                    _work_date_v92665 = _timesoft_work_date_from_row(_raw_v92665)
-                    _key_v92665 = (
-                        normalize_login_name(_name_v92665),
-                        _work_date_v92665.isoformat() if isinstance(_work_date_v92665, date) else "",
+                    _work_date_v92667 = _timesoft_work_date_from_row(_raw_v92667)
+                    _key_v92667 = (
+                        normalize_login_name(_name_v92667),
+                        _work_date_v92667.isoformat()
+                        if isinstance(_work_date_v92667, date) else "",
                     )
-                    _info_v92665 = _break_map_v92665.get(_key_v92665, {})
-                    _break_out_v92665.append(_info_v92665.get("out", ""))
-                    _break_in_v92665.append(_info_v92665.get("in", ""))
-                    _break_status_v92665.append(_info_v92665.get("status", ""))
+                    _info_v92667 = _break_map_v92667.get(_key_v92667, {})
+                    _vals_out.append(_info_v92667.get("out", ""))
+                    _vals_in.append(_info_v92667.get("in", ""))
+                    _vals_min.append(_info_v92667.get("minutes", ""))
+                    _vals_status.append(_info_v92667.get("status", ""))
 
-                if len(_break_out_v92665) == len(out):
-                    out["Giờ ra nghỉ giữa ca"] = _break_out_v92665
-                    out["Giờ vào lại"] = _break_in_v92665
-                    out["Trạng thái nghỉ giữa ca"] = _break_status_v92665
+                if len(_vals_out) == len(out):
+                    out["Giờ ra nghỉ giữa ca"] = _vals_out
+                    out["Giờ vào lại"] = _vals_in
+                    out["Số phút nghỉ giữa ca"] = _vals_min
+                    out["Trạng thái nghỉ giữa ca"] = _vals_status
         except Exception:
-            # Snapshot vẫn phải hiển thị được chấm công nếu cấu hình nghỉ giữa ca lỗi/thiếu.
+            # Chấm công chính vẫn phải hiển thị khi nguồn đối chiếu tạm lỗi.
             pass
 
     return out
@@ -2649,6 +2718,17 @@ AUTO_PENALTY_CONFIG_HEADERS = [
 AUTO_PENALTY_CONFIG_KEY = "AUTO_PENALTY"
 AUTO_PENALTY_RUNNING = "RUNNING"
 AUTO_PENALTY_PAUSED = "PAUSED"
+
+# V92.6.69 - Lịch Auto Update chuẩn: 15:00 + 20:00 + 21:00 (giờ Việt Nam).
+# - 15:00: Auto Update ban ngày.
+# - 20:00: giữ nguyên Auto Update tối, bao gồm điều kiện Auto Nghỉ không phép từ 20:00.
+# - 21:00: lượt CHUYÊN kiểm tra nghỉ giữa ca; tác vụ nặng này chỉ chạy tối đa 1 lần/ngày.
+AUTO_UPDATE_SCHEDULE_TIMES_V92669 = ("15:00", "20:00", "21:00")
+MIDSHIFT_AUTO_WINDOW_START = (21, 0)
+MIDSHIFT_AUTO_WINDOW_END = (21, 0)
+MIDSHIFT_AUTO_RECOMMENDED_TIME = "21:00"
+MIDSHIFT_AUTO_DAILY_STATE_KEY = "AUTO_MIDSHIFT_DAILY"
+MIDSHIFT_AUTO_DAILY_STATE_ROW = 3
 PAYROLL_SOURCE_WORKSHEET = "Báo cáo doanh thu hóa đơn"
 PAYROLL_STORAGE_WORKSHEET = "BangLuong"
 PAYROLL_CONFIG_WORKSHEET = "CauHinhLuong"
@@ -5102,6 +5182,117 @@ def is_auto_penalty_paused():
     return bool(load_auto_penalty_config().get("paused", False))
 
 
+def _midshift_auto_window_text_v92668():
+    # Giữ tên helper cũ để tương thích các call hiện hữu.
+    return "21:00"
+
+
+def _midshift_auto_in_window_v92668(now_vn=None):
+    """V92.6.69: Auto nghỉ giữa ca chỉ được claim tại đúng lượt Scheduler 21:00 giờ VN."""
+    now_vn = now_vn or datetime.now(VN_TZ)
+    return int(now_vn.hour) == 21 and int(now_vn.minute) == 0
+
+
+def _is_midshift_dedicated_auto_slot_v92669(now_vn=None):
+    """True ở lượt Auto Update 21:00; lượt này chỉ chạy nghiệp vụ nghỉ giữa ca."""
+    return _midshift_auto_in_window_v92668(now_vn)
+
+
+def _load_midshift_auto_daily_state_v92668():
+    """Đọc trạng thái lần chạy nghỉ giữa ca trong ngày từ CauHinhAutoPhat dòng 3."""
+    default = {
+        "key": MIDSHIFT_AUTO_DAILY_STATE_KEY,
+        "status": "",
+        "run_date": "",
+        "run_time": "",
+        "actor": "",
+        "note": "",
+        "error": "",
+    }
+    try:
+        ws = _get_auto_penalty_config_worksheet()
+        if ws is None:
+            default["error"] = "Chưa cấu hình Google Sheets."
+            return default
+        rng = f"A{MIDSHIFT_AUTO_DAILY_STATE_ROW}:F{MIDSHIFT_AUTO_DAILY_STATE_ROW}"
+        vals = _gs_call_with_backoff(ws.get, rng)
+        row = vals[0] if vals else []
+        row = list(row) + [""] * max(0, 6 - len(row))
+        if str(row[0] or "").strip() != MIDSHIFT_AUTO_DAILY_STATE_KEY:
+            return default
+        return {
+            "key": str(row[0] or ""),
+            "status": str(row[1] or "").strip().upper(),
+            "run_date": str(row[2] or "").strip(),
+            "run_time": str(row[3] or "").strip(),
+            "actor": str(row[4] or "").strip(),
+            "note": str(row[5] or "").strip(),
+            "error": "",
+        }
+    except Exception as e:
+        default["error"] = str(e)
+        return default
+
+
+def _write_midshift_auto_daily_state_v92668(status, now_vn=None, actor="AUTO UPDATE", note=""):
+    """Ghi RUNNING/DONE/ERROR để tránh tính nghỉ giữa ca lặp nhiều lần trong cùng ngày."""
+    try:
+        now_vn = now_vn or datetime.now(VN_TZ)
+        ws = _get_auto_penalty_config_worksheet()
+        if ws is None:
+            return False, "Chưa cấu hình Google Sheets."
+        rng = f"A{MIDSHIFT_AUTO_DAILY_STATE_ROW}:F{MIDSHIFT_AUTO_DAILY_STATE_ROW}"
+        row = [[
+            MIDSHIFT_AUTO_DAILY_STATE_KEY,
+            str(status or "").strip().upper(),
+            now_vn.strftime("%d/%m/%Y"),
+            now_vn.strftime("%H:%M:%S"),
+            str(actor or "AUTO UPDATE"),
+            str(note or "")[:500],
+        ]]
+        gspread_update_range(ws, rng, row, value_input_option="USER_ENTERED")
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def _claim_midshift_auto_daily_run_v92668(now_vn=None, actor="AUTO UPDATE", force=False):
+    """
+    Chặn tải thừa cho nghỉ giữa ca:
+    - Auto: chỉ chạy ở lượt Scheduler 21:00;
+    - Auto: chỉ 1 lần/ngày;
+    - force=True dành cho nút Admin 'Chạy ngay'.
+    """
+    now_vn = now_vn or datetime.now(VN_TZ)
+    if force:
+        return True, "Chạy thủ công bởi Admin; bỏ qua giới hạn giờ/lần chạy tự động."
+
+    if not _midshift_auto_in_window_v92668(now_vn):
+        return False, (
+            f"Nghỉ giữa ca chỉ Auto Update tại lượt Scheduler "
+            f"{MIDSHIFT_AUTO_RECOMMENDED_TIME} và tối đa 1 lần/ngày."
+        )
+
+    state = _load_midshift_auto_daily_state_v92668()
+    today_text = now_vn.strftime("%d/%m/%Y")
+    if (
+        state.get("run_date") == today_text
+        and state.get("status") in {"RUNNING", "DONE"}
+    ):
+        return False, (
+            f"Nghỉ giữa ca hôm nay đã được xử lý lúc {state.get('run_time') or 'không rõ giờ'} "
+            f"bởi {state.get('actor') or 'AUTO UPDATE'}; không chạy lại."
+        )
+
+    ok, err = _write_midshift_auto_daily_state_v92668(
+        "RUNNING", now_vn=now_vn, actor=actor, note="Đang kiểm tra nghỉ giữa ca"
+    )
+    if not ok:
+        # An toàn tải hệ thống: nếu không claim được trạng thái dùng chung thì không chạy tự động.
+        return False, f"Không khóa được lần chạy nghỉ giữa ca dùng chung: {err}"
+    return True, "Đã khóa lần chạy nghỉ giữa ca hôm nay."
+
+
 def get_postgres_runtime_status():
     """Dùng cho kiểm tra triển khai: không làm app lỗi nếu PostgreSQL tạm unavailable."""
     if vpg is None or not _vpg_is_enabled():
@@ -6889,6 +7080,224 @@ def _pick_midshift_break_pair(clusters, allowed_minutes, cluster_minutes=10):
     return best
 
 
+
+# ==========================================================
+# V92.6.67 - TIMESOFT FACEID CHI TIẾT + ĐỐI CHIẾU TOURVERA
+# ==========================================================
+TIMESOFT_RAW_FACEID_SESSION_KEY_V92667 = "timesoft_raw_faceid_df_v92667"
+MIDSHIFT_TOUR_FACE_MATCH_MINUTES_V92667 = 20
+
+
+def _read_timesoft_raw_faceid_excel_v92667(uploaded_file):
+    """Đọc file export TimeSoft `lich-su-checkin`; trả DataFrame chuẩn hóa."""
+    if uploaded_file is None:
+        return pd.DataFrame(), "Chưa chọn file Lịch sử checkin."
+    try:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        try:
+            raw = pd.read_excel(uploaded_file, sheet_name="lich-su-checkin", engine="openpyxl")
+        except Exception:
+            try:
+                uploaded_file.seek(0)
+            except Exception:
+                pass
+            raw = pd.read_excel(uploaded_file, sheet_name=0, engine="openpyxl")
+        clean = _normalize_timesoft_raw_faceid_df_v92667(raw)
+        if clean.empty:
+            return pd.DataFrame(), (
+                "File không có dữ liệu FaceID hợp lệ. Cần tối thiểu cột Tên nhân viên và Thời gian."
+            )
+        return clean, f"Đã đọc {len(clean)} lượt FaceID chi tiết."
+    except Exception as e:
+        return pd.DataFrame(), f"Không đọc được file Lịch sử checkin: {e}"
+
+
+def _normalize_timesoft_raw_faceid_df_v92667(df):
+    """
+    Chuẩn hóa nhiều kiểu header của file/API lịch sử FaceID về:
+    Mã nhân viên | Tên nhân viên | Thời gian.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(columns=["Mã nhân viên", "Tên nhân viên", "Thời gian"])
+
+    def _find_col(candidates):
+        norms = {normalize_login_name(c): c for c in df.columns}
+        for candidate in candidates:
+            hit = norms.get(normalize_login_name(candidate))
+            if hit is not None:
+                return hit
+        for c in df.columns:
+            nc = normalize_login_name(c)
+            if any(normalize_login_name(x) in nc for x in candidates):
+                return c
+        return None
+
+    name_col = _find_col([
+        "Tên nhân viên", "Nhân viên", "EmployeeName", "employeeInfo.Name", "Name"
+    ])
+    time_col = _find_col([
+        "Thời gian", "CheckTime", "CheckinTime", "FaceID Time", "Time", "Timestamp", "DateTime"
+    ])
+    code_col = _find_col([
+        "Mã nhân viên", "EmployeeCode", "employeeInfo.EmployeeCode", "Mã NV"
+    ])
+    if name_col is None or time_col is None:
+        return pd.DataFrame(columns=["Mã nhân viên", "Tên nhân viên", "Thời gian"])
+
+    out = pd.DataFrame()
+    out["Mã nhân viên"] = df[code_col].astype(str) if code_col is not None else ""
+    out["Tên nhân viên"] = df[name_col].astype(str).str.strip()
+    out["Thời gian"] = pd.to_datetime(df[time_col], errors="coerce", dayfirst=True)
+    out = out[
+        out["Tên nhân viên"].astype(str).str.strip().ne("")
+        & out["Thời gian"].notna()
+    ].copy()
+    return out.sort_values("Thời gian", kind="stable").reset_index(drop=True)
+
+
+def _raw_faceid_group_map_v92667(raw_punch_df):
+    """Gom FaceID chi tiết theo Nhân viên + ngày làm việc; 00:00-01:59 gắn về ngày trước."""
+    clean = _normalize_timesoft_raw_faceid_df_v92667(raw_punch_df)
+    grouped = {}
+    if clean.empty:
+        return grouped
+    for _, r in clean.iterrows():
+        name = str(r.get("Tên nhân viên", "") or "").strip()
+        ts = r.get("Thời gian")
+        if not name or pd.isna(ts):
+            continue
+        try:
+            dt = pd.Timestamp(ts).to_pydatetime()
+        except Exception:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=VN_TZ)
+        else:
+            try:
+                dt = dt.astimezone(VN_TZ)
+            except Exception:
+                pass
+        # FaceID sau nửa đêm đến trước 02:00 được xem là check-out của ngày làm việc trước.
+        work_date = dt.date() - timedelta(days=1) if dt.hour < 2 else dt.date()
+        key = (normalize_login_name(name), work_date.isoformat())
+        grouped.setdefault(key, {"name": name, "punches": []})["punches"].append(dt)
+    return grouped
+
+
+def _coerce_tour_datetime_v92667(value, work_date=None):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, pd.Timestamp):
+        dt = value.to_pydatetime()
+    elif isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, date):
+        dt = datetime.combine(value, datetime.min.time())
+    elif isinstance(value, numbers.Number):
+        try:
+            # Excel serial date (Windows 1900 date system).
+            dt = datetime(1899, 12, 30) + timedelta(days=float(value))
+        except Exception:
+            return None
+    else:
+        text = str(value or "").strip()
+        if not text or text.casefold() in {"nan", "none", "nat"}:
+            return None
+        dt = None
+        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+        if not pd.isna(parsed):
+            dt = pd.Timestamp(parsed).to_pydatetime()
+        else:
+            m = re.search(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", text)
+            if m and isinstance(work_date, date):
+                dt = datetime(
+                    work_date.year, work_date.month, work_date.day,
+                    int(m.group(1)), int(m.group(2)), int(m.group(3) or 0),
+                )
+        if dt is None:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=VN_TZ)
+    return dt
+
+
+def _tour_midshift_map_v92667(tour_df):
+    """Đọc đúng TourVera Input R:V (từ row 21 đã được load thành DataFrame)."""
+    result = {}
+    if not isinstance(tour_df, pd.DataFrame) or tour_df.empty:
+        return result
+    name_col = _find_tour_col(tour_df, "Tên nhân viên")
+    out_col = _find_tour_col(tour_df, "Giờ ra")
+    in_col = _find_tour_col(tour_df, "Giờ vào")
+    note_col = _find_tour_col(tour_df, "Ghi chú") or _find_tour_col(tour_df, "Vào trễ")
+    if name_col is None or (out_col is None and in_col is None):
+        return result
+
+    for _, row in tour_df.iterrows():
+        name = str(row.get(name_col, "") or "").strip()
+        if not name:
+            continue
+        # Dấu * chỉ là ký hiệu hiển thị trên TourVera.
+        name_clean = re.sub(r"\s*\*\s*$", "", name).strip()
+        out_dt = _coerce_tour_datetime_v92667(row.get(out_col)) if out_col else None
+        in_dt = _coerce_tour_datetime_v92667(row.get(in_col)) if in_col else None
+        ref_dt = out_dt or in_dt
+        if ref_dt is None:
+            continue
+        work_date = ref_dt.date()
+        # Nếu giờ vào nằm sau nửa đêm, nó vẫn thuộc ngày giờ ra.
+        if out_dt is not None:
+            work_date = out_dt.date()
+        result[(normalize_login_name(name_clean), work_date.isoformat())] = {
+            "name": name_clean,
+            "out": out_dt,
+            "in": in_dt,
+            "note": str(row.get(note_col, "") or "").strip() if note_col else "",
+        }
+    return result
+
+
+def _is_end_shift_checkout_v92667(dt, work_date):
+    """Checkout cuối ca chỉ được nhận trong cửa sổ 23:00 -> 02:00 hôm sau."""
+    if not isinstance(dt, datetime) or not isinstance(work_date, date):
+        return False
+    start = datetime(
+        work_date.year, work_date.month, work_date.day, 23, 0, 0, tzinfo=VN_TZ
+    )
+    next_date = work_date + timedelta(days=1)
+    end = datetime(
+        next_date.year, next_date.month, next_date.day, 2, 0, 0, tzinfo=VN_TZ
+    )
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=VN_TZ)
+    return start <= dt <= end
+
+
+def _nearest_cluster_to_time_v92667(clusters, target_dt, max_minutes=20, exclude=None):
+    if not isinstance(target_dt, datetime):
+        return None
+    excluded_ids = set(exclude or [])
+    candidates = []
+    for idx, c in enumerate(clusters):
+        if idx in excluded_ids:
+            continue
+        dt = c.get("start")
+        if not isinstance(dt, datetime):
+            continue
+        diff = abs((dt - target_dt).total_seconds()) / 60.0
+        if diff <= float(max_minutes):
+            candidates.append((diff, idx, c))
+    return min(candidates, key=lambda x: (x[0], x[1])) if candidates else None
+
+
 def get_shift_break_setting_for_employee(employee_name, credentials_df=None):
     """
     Lấy cấu hình nghỉ giữa ca từ CHÍNH ca nhân viên đang được phân.
@@ -6953,27 +7362,34 @@ def get_shift_break_setting_for_employee(employee_name, credentials_df=None):
     }
 
 
-def calculate_midshift_break_from_timesoft(checkin_df, credentials_df=None):
+def calculate_midshift_break_from_timesoft(
+    checkin_df,
+    credentials_df=None,
+    raw_punch_df=None,
+    tour_df=None,
+):
     """
-    V92.6.14 - Nghỉ giữa ca là PHÁT SINH THEO TỪNG NGÀY / TỪNG NGƯỜI.
+    V92.6.67 - Tính nghỉ giữa ca theo FaceID thật + đối chiếu TourVera.
 
-    Quy tắc:
-    - 1 cụm FaceID: không ghi nhận nghỉ giữa ca -> KHÔNG phạt.
-    - 2 cụm FaceID: chưa đủ dữ liệu để kết luận nghỉ -> KHÔNG tự phạt.
-    - >=3 cụm: xác định cặp bắt đầu/kết thúc nghỉ.
-    - Duration thực tế <= Duration quy định là đạt về thời lượng.
-    - Ngoài Duration, có GIỜ QUAY LẠI CUỐI CÙNG toàn hệ thống.
-      Mặc định 20:00; ngưỡng vào muộn mặc định 5 phút.
-      Vì vậy từ 20:05 trở đi = "Ra ngoài vào muộn", kể cả nghỉ chưa đủ 90 phút.
-    - Không sử dụng check-out cuối ngày.
+    Nguyên tắc:
+    - FaceID chi tiết TimeSoft là nguồn chính khi có file `lich-su-checkin`.
+    - TourVera Input R:V là nguồn đối chiếu để phát hiện ra/vào mà thiếu FaceID.
+    - FaceID 23:00 ngày làm việc -> 02:00 hôm sau là checkout cuối ca, luôn loại khỏi
+      cặp nghỉ giữa ca.
+    - Ví dụ có 3 FaceID hợp lệ: nếu cụm đầu là vào ca thì cụm 2 -> cụm 3 là nghỉ.
+    - Nếu TourVera có Giờ ra/Giờ vào, ưu tiên ghép các FaceID gần 2 mốc đó; nhờ vậy
+      vẫn xử lý đúng trường hợp nhân viên không chấm FaceID lúc vào ca đầu ngày.
+    - Khi TourVera chứng minh có ra ngoài nhưng thiếu FaceID, vẫn tính thời gian từ
+      TourVera và ghi cảnh báo rõ trong Trạng thái.
     """
     cols = [
         "Ngày", "Tên nhân viên", "Bộ phận", "Ca làm việc",
         "Có nghỉ giữa ca", "FaceID thô", "Số cụm FaceID",
         "Khoảng gom (phút)", "Vào ca", "Bắt đầu nghỉ", "Kết thúc nghỉ",
-        "Duration quy định", "Duration thực tế", "Chênh lệch Duration",
-        "Giờ phải quay lại", "Ngưỡng vào muộn (phút)", "Phút vào muộn",
-        "Loại vi phạm", "Cách xác định", "Chi tiết cụm", "Trạng thái",
+        "Duration quy định", "Duration thực tế", "Số phút nghỉ giữa ca",
+        "Chênh lệch Duration", "Giờ phải quay lại", "Ngưỡng vào muộn (phút)",
+        "Phút vào muộn", "Loại vi phạm", "Nguồn nghỉ giữa ca",
+        "Cách xác định", "Chi tiết cụm", "Trạng thái",
     ]
     if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
         return pd.DataFrame(columns=cols)
@@ -6992,20 +7408,17 @@ def calculate_midshift_break_from_timesoft(checkin_df, credentials_df=None):
 
     deadline_cfg = load_midshift_deadline_config()
     deadline_text = str(
-        deadline_cfg.get(
-            "return_deadline",
-            MIDSHIFT_RETURN_DEADLINE_DEFAULT,
-        )
+        deadline_cfg.get("return_deadline", MIDSHIFT_RETURN_DEADLINE_DEFAULT)
     )
     late_threshold = int(
-        deadline_cfg.get(
-            "late_threshold_minutes",
-            MIDSHIFT_LATE_THRESHOLD_DEFAULT,
-        )
+        deadline_cfg.get("late_threshold_minutes", MIDSHIFT_LATE_THRESHOLD_DEFAULT)
         or MIDSHIFT_LATE_THRESHOLD_DEFAULT
     )
 
-    # Gộp nhiều row TimeSoft theo cùng Nhân viên + Ngày.
+    raw_map = _raw_faceid_group_map_v92667(raw_punch_df)
+    tour_map = _tour_midshift_map_v92667(tour_df)
+
+    # Gộp dữ liệu tổng hợp TimeSoft theo cùng Nhân viên + Ngày.
     grouped = {}
     for _, row in checkin_df.iterrows():
         name = _timesoft_row_value(
@@ -7018,58 +7431,80 @@ def calculate_midshift_break_from_timesoft(checkin_df, credentials_df=None):
         name = str(name or "").strip()
         if not name:
             continue
-
-        punches = _extract_timesoft_punch_times_from_row(row)
-        work_date = _timesoft_work_date_from_row(row, punches)
+        summary_punches = _extract_timesoft_punch_times_from_row(row)
+        work_date = _timesoft_work_date_from_row(row, summary_punches)
         key = (normalize_login_name(name), work_date.isoformat())
+        item = grouped.setdefault(key, {
+            "name": name,
+            "work_date": work_date,
+            "summary_punches": [],
+            "raw_punches": [],
+        })
+        item["summary_punches"].extend(summary_punches)
 
-        if key not in grouped:
-            grouped[key] = {
-                "name": name,
-                "work_date": work_date,
-                "punches": [],
-            }
-        grouped[key]["punches"].extend(punches)
+    # FaceID chi tiết có thể chứa nhân viên mà SearchElastic không trả dòng tổng hợp;
+    # chỉ ghép vào các ngày/nhân viên có trong bảng chấm công để giữ đúng phạm vi Snapshot.
+    for key, raw_item in raw_map.items():
+        if key in grouped:
+            grouped[key]["raw_punches"].extend(raw_item.get("punches", []))
 
     out = []
-    for _, item in grouped.items():
+    for key, item in grouped.items():
         name = item["name"]
         work_date = item["work_date"]
-
-        unique = {}
-        for p in item["punches"]:
-            if isinstance(p, datetime):
-                unique[p.isoformat()] = p
-        punches = sorted(unique.values())
-
         role = cred_role.get(normalize_login_name(name), "")
         dep = _shift_department_label(role)
         cfg = get_shift_break_setting_for_employee(name, credentials_df)
-
-        # Ca không áp dụng nghỉ giữa ca: không cần đánh giá.
         if not cfg.get("enabled", False):
             continue
 
         allowed = int(cfg.get("duration_minutes", 60) or 60)
-        cluster_minutes = int(
-            cfg.get("faceid_cluster_minutes", 10) or 10
+        cluster_minutes = int(cfg.get("faceid_cluster_minutes", 10) or 10)
+
+        # Nếu có FaceID chi tiết thì dùng làm nguồn TimeSoft chính; vẫn trộn summary để
+        # không mất checkin/checkout khi file chi tiết thiếu một mốc.
+        raw_exists = bool(item.get("raw_punches"))
+        source_punches = list(item.get("raw_punches", [])) if raw_exists else []
+        source_punches.extend(item.get("summary_punches", []))
+
+        unique = {}
+        for p in source_punches:
+            if isinstance(p, datetime):
+                if p.tzinfo is None:
+                    p = p.replace(tzinfo=VN_TZ)
+                unique[p.isoformat()] = p
+        punches_all = sorted(unique.values())
+        clusters_all = _cluster_faceid_punches(
+            punches_all, cluster_minutes=cluster_minutes
         )
-        clusters = _cluster_faceid_punches(
-            punches, cluster_minutes=cluster_minutes
-        )
+
+        # Loại checkout cuối ca 23:00 -> 02:00 khỏi toàn bộ logic nghỉ giữa ca.
+        checkout_clusters = [
+            c for c in clusters_all
+            if _is_end_shift_checkout_v92667(c.get("start"), work_date)
+        ]
+        clusters = [
+            c for c in clusters_all
+            if not _is_end_shift_checkout_v92667(c.get("start"), work_date)
+        ]
 
         cluster_detail = " · ".join(
-            f"{c['start'].strftime('%H:%M:%S')}({c['count']})"
-            for c in clusters
+            f"{c['start'].strftime('%H:%M:%S')}({c['count']})" for c in clusters
         )
-        entry = clusters[0]["start"] if clusters else None
+        if checkout_clusters:
+            cluster_detail += (
+                (" · " if cluster_detail else "")
+                + "Checkout "
+                + ", ".join(c["start"].strftime("%H:%M:%S") for c in checkout_clusters)
+            )
 
+        entry = clusters[0]["start"] if clusters else None
         base_row = {
             "Ngày": work_date.strftime("%d/%m/%Y"),
             "Tên nhân viên": name,
             "Bộ phận": dep,
             "Ca làm việc": str(cfg.get("shift", "")),
-            "FaceID thô": len(punches),
+            "FaceID thô": len(punches_all),
             "Số cụm FaceID": len(clusters),
             "Khoảng gom (phút)": cluster_minutes,
             "Vào ca": entry.strftime("%H:%M:%S") if entry else "",
@@ -7079,96 +7514,137 @@ def calculate_midshift_break_from_timesoft(checkin_df, credentials_df=None):
             "Chi tiết cụm": cluster_detail,
         }
 
-        # 0-1 cụm: coi là ngày không ghi nhận nghỉ giữa ca.
-        if len(clusters) <= 1:
+        tour_info = tour_map.get(key, {})
+        tour_out = tour_info.get("out")
+        tour_in = tour_info.get("in")
+
+        break_out = None
+        break_in = None
+        method = ""
+        source = ""
+        face_warning = ""
+
+        # ------------------------------------------------------
+        # 1) Có dữ liệu TourVera: ghép FaceID gần Giờ ra/Giờ vào.
+        # ------------------------------------------------------
+        if isinstance(tour_out, datetime) or isinstance(tour_in, datetime):
+            matched_out = _nearest_cluster_to_time_v92667(
+                clusters,
+                tour_out,
+                max_minutes=MIDSHIFT_TOUR_FACE_MATCH_MINUTES_V92667,
+            ) if isinstance(tour_out, datetime) else None
+            exclude_idx = [matched_out[1]] if matched_out else []
+            matched_in = _nearest_cluster_to_time_v92667(
+                clusters,
+                tour_in,
+                max_minutes=MIDSHIFT_TOUR_FACE_MATCH_MINUTES_V92667,
+                exclude=exclude_idx,
+            ) if isinstance(tour_in, datetime) else None
+
+            if matched_out and matched_in and matched_out[2]["start"] < matched_in[2]["start"]:
+                break_out = matched_out[2]["start"]
+                break_in = matched_in[2]["start"]
+                source = "TimeSoft FaceID + TourVera"
+                method = "Ghép FaceID gần Giờ ra/Giờ vào TourVera"
+            elif matched_out and isinstance(tour_in, datetime):
+                break_out = matched_out[2]["start"]
+                break_in = tour_in
+                source = "TimeSoft + TourVera"
+                face_warning = "Thiếu FaceID giờ vào"
+                method = "FaceID giờ ra + Giờ vào TourVera"
+            elif matched_in and isinstance(tour_out, datetime):
+                break_out = tour_out
+                break_in = matched_in[2]["start"]
+                source = "TimeSoft + TourVera"
+                face_warning = "Thiếu FaceID giờ ra"
+                method = "Giờ ra TourVera + FaceID giờ vào"
+            elif isinstance(tour_out, datetime) and isinstance(tour_in, datetime):
+                break_out = tour_out
+                break_in = tour_in
+                source = "TourVera"
+                face_warning = "Thiếu FaceID ra/vào"
+                method = "TourVera R:V xác nhận có nghỉ giữa ca"
+
+        # ------------------------------------------------------
+        # 2) Không có TourVera: suy ra từ FaceID.
+        # ------------------------------------------------------
+        if break_out is None or break_in is None:
+            pair = _pick_midshift_break_pair(
+                clusters,
+                allowed_minutes=allowed,
+                cluster_minutes=cluster_minutes,
+            )
+            if pair:
+                break_out = pair["start_cluster"]["start"]
+                break_in = pair["end_cluster"]["start"]
+                source = "TimeSoft FaceID chi tiết" if raw_exists else "TimeSoft tổng hợp"
+                method = pair.get("method", "")
+
+        # Chưa đủ bằng chứng.
+        if break_out is None or break_in is None or break_in <= break_out:
+            if isinstance(tour_out, datetime) and not isinstance(tour_in, datetime):
+                face_warning = face_warning or "TourVera có Giờ ra nhưng chưa có Giờ vào"
+            status = (
+                f"⚠️ {face_warning}" if face_warning
+                else (
+                    "Không ghi nhận nghỉ giữa ca" if len(clusters) <= 1
+                    else "Chưa đủ dữ liệu xác định nghỉ giữa ca"
+                )
+            )
             out.append({
                 **base_row,
-                "Có nghỉ giữa ca": "Không",
-                "Bắt đầu nghỉ": "",
+                "Có nghỉ giữa ca": "Không" if len(clusters) <= 1 and not tour_info else "Chưa xác định",
+                "Bắt đầu nghỉ": break_out.strftime("%H:%M:%S") if isinstance(break_out, datetime) else (
+                    tour_out.strftime("%H:%M:%S") if isinstance(tour_out, datetime) else ""
+                ),
                 "Kết thúc nghỉ": "",
                 "Duration thực tế": "",
+                "Số phút nghỉ giữa ca": "",
                 "Chênh lệch Duration": "",
                 "Phút vào muộn": "",
                 "Loại vi phạm": "",
-                "Cách xác định": "",
-                "Trạng thái": "Không ghi nhận nghỉ giữa ca",
+                "Nguồn nghỉ giữa ca": source,
+                "Cách xác định": method,
+                "Trạng thái": status,
             })
             continue
 
-        # 2 cụm: không đủ bằng chứng để biết có phải ra nghỉ hay chỉ chấm dư.
-        if len(clusters) == 2:
-            out.append({
-                **base_row,
-                "Có nghỉ giữa ca": "Chưa xác định",
-                "Bắt đầu nghỉ": clusters[1]["start"].strftime("%H:%M:%S"),
-                "Kết thúc nghỉ": "",
-                "Duration thực tế": "",
-                "Chênh lệch Duration": "",
-                "Phút vào muộn": "",
-                "Loại vi phạm": "",
-                "Cách xác định": "Mới có 2 cụm FaceID",
-                "Trạng thái": "Chưa đủ dữ liệu xác định nghỉ giữa ca",
-            })
-            continue
-
-        pair = _pick_midshift_break_pair(
-            clusters,
-            allowed_minutes=allowed,
-            cluster_minutes=cluster_minutes,
-        )
-        if not pair:
-            out.append({
-                **base_row,
-                "Có nghỉ giữa ca": "Chưa xác định",
-                "Bắt đầu nghỉ": "",
-                "Kết thúc nghỉ": "",
-                "Duration thực tế": "",
-                "Chênh lệch Duration": "",
-                "Phút vào muộn": "",
-                "Loại vi phạm": "",
-                "Cách xác định": "",
-                "Trạng thái": "Không xác định được cặp nghỉ",
-            })
-            continue
-
-        p2 = pair["start_cluster"]["start"]
-        p3 = pair["end_cluster"]["start"]
-        actual = int(pair["actual_minutes"])
+        actual_float = max(0.0, (break_in - break_out).total_seconds() / 60.0)
+        actual = int(round(actual_float))
         duration_diff = actual - allowed
 
-        deadline_dt = _midshift_deadline_datetime(
-            work_date, deadline_text
-        )
-        late_seconds = max(
-            0.0,
-            (p3 - deadline_dt).total_seconds(),
-        )
+        deadline_dt = _midshift_deadline_datetime(work_date, deadline_text)
+        late_seconds = max(0.0, (break_in - deadline_dt).total_seconds())
         late_minutes = int(late_seconds // 60)
-
-        is_outside_late = (
-            late_seconds >= late_threshold * 60
-        )
+        is_outside_late = late_seconds >= late_threshold * 60
 
         if is_outside_late:
             violation = "Ra ngoài vào muộn"
-            status = f"🔴 Ra ngoài vào muộn {late_minutes} phút"
+            core_status = f"🔴 Ra ngoài vào muộn {late_minutes} phút"
         elif duration_diff > 0:
             violation = "Nghỉ giữa ca quá thời gian"
-            status = f"❌ Nghỉ quá {duration_diff} phút"
+            core_status = f"❌ Nghỉ quá {duration_diff} phút"
         else:
             violation = ""
-            status = "✅ Đúng quy định"
+            core_status = "✅ Đúng quy định"
+
+        if face_warning:
+            status = f"⚠️ {face_warning} · {core_status}"
+        else:
+            status = core_status
 
         out.append({
             **base_row,
             "Có nghỉ giữa ca": "Có",
-            "Bắt đầu nghỉ": p2.strftime("%H:%M:%S"),
-            "Kết thúc nghỉ": p3.strftime("%H:%M:%S"),
+            "Bắt đầu nghỉ": break_out.strftime("%H:%M:%S"),
+            "Kết thúc nghỉ": break_in.strftime("%H:%M:%S"),
             "Duration thực tế": actual,
+            "Số phút nghỉ giữa ca": actual,
             "Chênh lệch Duration": duration_diff,
             "Phút vào muộn": late_minutes if is_outside_late else 0,
             "Loại vi phạm": violation,
-            "Cách xác định": pair.get("method", ""),
+            "Nguồn nghỉ giữa ca": source,
+            "Cách xác định": method,
             "Trạng thái": status,
         })
 
@@ -10333,6 +10809,9 @@ def auto_update_checkin_late_from_timesoft(checkin_df, actor="AUTO UPDATE - TIME
 def auto_update_midshift_late_from_timesoft(
     checkin_df,
     actor="AUTO UPDATE - TIMESOFT NGHỈ GIỮA CA",
+    raw_punch_df=None,
+    tour_df=None,
+    force_daily_run=False,
 ):
     """
     Tự ghi "Ra ngoài vào muộn" khi nhân viên quay lại nghỉ giữa ca
@@ -10341,13 +10820,32 @@ def auto_update_midshift_late_from_timesoft(
     """
     result = _auto_result("TimeSoft nghỉ giữa ca")
 
+    # V92.6.69: phần nghỉ giữa ca là tác vụ nặng (FaceID + TourVera), nên Auto chỉ
+    # chạy ở lượt 21:00 và tối đa 1 lần/ngày. Nút Admin Chạy ngay có thể force.
+    now_midshift_v92668 = datetime.now(VN_TZ)
+    claimed_v92668, claim_msg_v92668 = _claim_midshift_auto_daily_run_v92668(
+        now_midshift_v92668, actor=actor, force=bool(force_daily_run)
+    )
+    if not claimed_v92668:
+        result["skipped"] += 1
+        result["messages"].append(claim_msg_v92668)
+        return result
+
+    def _finish_midshift_daily_v92668(status="DONE", note=""):
+        if not force_daily_run:
+            _write_midshift_auto_daily_state_v92668(
+                status, now_vn=datetime.now(VN_TZ), actor=actor, note=note
+            )
+
     cfg_auto = load_auto_penalty_config()
     if cfg_auto.get("paused"):
         result["paused"] = True
         result["messages"].append("Auto Update đang tạm dừng bởi Admin.")
+        _finish_midshift_daily_v92668("DONE", "Auto Update đang tạm dừng")
         return result
 
     if not isinstance(checkin_df, pd.DataFrame) or checkin_df.empty:
+        _finish_midshift_daily_v92668("DONE", "Không có dữ liệu chấm công để kiểm tra")
         return result
 
     try:
@@ -10356,9 +10854,13 @@ def auto_update_midshift_late_from_timesoft(
         creds = globals().get("df_credentials", pd.DataFrame())
 
     status_df = calculate_midshift_break_from_timesoft(
-        checkin_df, creds
+        checkin_df,
+        creds,
+        raw_punch_df=raw_punch_df,
+        tour_df=tour_df,
     )
     if status_df.empty:
+        _finish_midshift_daily_v92668("DONE", "Không có kết quả nghỉ giữa ca")
         return result
 
     late_rows = status_df[
@@ -10366,6 +10868,7 @@ def auto_update_midshift_late_from_timesoft(
         .eq("Ra ngoài vào muộn")
     ].copy()
     if late_rows.empty:
+        _finish_midshift_daily_v92668("DONE", "Không có nhân viên vào muộn sau nghỉ giữa ca")
         return result
 
     catalog = build_leave_reason_catalog(
@@ -10447,21 +10950,75 @@ def auto_update_midshift_late_from_timesoft(
             result["errors"] += 1
             result["messages"].append(f"{employee}: {msg}")
 
+    _finish_midshift_daily_v92668(
+        "DONE",
+        f"Hoàn tất: đủ điều kiện {result.get('eligible',0)}; thêm {result.get('added',0)}; lỗi {result.get('errors',0)}",
+    )
     return result
 
+def run_auto_penalty_now(
+    tour_df=None, checkin_df=None, raw_punch_df=None, actor="AUTO UPDATE",
+    force_midshift_daily=False,
+):
+    """
+    Chạy Auto Update theo lịch V92.6.69:
+    - 15:00: chạy các Auto Update thông thường; nghỉ giữa ca bị bỏ qua.
+    - 20:00: giữ nguyên các Auto Update thông thường, bao gồm Auto Nghỉ không phép.
+    - 21:00: lượt CHUYÊN nghỉ giữa ca, không chạy lại Tour/Đi trễ/Nghỉ KP/Ca1.
+    - Nút Admin `Chạy Auto Update ngay` dùng force_midshift_daily=True nên vẫn chạy toàn bộ.
+    """
+    now_vn_v92669 = datetime.now(VN_TZ)
+    midshift_only_v92669 = (
+        not bool(force_midshift_daily)
+        and _is_midshift_dedicated_auto_slot_v92669(now_vn_v92669)
+    )
 
-def run_auto_penalty_now(tour_df=None, checkin_df=None, actor="AUTO UPDATE"):
-    """Chạy cả 2 nguồn; dùng cho trang Admin và các lần đồng bộ thủ công."""
+    # Nghỉ giữa ca cần TourVera để đối chiếu FaceID, nên lượt 21:00 vẫn đọc TourVera
+    # nhưng KHÔNG chạy nghiệp vụ phạt Bảng tour lần nữa.
     if tour_df is None:
         try:
             tour_df, _ = load_bang_tour_input()
         except Exception:
             tour_df = pd.DataFrame()
+
+    if midshift_only_v92669:
+        r_midshift = auto_update_midshift_late_from_timesoft(
+            checkin_df,
+            actor=f"{actor} - TIMESOFT NGHỈ GIỮA CA",
+            raw_punch_df=raw_punch_df,
+            tour_df=tour_df,
+            force_daily_run=False,
+        ) if isinstance(checkin_df, pd.DataFrame) else _auto_result("TimeSoft nghỉ giữa ca")
+
+        def _scheduled_skip_v92669(name):
+            r = _auto_result(name)
+            r["skipped"] += 1
+            r["messages"].append(
+                "Lượt 21:00 chuyên kiểm tra nghỉ giữa ca; không chạy lại nghiệp vụ này."
+            )
+            return r
+
+        return {
+            "tour": _scheduled_skip_v92669("Bảng tour"),
+            "timesoft": _scheduled_skip_v92669("TimeSoft"),
+            "midshift": r_midshift,
+            "absence": _scheduled_skip_v92669("TimeSoft nghỉ không phép"),
+            "ca1": _scheduled_skip_v92669("Ca 1"),
+            "schedule_slot": "21:00-midshift-only",
+        }
+
+    # Lượt 15:00 / 20:00 hoặc chạy tay của Admin: giữ nguyên luồng hiện hữu.
+    # Ở 15:00 và 20:00, auto_update_midshift... tự chặn vì chưa phải đúng 21:00.
     r_tour = auto_update_outside_late_from_tour(tour_df, actor=f"{actor} - BẢNG TOUR")
-    r_ts = auto_update_checkin_late_from_timesoft(checkin_df, actor=f"{actor} - TIMESOFT") if isinstance(checkin_df, pd.DataFrame) else _auto_result("TimeSoft")
+    r_ts = auto_update_checkin_late_from_timesoft(
+        checkin_df, actor=f"{actor} - TIMESOFT"
+    ) if isinstance(checkin_df, pd.DataFrame) else _auto_result("TimeSoft")
     r_midshift = auto_update_midshift_late_from_timesoft(
         checkin_df,
         actor=f"{actor} - TIMESOFT NGHỈ GIỮA CA",
+        raw_punch_df=raw_punch_df,
+        tour_df=tour_df,
+        force_daily_run=bool(force_midshift_daily),
     ) if isinstance(checkin_df, pd.DataFrame) else _auto_result("TimeSoft nghỉ giữa ca")
     r_absence = auto_update_absence_without_checkin_from_timesoft(
         checkin_df,
@@ -10475,6 +11032,7 @@ def run_auto_penalty_now(tour_df=None, checkin_df=None, actor="AUTO UPDATE"):
         "midshift": r_midshift,
         "absence": r_absence,
         "ca1": r_ca1,
+        "schedule_slot": "manual-full" if force_midshift_daily else "15:00/20:00-standard",
     }
 
 
@@ -12913,7 +13471,7 @@ def render_bang_tour_fast_v920():
 
 
         # V84.7: mở/làm mới Bảng tour chỉ để xem dữ liệu.
-        # Không tự ghi phạt tại đây; Auto Update tự động chạy theo Scheduler 15:00 và 20:00.
+        # Không tự ghi phạt tại đây; Auto Scheduler chuẩn chạy 15:00, 20:00 và 21:00; lượt 21:00 chuyên nghỉ giữa ca.
 
         # Chỉ Admin/Lễ tân/Quản lý được xem Thống kê Bảng tour.
         if str(st.session_state.current_role).strip().lower() in {"admin", "letan", "quanly"}:
@@ -25317,12 +25875,26 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         )
     else:
         st.success(
-            f"🟢 Auto Update phạt đang HOẠT ĐỘNG. Lịch tự động: 15:00 và 20:00 hằng ngày; ngưỡng từ {AUTO_PENALTY_MINUTES} phút."
+            f"🟢 Auto Update phạt đang HOẠT ĐỘNG. Lịch chuẩn: 15:00, 20:00 và 21:00 hằng ngày; lượt 21:00 chuyên kiểm tra nghỉ giữa ca và tối đa 1 lần/ngày. Ngưỡng từ {AUTO_PENALTY_MINUTES} phút."
         )
     st.caption(
         f"Cập nhật gần nhất: {cfg.get('updated_date','')} {cfg.get('updated_time','')} · "
         f"{cfg.get('updated_by','') or 'Hệ thống'}"
     )
+    _midshift_state_v92668 = _load_midshift_auto_daily_state_v92668()
+    if _midshift_state_v92668.get("run_date"):
+        st.caption(
+            "☕ Nghỉ giữa ca · lần Auto gần nhất: "
+            f"{_midshift_state_v92668.get('run_date')} "
+            f"{_midshift_state_v92668.get('run_time') or ''} · "
+            f"{_midshift_state_v92668.get('status') or 'UNKNOWN'} · "
+            f"{_midshift_state_v92668.get('actor') or 'AUTO UPDATE'}"
+        )
+    else:
+        st.caption(
+            "☕ Nghỉ giữa ca · chưa có lần chạy được ghi nhận · tự động tại lượt Scheduler 21:00 "
+            "và tối đa 1 lần/ngày."
+        )
     if cfg.get('error'):
         st.warning(f"Không đọc được cấu hình Auto Update đầy đủ: {cfg.get('error')}")
 
@@ -25359,25 +25931,39 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
             if isinstance(_snap.get('employee_checkin'), pd.DataFrame):
                 _checkin_now = _snap.get('employee_checkin')
         with st.spinner("Đang kiểm tra Bảng tour và TimeSoft theo ngưỡng 5 phút..."):
+            _raw_faceid_now_v92667 = st.session_state.get(
+                TIMESOFT_RAW_FACEID_SESSION_KEY_V92667
+            )
             _auto_res = run_auto_penalty_now(
-                tour_df=_tour_now, checkin_df=_checkin_now, actor=f"AUTO UPDATE - {st.session_state.current_user}"
+                tour_df=_tour_now,
+                checkin_df=_checkin_now,
+                raw_punch_df=(
+                    _raw_faceid_now_v92667
+                    if isinstance(_raw_faceid_now_v92667, pd.DataFrame)
+                    else None
+                ),
+                actor=f"AUTO UPDATE - {st.session_state.current_user}",
+                force_midshift_daily=True,
             )
         rt = _auto_res['tour']
         rs = _auto_res['timesoft']
+        rm = _auto_res.get('midshift', _auto_result("TimeSoft nghỉ giữa ca"))
         ra = _auto_res.get('absence', _auto_result("TimeSoft nghỉ không phép"))
         rc = _auto_res['ca1']
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Tour đã thêm", rt.get('added',0))
         m2.metric("Đi trễ đã thêm", rs.get('added',0))
-        m3.metric("Nghỉ KP đã thêm", ra.get('added',0))
-        m4.metric("Ca 1 đã thêm", rc.get('added',0))
+        m3.metric("Nghỉ giữa ca", rm.get('added',0))
+        m4.metric("Nghỉ KP đã thêm", ra.get('added',0))
+        m5.metric("Ca 1 đã thêm", rc.get('added',0))
         st.caption(
             f"Điều kiện: Tour {rt.get('eligible',0)} · Đi trễ {rs.get('eligible',0)} · "
-            f"Nghỉ không phép {ra.get('eligible',0)} · Ca1 {rc.get('eligible',0)}"
+            f"Nghỉ giữa ca {rm.get('eligible',0)} · Nghỉ không phép {ra.get('eligible',0)} · Ca1 {rc.get('eligible',0)}"
         )
         all_msgs = (
             (rt.get('messages') or [])
             + (rs.get('messages') or [])
+            + (rm.get('messages') or [])
             + (ra.get('messages') or [])
             + (rc.get('messages') or [])
         )
@@ -25386,7 +25972,7 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
 
     st.markdown("#### Quy tắc V84.7")
     st.write(
-        "• Auto Update tự động chỉ chạy theo Cloud Scheduler lúc **15:00 và 20:00**; mở Bảng tour hoặc lấy TimeSoft thủ công không tự ghi phạt.  \n"
+        "• **Lịch Cloud Scheduler: 15:00 + 20:00 + 21:00 hằng ngày**. Lượt **15:00** chạy Auto ban ngày; lượt **20:00** giữ Auto tối và Auto Nghỉ không phép; lượt **21:00 chuyên kiểm tra nghỉ giữa ca** và tác vụ này chỉ chạy **1 lần/ngày**. Mở Bảng tour hoặc lấy TimeSoft thủ công không tự ghi phạt.  \n"
         "• Ra ngoài vào muộn: chỉ Auto Update khi cột **Vào trễ >= 5 phút**. "
         "Tên như **Cẩm Nhung *** được đối chiếu như **Cẩm Nhung**.  \n"
         "• TimeSoft: check-in được so trực tiếp với giờ bắt đầu ca. **Hỗ trợ Ca 1 2 tiếng = 120 phút; Ca 1 sau 0:0H 3 tiếng = 180 phút; Ca 2 sau 0:0H 1 tiếng = 60 phút**. Chỉ Auto phạt khi vượt mức Hỗ trợ; nếu không có Hỗ trợ thì ngưỡng là **>= 5 phút**.  \n"
@@ -25413,6 +25999,40 @@ elif selected_page == "📦 Snapshot nền hôm nay" and has_feature_access("sna
         if bg_status:
             last_sync = str(bg_status.get("synced_at_vn", "") or bg_status.get("synced_at", ""))
             st.caption(f"Cloud Run Job gần nhất: {last_sync or 'chưa rõ'} · trạng thái {bg_status.get('status', 'unknown')}")
+
+    with st.expander("🧾 FaceID chi tiết TimeSoft · đối chiếu nghỉ giữa ca", expanded=False):
+        st.caption(
+            "SearchElastic hiện chỉ cho bảng tổng hợp (thường là mốc đầu/cuối), nên không đủ "
+            "để thấy lần FaceID giữa ca. Có thể nạp file Excel `lich-su-checkin` xuất từ TimeSoft; "
+            "hệ thống sẽ ghép với Snapshot và TourVera mà không thay đổi dữ liệu nguồn."
+        )
+        _raw_upload_snapshot_v92667 = st.file_uploader(
+            "File Lịch sử checkin TimeSoft (.xlsx)",
+            type=["xlsx"],
+            key="timesoft_raw_faceid_upload_snapshot_v92667",
+        )
+        _rf1_v92667, _rf2_v92667 = st.columns([3, 1])
+        if _raw_upload_snapshot_v92667 is not None:
+            _raw_df_v92667, _raw_msg_v92667 = _read_timesoft_raw_faceid_excel_v92667(
+                _raw_upload_snapshot_v92667
+            )
+            if not _raw_df_v92667.empty:
+                st.session_state[TIMESOFT_RAW_FACEID_SESSION_KEY_V92667] = _raw_df_v92667
+                _rf1_v92667.success(_raw_msg_v92667)
+            else:
+                _rf1_v92667.warning(_raw_msg_v92667)
+        else:
+            _raw_existing_v92667 = st.session_state.get(TIMESOFT_RAW_FACEID_SESSION_KEY_V92667)
+            if isinstance(_raw_existing_v92667, pd.DataFrame) and not _raw_existing_v92667.empty:
+                _rf1_v92667.info(f"Đang dùng {len(_raw_existing_v92667)} lượt FaceID đã nạp trong phiên.")
+        if _rf2_v92667.button(
+            "🧹 Xóa FaceID",
+            use_container_width=True,
+            key="clear_timesoft_raw_faceid_snapshot_v92667",
+        ):
+            st.session_state.pop(TIMESOFT_RAW_FACEID_SESSION_KEY_V92667, None)
+            rerun_current_view()
+
     render_timesoft_snapshot_history_admin()
 
 
@@ -25491,6 +26111,29 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
         if ts_start_date > ts_end_date:
             st.warning("Từ ngày đang lớn hơn Đến ngày. Hệ thống sẽ tự đảo khoảng ngày khi lấy dữ liệu.")
 
+        with st.expander("🧾 Lịch sử FaceID chi tiết · nghỉ giữa ca", expanded=False):
+            st.caption(
+                "Báo cáo chấm công SearchElastic chỉ có dữ liệu tổng hợp. Để tính chính xác nghỉ giữa ca, "
+                "nạp thêm file `lich-su-checkin` xuất từ TimeSoft. File này chỉ dùng để đối chiếu trong phiên."
+            )
+            _raw_upload_sync_v92667 = st.file_uploader(
+                "Nạp Lịch sử checkin (.xlsx)",
+                type=["xlsx"],
+                key="timesoft_raw_faceid_upload_sync_v92667",
+            )
+            if _raw_upload_sync_v92667 is not None:
+                _raw_df_sync_v92667, _raw_msg_sync_v92667 = _read_timesoft_raw_faceid_excel_v92667(
+                    _raw_upload_sync_v92667
+                )
+                if not _raw_df_sync_v92667.empty:
+                    st.session_state[TIMESOFT_RAW_FACEID_SESSION_KEY_V92667] = _raw_df_sync_v92667
+                    st.success(_raw_msg_sync_v92667)
+                else:
+                    st.warning(_raw_msg_sync_v92667)
+            _raw_existing_sync_v92667 = st.session_state.get(TIMESOFT_RAW_FACEID_SESSION_KEY_V92667)
+            if isinstance(_raw_existing_sync_v92667, pd.DataFrame) and not _raw_existing_sync_v92667.empty:
+                st.caption(f"Đang dùng {len(_raw_existing_sync_v92667)} lượt FaceID chi tiết trong phiên hiện tại.")
+
         c_sync1, c_sync2, c_sync3 = st.columns([2.2, 2.2, 1.4])
         with c_sync1:
             ts_sync_now = st.button(
@@ -25528,7 +26171,7 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
                 st.session_state["timesoft_direct_result_v81"] = result_direct
                 st.session_state["timesoft_direct_msg_v81"] = (ok_direct, msg_direct)
                 # V84.7: lấy TimeSoft thủ công CHỈ tải/xem dữ liệu.
-                # Auto Update tự động chỉ do Cloud Scheduler chạy lúc 15:00 và 20:00.
+                # V92.6.69: Cloud Scheduler chạy 15:00 + 20:00 + 21:00; lượt 21:00 chuyên xử lý nghỉ giữa ca đúng 1 lần/ngày.
                 st.session_state.pop("timesoft_auto_penalty_result_v84", None)
 
         direct_msg = st.session_state.get("timesoft_direct_msg_v81")
@@ -25638,7 +26281,8 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
 
         st.caption(
             "API V81: ReportSummaryInvoice/SearchFullText và ReportEmployeeCheckin/SearchElastic. "
-            "Password, Cookie và Authorization không được hiển thị trên giao diện."
+            "SearchElastic là dữ liệu chấm công tổng hợp; nghỉ giữa ca cần FaceID chi tiết hoặc "
+            "đối chiếu TourVera R:V. Password, Cookie và Authorization không hiển thị trên giao diện."
         )
 
     with tab_gsheet:

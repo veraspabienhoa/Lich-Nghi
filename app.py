@@ -1,4 +1,4 @@
-# V92.6.51 - Fix TimeSoft Tip exact B/F/G/I + fix penalty function arguments (2026-08-21)
+# V92.6.52 - Fix toàn bộ lời gọi _period_penalty_by_employee dư tham số (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone

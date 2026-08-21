@@ -1,4 +1,4 @@
-# V92.6.41 - Đổi nhãn nút Xóa lịch nghỉ đã chọn (2026-08-21)
+# V92.6.42 - Fix NameError is_excluded trong thống kê lịch nghỉ (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -26850,7 +26850,9 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             _day_label = str(_stat.get("Ngày", ""))
             _day_obj = _parse_vn_date(_day_label)
             _day_df = daily_filtered_df[daily_filtered_df["Ngày"] == _day_obj].copy() if _day_obj is not None else pd.DataFrame()
-            _day_thuc = _day_df[~_day_df["Lý do nghỉ"].apply(is_excluded)].copy() if not _day_df.empty else pd.DataFrame()
+            # V92.6.42: bỏ bộ lọc legacy is_excluded đã không còn tồn tại.
+            # Dùng toàn bộ dữ liệu ngày rồi phân nhóm CÓ phép/PHÁT SINH/KHÔNG phép ở phía dưới.
+            _day_thuc = _day_df.copy() if not _day_df.empty else pd.DataFrame()
             if not _day_thuc.empty:
                 _rn = _day_thuc["Lý do nghỉ"].astype(str).apply(normalize_login_name)
 

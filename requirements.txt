@@ -10,3 +10,4 @@ xlsxwriter>=3.2,<4
 SQLAlchemy>=2.0,<3
 psycopg[binary]>=3.2,<4
 playwright==1.62.0
+reportlab>=4.0

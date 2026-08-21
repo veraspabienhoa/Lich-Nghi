@@ -525,6 +525,62 @@ def load_dataset(
     return source_loader()
 
 
+
+def record_event(dataset_key: str, event_type: str, detail: str = "") -> None:
+    """Ghi một sự kiện nghiệp vụ/kỹ thuật vào vera_sync_event."""
+    if not is_enabled():
+        return
+    try:
+        with get_engine().begin() as conn:
+            conn.execute(
+                text(
+                    f"INSERT INTO {EVENT_TABLE}(dataset_key,event_type,detail) "
+                    "VALUES (:k,:t,:d)"
+                ),
+                {
+                    "k": str(dataset_key or "")[:300],
+                    "t": str(event_type or "")[:100],
+                    "d": str(detail or "")[:10000],
+                },
+            )
+    except Exception:
+        pass
+
+
+def get_sync_events(
+    dataset_prefix: str = "",
+    start_at=None,
+    end_at=None,
+    limit: int = 5000,
+) -> pd.DataFrame:
+    """Đọc lịch sử sync/event để trang Admin theo dõi hoạt động."""
+    if not is_enabled():
+        return pd.DataFrame(columns=["id", "dataset_key", "event_type", "detail", "created_at"])
+    try:
+        conditions = []
+        params = {"limit": max(1, min(int(limit or 5000), 20000))}
+        if dataset_prefix:
+            conditions.append("dataset_key LIKE :prefix")
+            params["prefix"] = f"{str(dataset_prefix)}%"
+        if start_at is not None:
+            conditions.append("created_at >= :start_at")
+            params["start_at"] = start_at
+        if end_at is not None:
+            conditions.append("created_at < :end_at")
+            params["end_at"] = end_at
+        where_sql = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        sql = (
+            f"SELECT id,dataset_key,event_type,detail,created_at "
+            f"FROM {EVENT_TABLE}{where_sql} "
+            "ORDER BY created_at DESC LIMIT :limit"
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(text(sql), params).mappings().all()
+        return pd.DataFrame([dict(r) for r in rows])
+    except Exception:
+        return pd.DataFrame(columns=["id", "dataset_key", "event_type", "detail", "created_at"])
+
+
 def get_status() -> pd.DataFrame:
     if not is_enabled():
         return pd.DataFrame(columns=["dataset_key", "row_count", "updated_at", "expires_at", "is_fresh"])

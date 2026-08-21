@@ -1,4 +1,4 @@
-# V92.6.46 - Input/Select/Choice viền #1890FF dày 3px Desktop+Mobile (2026-08-21)
+# V92.6.48 - Khoảng thời gian thành ô riêng + fix components.html key (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1755,8 +1755,30 @@ def auto_open_streamlit_date_picker(label_contains, trigger=False):
         """,
         height=0,
         width=0,
-        key=f"auto_open_date_{nonce}",
     )
+
+
+# ==========================================================
+# V92.6.48 - TRẠNG THÁI BỘ LỌC KHOẢNG THỜI GIAN RIÊNG
+# Dropdown chọn nhanh và ô khoảng thời gian hoạt động độc lập.
+# Khi user đổi dropdown -> tắt chế độ khoảng thời gian.
+# Khi user chọn trên calendar khoảng thời gian -> dùng khoảng vừa chọn.
+# ==========================================================
+def _activate_leave_stats_range_v92648():
+    st.session_state["_leave_stats_use_range_v92648"] = True
+
+
+def _deactivate_leave_stats_range_v92648():
+    st.session_state["_leave_stats_use_range_v92648"] = False
+
+
+def _activate_leave_manage_range_v92648():
+    st.session_state["_leave_manage_use_range_v92648"] = True
+
+
+def _deactivate_leave_manage_range_v92648():
+    st.session_state["_leave_manage_use_range_v92648"] = False
+
 
 
 def schedule_key(row):
@@ -11257,9 +11279,9 @@ def _excel_col_letter(idx):
     return out
 
 
-@st.cache_data(ttl=90, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_bang_tour_input():
-    """V92.0: đọc TourVera XLSM; cache nguồn 90 giây, nút Làm mới có thể clear ngay."""
+    """V92.0: đọc TourVera XLSM; cache nguồn 300 giây, nút Làm mới có thể clear ngay."""
     temp_file = f"temp_bangtour_{os.getpid()}_{int(time.time())}.xlsm"
     try:
         download_file_from_google_drive(BANG_TOUR_FILE_ID, temp_file)
@@ -11980,7 +12002,7 @@ def render_bang_tour_fast_v920():
         _tour_countdown_err = df_tour.attrs.get("_tour_countdown_error", "")
         if _tour_countdown_err:
             st.warning(f"⚠️ Countdown Bảng tour: {_tour_countdown_err}")
-        st.caption("⚡ Countdown cập nhật bằng fragment mỗi 30 giây; file TourVera chỉ đọc lại tối đa mỗi 90 giây hoặc khi bấm Làm mới.")
+        st.caption("⚡ Countdown cập nhật bằng fragment mỗi 30 giây; file TourVera chỉ đọc lại tối đa mỗi 300 giây hoặc khi bấm Làm mới.")
 
 
         # V84.7: mở/làm mới Bảng tour chỉ để xem dữ liệu.
@@ -26469,59 +26491,84 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
         today = get_vn_today() 
         col_d1, col_d2 = st.columns(2)
         with col_d1:
-            _prev_leave_filter = st.session_state.get(
-                "_leave_stats_time_filter_prev_v92625", ""
-            )
             filter_type = st.selectbox(
-                "Lọc thời gian:", 
-                ["Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian", "Tuần này", "Tuần trước", "Tuần sau", "Tháng này", "Tháng trước", "Tháng sau"],
-                index=0, filter_mode="contains", key="leave_stats_time_filter"
+                "Lọc thời gian:",
+                [
+                    "Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày",
+                    "Tuần này", "Tuần trước", "Tuần sau",
+                    "Tháng này", "Tháng trước", "Tháng sau",
+                ],
+                index=0,
+                filter_mode="contains",
+                key="leave_stats_time_filter",
+                on_change=_deactivate_leave_stats_range_v92648,
             )
-            _open_leave_range_calendar = (
-                filter_type == "Khoảng thời gian"
-                and _prev_leave_filter != "Khoảng thời gian"
-            )
-            st.session_state["_leave_stats_time_filter_prev_v92625"] = filter_type
+
         with col_d2:
-            if filter_type == "Hôm nay": start_date = end_date = today
-            elif filter_type == "Hôm qua": start_date = end_date = today - timedelta(days=1)
-            elif filter_type == "Ngày mai": start_date = end_date = today + timedelta(days=1)
-            elif filter_type == "Tuần này":
-                start_date = today - timedelta(days=today.weekday())
-                end_date = start_date + timedelta(days=6)
-            elif filter_type == "Tuần trước":
-                start_date = today - timedelta(days=today.weekday() + 7)
-                end_date = start_date + timedelta(days=6)
-            elif filter_type == "Tuần sau":
-                start_date = today - timedelta(days=today.weekday()) + timedelta(days=7)
-                end_date = start_date + timedelta(days=6)
-            elif filter_type == "Tháng này":
-                start_date = today.replace(day=1)
-                end_date = today.replace(day=calendar.monthrange(today.year, today.month)[1])
-            elif filter_type == "Tháng trước":
-                end_date = today.replace(day=1) - timedelta(days=1)
-                start_date = end_date.replace(day=1)
-            elif filter_type == "Tháng sau":
-                start_date = today.replace(year=today.year + 1, month=1, day=1) if today.month == 12 else today.replace(month=today.month + 1, day=1)
-                end_date = start_date.replace(day=calendar.monthrange(start_date.year, start_date.month)[1])
-            elif filter_type == "Chọn ngày":
-                start_date = end_date = st.date_input("Chọn ngày:", today)
-            elif filter_type == "Khoảng thời gian":
-                date_range = st.date_input(
-                    "📅 Chọn khoảng thời gian lọc:",
+            # V92.6.48:
+            # "Khoảng thời gian" không còn nằm trong dropdown.
+            # Đây là ô riêng; click trực tiếp sẽ mở calendar native của Streamlit.
+            if filter_type == "Chọn ngày":
+                _single_stats_date_v92648 = st.date_input(
+                    "📅 Chọn ngày:",
+                    value=today,
+                    key="leave_stats_single_date_v92648",
+                    on_change=_deactivate_leave_stats_range_v92648,
+                )
+                _stats_range_v92648 = None
+            else:
+                _stats_range_v92648 = st.date_input(
+                    "📅 Khoảng thời gian:",
                     value=(today, today),
-                    key="leave_stats_date_range_v92625",
+                    key="leave_stats_date_range_v92648",
+                    on_change=_activate_leave_stats_range_v92648,
                 )
-                start_date, end_date = (
-                    (date_range[0], date_range[1])
-                    if len(date_range) == 2
-                    else (date_range[0], date_range[0])
-                )
-                auto_open_streamlit_date_picker(
-                    "Chọn khoảng thời gian lọc",
-                    trigger=_open_leave_range_calendar,
-                )
-            else: start_date = end_date = today
+
+        _use_stats_range_v92648 = bool(
+            st.session_state.get("_leave_stats_use_range_v92648", False)
+        )
+
+        if _use_stats_range_v92648 and _stats_range_v92648 is not None:
+            if isinstance(_stats_range_v92648, (tuple, list)) and len(_stats_range_v92648) >= 2:
+                start_date, end_date = _stats_range_v92648[0], _stats_range_v92648[1]
+            elif isinstance(_stats_range_v92648, (tuple, list)) and len(_stats_range_v92648) == 1:
+                start_date = end_date = _stats_range_v92648[0]
+            else:
+                start_date = end_date = _stats_range_v92648
+        elif filter_type == "Hôm nay":
+            start_date = end_date = today
+        elif filter_type == "Hôm qua":
+            start_date = end_date = today - timedelta(days=1)
+        elif filter_type == "Ngày mai":
+            start_date = end_date = today + timedelta(days=1)
+        elif filter_type == "Tuần này":
+            start_date = today - timedelta(days=today.weekday())
+            end_date = start_date + timedelta(days=6)
+        elif filter_type == "Tuần trước":
+            start_date = today - timedelta(days=today.weekday() + 7)
+            end_date = start_date + timedelta(days=6)
+        elif filter_type == "Tuần sau":
+            start_date = today - timedelta(days=today.weekday()) + timedelta(days=7)
+            end_date = start_date + timedelta(days=6)
+        elif filter_type == "Tháng này":
+            start_date = today.replace(day=1)
+            end_date = today.replace(day=calendar.monthrange(today.year, today.month)[1])
+        elif filter_type == "Tháng trước":
+            end_date = today.replace(day=1) - timedelta(days=1)
+            start_date = end_date.replace(day=1)
+        elif filter_type == "Tháng sau":
+            start_date = (
+                today.replace(year=today.year + 1, month=1, day=1)
+                if today.month == 12
+                else today.replace(month=today.month + 1, day=1)
+            )
+            end_date = start_date.replace(
+                day=calendar.monthrange(start_date.year, start_date.month)[1]
+            )
+        elif filter_type == "Chọn ngày":
+            start_date = end_date = _single_stats_date_v92648
+        else:
+            start_date = end_date = today
 
     with col_name:
         # V92.6.34:
@@ -27480,55 +27527,84 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
     with mf_date:
         md1, md2 = st.columns(2)
         with md1:
-            _prev_manage_filter = st.session_state.get(
-                "_leave_manage_time_filter_prev_v92625", ""
-            )
             manage_filter_type = st.selectbox(
                 "Lọc thời gian:",
-                ["Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày", "Khoảng thời gian", "Tuần này", "Tuần trước", "Tuần sau", "Tháng này", "Tháng trước", "Tháng sau", "Tất cả"],
-                index=0, key="leave_manage_time_filter", filter_mode="contains"
+                [
+                    "Hôm nay", "Hôm qua", "Ngày mai", "Chọn ngày",
+                    "Tuần này", "Tuần trước", "Tuần sau",
+                    "Tháng này", "Tháng trước", "Tháng sau", "Tất cả",
+                ],
+                index=0,
+                key="leave_manage_time_filter",
+                filter_mode="contains",
+                on_change=_deactivate_leave_manage_range_v92648,
             )
-            _open_manage_range_calendar = (
-                manage_filter_type == "Khoảng thời gian"
-                and _prev_manage_filter != "Khoảng thời gian"
-            )
-            st.session_state["_leave_manage_time_filter_prev_v92625"] = manage_filter_type
+
         with md2:
-            if manage_filter_type == "Hôm nay": manage_start = manage_end = manage_today
-            elif manage_filter_type == "Hôm qua": manage_start = manage_end = manage_today - timedelta(days=1)
-            elif manage_filter_type == "Ngày mai": manage_start = manage_end = manage_today + timedelta(days=1)
-            elif manage_filter_type == "Tuần này":
-                manage_start = manage_today - timedelta(days=manage_today.weekday()); manage_end = manage_start + timedelta(days=6)
-            elif manage_filter_type == "Tuần trước":
-                manage_start = manage_today - timedelta(days=manage_today.weekday() + 7); manage_end = manage_start + timedelta(days=6)
-            elif manage_filter_type == "Tuần sau":
-                manage_start = manage_today - timedelta(days=manage_today.weekday()) + timedelta(days=7); manage_end = manage_start + timedelta(days=6)
-            elif manage_filter_type == "Tháng này":
-                manage_start = manage_today.replace(day=1); manage_end = manage_today.replace(day=calendar.monthrange(manage_today.year, manage_today.month)[1])
-            elif manage_filter_type == "Tháng trước":
-                manage_end = manage_today.replace(day=1) - timedelta(days=1); manage_start = manage_end.replace(day=1)
-            elif manage_filter_type == "Tháng sau":
-                manage_start = manage_today.replace(year=manage_today.year + 1, month=1, day=1) if manage_today.month == 12 else manage_today.replace(month=manage_today.month + 1, day=1)
-                manage_end = manage_start.replace(day=calendar.monthrange(manage_start.year, manage_start.month)[1])
-            elif manage_filter_type == "Chọn ngày":
-                manage_start = manage_end = st.date_input("Chọn ngày:", manage_today, key="leave_manage_single_date")
-            elif manage_filter_type == "Khoảng thời gian":
-                _manage_range = st.date_input(
-                    "📅 Chọn khoảng thời gian lọc quản lý:",
-                    value=(manage_today, manage_today),
-                    key="leave_manage_date_range_v92625",
+            # V92.6.48: ô khoảng thời gian riêng, không nằm trong dropdown.
+            if manage_filter_type == "Chọn ngày":
+                _manage_single_v92648 = st.date_input(
+                    "📅 Chọn ngày:",
+                    value=manage_today,
+                    key="leave_manage_single_date_v92648",
+                    on_change=_deactivate_leave_manage_range_v92648,
                 )
-                manage_start, manage_end = (
-                    (_manage_range[0], _manage_range[1])
-                    if len(_manage_range) == 2
-                    else (_manage_range[0], _manage_range[0])
-                )
-                auto_open_streamlit_date_picker(
-                    "Chọn khoảng thời gian lọc quản lý",
-                    trigger=_open_manage_range_calendar,
-                )
+                _manage_range_v92648 = None
             else:
-                manage_start = manage_end = None
+                _manage_range_v92648 = st.date_input(
+                    "📅 Khoảng thời gian:",
+                    value=(manage_today, manage_today),
+                    key="leave_manage_date_range_v92648",
+                    on_change=_activate_leave_manage_range_v92648,
+                )
+
+        _use_manage_range_v92648 = bool(
+            st.session_state.get("_leave_manage_use_range_v92648", False)
+        )
+
+        if _use_manage_range_v92648 and _manage_range_v92648 is not None:
+            if isinstance(_manage_range_v92648, (tuple, list)) and len(_manage_range_v92648) >= 2:
+                manage_start, manage_end = _manage_range_v92648[0], _manage_range_v92648[1]
+            elif isinstance(_manage_range_v92648, (tuple, list)) and len(_manage_range_v92648) == 1:
+                manage_start = manage_end = _manage_range_v92648[0]
+            else:
+                manage_start = manage_end = _manage_range_v92648
+        elif manage_filter_type == "Hôm nay":
+            manage_start = manage_end = manage_today
+        elif manage_filter_type == "Hôm qua":
+            manage_start = manage_end = manage_today - timedelta(days=1)
+        elif manage_filter_type == "Ngày mai":
+            manage_start = manage_end = manage_today + timedelta(days=1)
+        elif manage_filter_type == "Tuần này":
+            manage_start = manage_today - timedelta(days=manage_today.weekday())
+            manage_end = manage_start + timedelta(days=6)
+        elif manage_filter_type == "Tuần trước":
+            manage_start = manage_today - timedelta(days=manage_today.weekday() + 7)
+            manage_end = manage_start + timedelta(days=6)
+        elif manage_filter_type == "Tuần sau":
+            manage_start = manage_today - timedelta(days=manage_today.weekday()) + timedelta(days=7)
+            manage_end = manage_start + timedelta(days=6)
+        elif manage_filter_type == "Tháng này":
+            manage_start = manage_today.replace(day=1)
+            manage_end = manage_today.replace(
+                day=calendar.monthrange(manage_today.year, manage_today.month)[1]
+            )
+        elif manage_filter_type == "Tháng trước":
+            manage_end = manage_today.replace(day=1) - timedelta(days=1)
+            manage_start = manage_end.replace(day=1)
+        elif manage_filter_type == "Tháng sau":
+            manage_start = (
+                manage_today.replace(year=manage_today.year + 1, month=1, day=1)
+                if manage_today.month == 12
+                else manage_today.replace(month=manage_today.month + 1, day=1)
+            )
+            manage_end = manage_start.replace(
+                day=calendar.monthrange(manage_start.year, manage_start.month)[1]
+            )
+        elif manage_filter_type == "Chọn ngày":
+            manage_start = manage_end = _manage_single_v92648
+        else:
+            manage_start = manage_end = None
 
     df_backup_view = df_backup.copy()
     if st.session_state.current_role in EMPLOYEE_LIKE_ROLES:

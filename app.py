@@ -1,4 +1,4 @@
-# V92.6.44 - Giới hạn lịch tháng hiện tại + tháng kế; khóa quá khứ ngoài Admin (2026-08-21)
+# V92.6.46 - Input/Select/Choice viền #1890FF dày 3px Desktop+Mobile (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1972,6 +1972,28 @@ online_users_list = list(active_users.keys())
 
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="Vera Spa Tam Hiệp Đồng Nai", page_icon="📅", layout="wide", initial_sidebar_state="auto")
+
+
+# ==========================================================
+# V92.6.45 - MÀU NÚT LƯU / GHI DỮ LIỆU
+# Áp dụng cho các nút submit/lưu ghi dữ liệu chính.
+# ==========================================================
+st.markdown(
+    """
+    <style>
+    /* Form submit: Lưu / Ghi dữ liệu */
+    div[data-testid="stFormSubmitButton"] > button,
+    div[data-testid="stFormSubmitButton"] button[kind="primary"],
+    div[data-testid="stFormSubmitButton"] button[kind="secondary"] {
+        background: #1890FF !important;
+        background-color: #1890FF !important;
+        color: #FFFFFF !important;
+        border-color: #1890FF !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ==========================================================
 # V92.6.43 - TẮT TOÀN BỘ TOOLTIP HOVER / POPUP GIẢI THÍCH
@@ -12670,31 +12692,31 @@ UI_THEME_DEFAULT = {
     "input": {
         "desktop": _ui_device_defaults(
             16, 42, 10, 6, 7, "#222222", "#FFFFFF",
-            border_width=2, border_color="#2F80ED", box_shadow="Nhẹ"
+            border_width=3, border_color="#1890FF", box_shadow="Nhẹ"
         ),
         "mobile":  _ui_device_defaults(
             16, 44, 7, 5, 7, "#222222", "#FFFFFF",
-            border_width=2, border_color="#2F80ED", box_shadow="Nhẹ"
+            border_width=3, border_color="#1890FF", box_shadow="Nhẹ"
         ),
     },
     "select": {
         "desktop": _ui_device_defaults(
             16, 42, 10, 6, 7, "#222222", "#FFFFFF",
-            border_width=2, border_color="#2F80ED", box_shadow="Nhẹ"
+            border_width=3, border_color="#1890FF", box_shadow="Nhẹ"
         ),
         "mobile":  _ui_device_defaults(
             16, 44, 7, 5, 7, "#222222", "#FFFFFF",
-            border_width=2, border_color="#2F80ED", box_shadow="Nhẹ"
+            border_width=3, border_color="#1890FF", box_shadow="Nhẹ"
         ),
     },
     "choice_control": {
         "desktop": _ui_device_defaults(
             16, 40, 8, 5, 7, "#222222", "#FFFFFF",
-            border_width=2, border_color="#2F80ED", box_shadow="Không"
+            border_width=3, border_color="#1890FF", box_shadow="Không"
         ),
         "mobile": _ui_device_defaults(
             16, 42, 6, 4, 7, "#222222", "#FFFFFF",
-            border_width=2, border_color="#2F80ED", box_shadow="Không"
+            border_width=3, border_color="#1890FF", box_shadow="Không"
         ),
     },
     "expander": {

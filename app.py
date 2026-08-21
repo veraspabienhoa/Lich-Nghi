@@ -1,4 +1,4 @@
-# V92.6.26 - Rule Engine LoaiNghi A:N động hoàn toàn (2026-08-21)
+# V92.6.27 - Admin luôn hiển thị khu Đăng ký lịch nghỉ phép (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -25221,11 +25221,10 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             ):
                 st.session_state.pop(_reset_key, None)
 
-    _leave_reopen_after_save = bool(st.session_state.pop("_leave_registration_reopen_after_save_v884", False))
-    if is_admin_leave_registration:
-        leave_registration_area = st.expander("➕ Đăng ký lịch nghỉ", expanded=_leave_reopen_after_save)
-    else:
-        leave_registration_area = st.container()
+    # V92.6.27: khu Đăng ký lịch nghỉ luôn hiển thị với mọi tài khoản,
+    # bao gồm Admin. Không dùng expander/collapse riêng cho Admin nữa.
+    st.session_state.pop("_leave_registration_reopen_after_save_v884", None)
+    leave_registration_area = st.container()
 
     with leave_registration_area:
         _leave_flash = st.session_state.pop("_leave_registration_flash_v884", "")
@@ -25847,8 +25846,6 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                                         )
                                         st.session_state["_leave_registration_flash_notes_v884"] = _flash_notes
                                         st.session_state["_leave_registration_reset_pending_v884"] = True
-                                        if is_admin_leave_registration:
-                                            st.session_state["_leave_registration_reopen_after_save_v884"] = True
                                         _clear_leave_data_caches()
                                         rerun_current_view()
 

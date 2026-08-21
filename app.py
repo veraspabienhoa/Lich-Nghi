@@ -1,4 +1,4 @@
-# V92.6.56 - Fix timezone Excel cho toàn bộ sheet Snapshot TimeSoft (2026-08-21)
+# V92.6.59 - Màu dropdown Lý do nghỉ: Có phép xanh, Không phép đỏ, còn lại vàng (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1030,39 +1030,148 @@ def _excel_safe_dataframe_v92654(df):
     return out
 
 
-def _timesoft_history_export_workbook(summary_df, invoice_df, checkin_df, events_df, storage_df, start_date, end_date):
-    """Export toàn bộ lịch sử đã lọc ra một file Excel."""
+
+SNAPSHOT_RANGE_PRESETS_V92657 = [
+    "Hôm nay",
+    "Hôm qua",
+    "7 ngày trước",
+    "14 ngày trước",
+    "Tháng này",
+    "Tháng trước",
+    "Năm nay",
+    "Năm trước",
+    "Tùy chỉnh",
+]
+
+
+def _snapshot_preset_range_v92657(preset, today):
+    """Trả về khoảng ngày theo bộ lọc nhanh Snapshot."""
+    preset = str(preset or "").strip()
+    if preset == "Hôm nay":
+        return today, today
+    if preset == "Hôm qua":
+        d = today - timedelta(days=1)
+        return d, d
+    if preset == "7 ngày trước":
+        return today - timedelta(days=6), today
+    if preset == "14 ngày trước":
+        return today - timedelta(days=13), today
+    if preset == "Tháng này":
+        return today.replace(day=1), today
+    if preset == "Tháng trước":
+        prev_end = today.replace(day=1) - timedelta(days=1)
+        return prev_end.replace(day=1), prev_end
+    if preset == "Năm nay":
+        return date(today.year, 1, 1), today
+    if preset == "Năm trước":
+        return date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
+    return None, None
+
+
+def _snapshot_custom_range_changed_v92657():
+    """Khi user chỉnh calendar, chuyển preset sang Tùy chỉnh ở lượt rerun kế tiếp."""
+    try:
+        st.session_state["snapshot_history_preset_v92657"] = "Tùy chỉnh"
+    except Exception:
+        pass
+
+
+def _style_snapshot_excel_v92657(writer):
+    """
+    Format workbook Snapshot:
+    - dòng tiêu đề nền #1890FF, chữ trắng đậm;
+    - AutoFilter;
+    - cố định dòng tiêu đề;
+    - fit độ rộng cột.
+    """
+    try:
+        from openpyxl.styles import PatternFill, Font, Alignment
+        from openpyxl.utils import get_column_letter
+    except Exception:
+        return
+
+    header_fill = PatternFill(fill_type="solid", fgColor="1890FF")
+    header_font = Font(color="FFFFFF", bold=True)
+    header_alignment = Alignment(horizontal="center", vertical="center")
+
+    for ws in writer.book.worksheets:
+        if ws.max_row < 1 or ws.max_column < 1:
+            continue
+
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+
+        for col_idx in range(1, ws.max_column + 1):
+            max_len = 0
+            for row_idx in range(1, ws.max_row + 1):
+                value = ws.cell(row=row_idx, column=col_idx).value
+                if value is None:
+                    continue
+                display = str(value)
+                if "\n" in display:
+                    display = max(display.splitlines(), key=len, default="")
+                max_len = max(max_len, len(display))
+
+            width = min(max(max_len + 2, 10), 45)
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+
+def _timesoft_history_export_workbook(summary_df, checkin_df, start_date, end_date):
+    """
+    V92.6.57 - Export Snapshot chỉ giữ 3 sheet:
+    ThongTin, TongHopNgay, ChamCong.
+    """
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         info = pd.DataFrame([
             {"Thông tin": "Từ ngày", "Giá trị": start_date.strftime("%d/%m/%Y")},
             {"Thông tin": "Đến ngày", "Giá trị": end_date.strftime("%d/%m/%Y")},
             {"Thông tin": "Ngày export", "Giá trị": datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S")},
-            {"Thông tin": "Số ngày có snapshot", "Giá trị": len(summary_df) if isinstance(summary_df, pd.DataFrame) else 0},
-            {"Thông tin": "Dòng doanh thu", "Giá trị": len(invoice_df) if isinstance(invoice_df, pd.DataFrame) else 0},
-            {"Thông tin": "Dòng chấm công", "Giá trị": len(checkin_df) if isinstance(checkin_df, pd.DataFrame) else 0},
+            {
+                "Thông tin": "Số ngày có snapshot",
+                "Giá trị": len(summary_df) if isinstance(summary_df, pd.DataFrame) else 0,
+            },
+            {
+                "Thông tin": "Dòng chấm công",
+                "Giá trị": len(checkin_df) if isinstance(checkin_df, pd.DataFrame) else 0,
+            },
         ])
-        _excel_safe_dataframe_v92654(info).to_excel(writer, index=False, sheet_name="ThongTin")
-        _excel_safe_dataframe_v92654(summary_df if isinstance(summary_df, pd.DataFrame) else pd.DataFrame()).to_excel(
+
+        _excel_safe_dataframe_v92654(info).to_excel(
+            writer, index=False, sheet_name="ThongTin"
+        )
+
+        _excel_safe_dataframe_v92654(
+            summary_df if isinstance(summary_df, pd.DataFrame) else pd.DataFrame()
+        ).to_excel(
             writer, index=False, sheet_name="TongHopNgay"
         )
-        _excel_safe_dataframe_v92654(
-            invoice_df if isinstance(invoice_df, pd.DataFrame) else pd.DataFrame()
-        ).to_excel(writer, index=False, sheet_name="DoanhThu")
-        chk_export = _timesoft_checkin_display_df(checkin_df) if isinstance(checkin_df, pd.DataFrame) else pd.DataFrame()
-        # Nếu hàm display bỏ cột Ngày snapshot, giữ bản raw khi cần.
-        if isinstance(checkin_df, pd.DataFrame) and "Ngày snapshot" in checkin_df.columns and "Ngày snapshot" not in chk_export.columns:
+
+        chk_export = (
+            _timesoft_checkin_display_df(checkin_df)
+            if isinstance(checkin_df, pd.DataFrame)
+            else pd.DataFrame()
+        )
+        if (
+            isinstance(checkin_df, pd.DataFrame)
+            and "Ngày snapshot" in checkin_df.columns
+            and "Ngày snapshot" not in chk_export.columns
+        ):
             chk_export.insert(0, "Ngày snapshot", checkin_df["Ngày snapshot"].values)
+
         _excel_safe_dataframe_v92654(chk_export).to_excel(
             writer, index=False, sheet_name="ChamCong"
         )
-        _excel_safe_dataframe_v92654(events_df if isinstance(events_df, pd.DataFrame) else pd.DataFrame()).to_excel(
-            writer, index=False, sheet_name="LichSuHoatDong"
-        )
-        _excel_safe_dataframe_v92654(
-            storage_df if isinstance(storage_df, pd.DataFrame) else pd.DataFrame()
-        ).to_excel(writer, index=False, sheet_name="DataLuuTru")
+
+        _style_snapshot_excel_v92657(writer)
+
     return output.getvalue()
+
 
 
 def render_timesoft_snapshot_history_admin():
@@ -1088,44 +1197,59 @@ def render_timesoft_snapshot_history_admin():
         latest = today
 
     st.markdown("### 🔎 Bộ lọc thời gian")
-    q1, q2, q3, q4 = st.columns(4)
-    if q1.button("Hôm nay", use_container_width=True, key="snap_range_today"):
-        st.session_state["snapshot_history_start"] = today
-        st.session_state["snapshot_history_end"] = today
-        rerun_current_view()
-    if q2.button("7 ngày", use_container_width=True, key="snap_range_7d"):
-        st.session_state["snapshot_history_start"] = max(earliest, today - timedelta(days=6))
-        st.session_state["snapshot_history_end"] = today
-        rerun_current_view()
-    if q3.button("30 ngày", use_container_width=True, key="snap_range_30d"):
-        st.session_state["snapshot_history_start"] = max(earliest, today - timedelta(days=29))
-        st.session_state["snapshot_history_end"] = today
-        rerun_current_view()
-    if q4.button("Tất cả dữ liệu", use_container_width=True, key="snap_range_all"):
-        st.session_state["snapshot_history_start"] = earliest
-        st.session_state["snapshot_history_end"] = latest
-        rerun_current_view()
 
-    default_start = st.session_state.get("snapshot_history_start", max(earliest, today - timedelta(days=6)))
-    default_end = st.session_state.get("snapshot_history_end", latest if available_dates else today)
+    if "snapshot_history_preset_v92657" not in st.session_state:
+        st.session_state["snapshot_history_preset_v92657"] = "7 ngày trước"
 
-    c1, c2 = st.columns(2)
-    start_date = c1.date_input(
-        "Từ ngày",
-        value=default_start,
-        min_value=min(earliest, default_start),
-        max_value=today,
-        format="DD/MM/YYYY",
-        key="snapshot_history_start_input",
+    preset_col, calendar_col = st.columns([1.15, 3.85])
+
+    with preset_col:
+        snapshot_preset = st.radio(
+            "Chọn nhanh",
+            SNAPSHOT_RANGE_PRESETS_V92657,
+            key="snapshot_history_preset_v92657",
+        )
+
+    preset_start, preset_end = _snapshot_preset_range_v92657(snapshot_preset, today)
+
+    # Khi đổi preset, cập nhật lại khoảng ngày đang hiển thị.
+    last_preset = st.session_state.get("_snapshot_history_last_preset_v92657")
+    if snapshot_preset != "Tùy chỉnh" and last_preset != snapshot_preset:
+        st.session_state["snapshot_history_range_v92657"] = (preset_start, preset_end)
+        st.session_state["_snapshot_history_last_preset_v92657"] = snapshot_preset
+
+    default_range_v92657 = st.session_state.get(
+        "snapshot_history_range_v92657",
+        (
+            max(earliest, today - timedelta(days=6)),
+            latest if available_dates else today,
+        ),
     )
-    end_date = c2.date_input(
-        "Đến ngày",
-        value=default_end,
-        min_value=min(earliest, default_start),
-        max_value=today,
-        format="DD/MM/YYYY",
-        key="snapshot_history_end_input",
-    )
+
+    with calendar_col:
+        selected_range = st.date_input(
+            "📅 Khoảng thời gian",
+            value=default_range_v92657,
+            min_value=today - timedelta(days=3650),
+            max_value=today,
+            format="DD/MM/YYYY",
+            key="snapshot_history_range_v92657",
+            on_change=_snapshot_custom_range_changed_v92657,
+        )
+
+    if isinstance(selected_range, (tuple, list)):
+        if len(selected_range) >= 2:
+            start_date, end_date = selected_range[0], selected_range[1]
+        elif len(selected_range) == 1:
+            start_date = end_date = selected_range[0]
+        else:
+            start_date = end_date = today
+    else:
+        start_date = end_date = selected_range or today
+
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
     st.session_state["snapshot_history_start"] = start_date
     st.session_state["snapshot_history_end"] = end_date
 
@@ -1137,31 +1261,28 @@ def render_timesoft_snapshot_history_admin():
         st.warning("Khoảng lọc tối đa là 10 năm.")
         return
 
-    available, summary_df, invoice_df, checkin_df = _timesoft_collect_snapshot_history(start_date, end_date)
-    events_df = _timesoft_snapshot_events(start_date, end_date, limit=10000)
-    storage_df = _timesoft_snapshot_storage_status_df()
+    available, summary_df, _invoice_df_unused, checkin_df = _timesoft_collect_snapshot_history(
+        start_date, end_date
+    )
 
-    # Chỉ giữ dataset có ngày snapshot trong khoảng; status/today không có date vẫn cho xem ở tab lưu trữ.
-    storage_range = storage_df.copy()
-    if not storage_range.empty and "snapshot_date" in storage_range.columns:
-        dated = storage_range["snapshot_date"].notna()
-        date_values = pd.to_datetime(storage_range["snapshot_date"], errors="coerce").dt.date
-        in_range = dated & date_values.ge(start_date) & date_values.le(end_date)
-        undated = ~dated
-        storage_range = storage_range[in_range | undated].copy()
-
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3 = st.columns(3)
     m1.metric("Ngày có snapshot", len(available))
-    m2.metric("Dòng doanh thu", len(invoice_df))
-    m3.metric("Dòng chấm công", len(checkin_df))
-    m4.metric("Sự kiện hệ thống", len(events_df))
+    m2.metric("Dòng chấm công", len(checkin_df))
 
-    if not summary_df.empty:
-        total_actual = float(pd.to_numeric(summary_df["Doanh thu thực"], errors="coerce").fillna(0).sum())
-        st.metric("Tổng doanh thu thực trong khoảng", f"{total_actual:,.0f} đ".replace(",", "."))
+    if not summary_df.empty and "Doanh thu thực" in summary_df.columns:
+        total_actual = float(
+            pd.to_numeric(summary_df["Doanh thu thực"], errors="coerce").fillna(0).sum()
+        )
+    else:
+        total_actual = 0.0
+
+    m3.metric(
+        "Tổng doanh thu thực",
+        f"{total_actual:,.0f} đ".replace(",", "."),
+    )
 
     export_bytes = _timesoft_history_export_workbook(
-        summary_df, invoice_df, checkin_df, events_df, storage_range, start_date, end_date
+        summary_df, checkin_df, start_date, end_date
     )
     st.download_button(
         "📥 Export lịch sử Snapshot · Excel",
@@ -1173,12 +1294,9 @@ def render_timesoft_snapshot_history_admin():
         key="export_snapshot_history_xlsx",
     )
 
-    tab_summary, tab_inv, tab_chk, tab_event, tab_store = st.tabs([
+    tab_summary, tab_chk = st.tabs([
         "📊 Tổng hợp theo ngày",
-        "💰 Doanh thu",
         "🕒 Chấm công",
-        "🧾 Lịch sử hoạt động",
-        "🗄️ Data lưu trữ",
     ])
 
     with tab_summary:
@@ -1191,12 +1309,6 @@ def render_timesoft_snapshot_history_admin():
                     lambda x: f"{float(x):,.0f} đ".replace(",", ".")
                 )
             st.dataframe(view, hide_index=True, width="stretch", height=420)
-
-    with tab_inv:
-        if invoice_df.empty:
-            st.info("Không có dữ liệu doanh thu trong khoảng đã chọn.")
-        else:
-            st.dataframe(invoice_df, hide_index=True, width="stretch", height=520)
 
     with tab_chk:
         if checkin_df.empty:
@@ -1226,35 +1338,6 @@ def render_timesoft_snapshot_history_admin():
                     chk_view = chk_view[chk_view[employee_col].astype(str).eq(selected_employee)].copy()
             st.dataframe(chk_view, hide_index=True, width="stretch", height=520)
 
-    with tab_event:
-        if events_df.empty:
-            if callable(getattr(vpg, "get_sync_events", None)):
-                st.info("Chưa có sự kiện đồng bộ trong khoảng đã chọn.")
-            else:
-                st.warning(
-                    "vera_postgres.py hiện tại chưa có API đọc lịch sử sự kiện. "
-                    "Hãy triển khai file vera_postgres.py mới đi kèm bản này để xem đầy đủ lịch sử."
-                )
-        else:
-            ev = events_df.copy()
-            if "created_at" in ev.columns:
-                ev = ev.sort_values("created_at", ascending=False)
-            st.dataframe(ev, hide_index=True, width="stretch", height=520)
-
-    with tab_store:
-        st.caption(
-            "Mỗi ngày có 3 dataset lịch sử: tổng doanh thu, chi tiết doanh thu và chấm công. "
-            "Dataset có trạng thái stale vẫn có thể đọc vì trang lịch sử dùng allow_stale=True."
-        )
-        if storage_range.empty:
-            st.info("Chưa có dataset TimeSoft được lưu trong PostgreSQL.")
-        else:
-            show_cols = [
-                c for c in [
-                    "dataset_key", "row_count", "updated_at", "expires_at", "is_fresh", "snapshot_date"
-                ] if c in storage_range.columns
-            ]
-            st.dataframe(storage_range[show_cols], hide_index=True, width="stretch", height=520)
 
 
 def render_timesoft_background_snapshot_today(show_status=True):
@@ -7921,56 +8004,156 @@ def _daily_leave_group(reason, reason_type_map=None):
     return ""
 
 
-def render_leave_reason_selectbox_color(selected_reason, reason_type_map=None, marker_id="vera-leave-reason-selectbox"):
+def render_leave_reason_selectbox_color(selected_reason, reason_type_map=None):
     """
-    Tô màu ô selectbox 'Lý do nghỉ' theo nhóm:
-    - CÓ phép     -> xanh
-    - KHÔNG phép  -> đỏ
-    - còn lại     -> vàng
-    Chỉ áp dụng cho phần hiển thị giá trị đang chọn của selectbox.
+    V92.6.59 - Màu dropdown Lý do nghỉ:
+    - KHÔNG phép: đỏ (giữ nguyên)
+    - Có chữ CÓ phép: xanh
+    - Còn lại: vàng
+
+    Áp dụng cho cả giá trị đang chọn và từng option trong popover.
     """
+    reason_type_map = reason_type_map if isinstance(reason_type_map, dict) else {}
+
     selected_text = str(selected_reason or "").strip()
-    if not selected_text or selected_text == "-- Chọn lý do nghỉ --":
-        group = "other"
-    else:
-        raw_group = _daily_leave_group(selected_text, reason_type_map=reason_type_map)
-        if raw_group == "co_phep":
-            group = "co_phep"
-        elif raw_group == "khong_phep":
-            group = "khong_phep"
-        else:
-            group = "other"
+    selected_norm = normalize_login_name(selected_text)
 
-    palette = {
-        "co_phep": {"bg": "#E8F5E9", "border": "#2E7D32", "text": "#1B5E20"},
-        "khong_phep": {"bg": "#FDECEC", "border": "#D32F2F", "text": "#8B1E1E"},
-        "other": {"bg": "#FFF8E1", "border": "#E6B800", "text": "#6B5A00"},
+    def _reason_color_class_v92659(label):
+        label_norm = normalize_login_name(label)
+
+        # Đỏ ưu tiên cao nhất để giữ nguyên nhóm KHÔNG phép.
+        if "khong phep" in label_norm:
+            return "vera-leave-reason-red"
+
+        # Bất kỳ lý do nào có chữ CÓ phép -> xanh.
+        if "co phep" in label_norm:
+            return "vera-leave-reason-green"
+
+        # Còn lại -> vàng.
+        return "vera-leave-reason-yellow"
+
+    selected_class = _reason_color_class_v92659(selected_text)
+
+    # Màu nền/chữ dùng mã cố định để hiển thị rõ trên mobile và desktop.
+    color_css = """
+    <style>
+    /* Giá trị đang chọn */
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div.vera-leave-reason-green,
+    .vera-leave-reason-green {
+        background-color: #D9F7BE !important;
+        color: #135200 !important;
     }
-    c = palette[group]
 
-    st.markdown(
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div.vera-leave-reason-yellow,
+    .vera-leave-reason-yellow {
+        background-color: #FFF1B8 !important;
+        color: #614700 !important;
+    }
+
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div.vera-leave-reason-red,
+    .vera-leave-reason-red {
+        background-color: #FFD6D6 !important;
+        color: #A8071A !important;
+    }
+    </style>
+    """
+    st.markdown(color_css, unsafe_allow_html=True)
+
+    # JS gắn màu động cho option trong dropdown và ô đang chọn.
+    selected_json = json.dumps(selected_text, ensure_ascii=False)
+    selected_class_json = json.dumps(selected_class)
+
+    components.html(
         f"""
-        <style>
-        div[data-testid="stVerticalBlock"]:has(#{marker_id}) div[data-testid="stSelectbox"] [data-baseweb="select"] > div {{
-            background: {c['bg']} !important;
-            border: 2px solid {c['border']} !important;
-            border-radius: 12px !important;
-            box-shadow: none !important;
-        }}
-        div[data-testid="stVerticalBlock"]:has(#{marker_id}) div[data-testid="stSelectbox"] [data-baseweb="select"] * {{
-            color: {c['text']} !important;
-            font-weight: 700 !important;
-        }}
-        div[data-testid="stVerticalBlock"]:has(#{marker_id}) div[data-testid="stSelectbox"] svg {{
-            fill: {c['text']} !important;
-        }}
-        </style>
+        <script>
+        (function() {{
+            try {{
+                const D = window.parent.document;
+                const selectedText = {selected_json};
+                const selectedClass = {selected_class_json};
+
+                function norm(s) {{
+                    return (s || '')
+                        .normalize('NFD')
+                        .replace(/[\\u0300-\\u036f]/g, '')
+                        .replace(/đ/g, 'd')
+                        .replace(/Đ/g, 'D')
+                        .toLowerCase()
+                        .trim();
+                }}
+
+                function clsFor(txt) {{
+                    const n = norm(txt);
+                    if (n.includes('khong phep')) return 'vera-leave-reason-red';
+                    if (n.includes('co phep')) return 'vera-leave-reason-green';
+                    return 'vera-leave-reason-yellow';
+                }}
+
+                function applyOptionColors() {{
+                    // Options trong dropdown/popover.
+                    const options = Array.from(
+                        D.querySelectorAll('[role="option"], li[role="option"]')
+                    );
+                    for (const opt of options) {{
+                        const txt = (opt.innerText || '').trim();
+                        if (!txt) continue;
+
+                        opt.classList.remove(
+                            'vera-leave-reason-red',
+                            'vera-leave-reason-green',
+                            'vera-leave-reason-yellow'
+                        );
+
+                        // Placeholder không tô màu.
+                        if (txt.includes('-- Chọn lý do nghỉ --')) continue;
+
+                        opt.classList.add(clsFor(txt));
+                    }}
+
+                    // Ô selectbox Lý do nghỉ đang chọn.
+                    const marker = D.querySelector('#vera-leave-reason-selectbox');
+                    if (marker) {{
+                        let host = marker.parentElement;
+                        let selectWrap = null;
+                        for (let i = 0; i < 8 && host; i++, host = host.parentElement) {{
+                            selectWrap = host.querySelector('[data-testid="stSelectbox"] [data-baseweb="select"] > div');
+                            if (selectWrap) break;
+                        }}
+                        if (selectWrap) {{
+                            selectWrap.classList.remove(
+                                'vera-leave-reason-red',
+                                'vera-leave-reason-green',
+                                'vera-leave-reason-yellow'
+                            );
+                            if (selectedText && !selectedText.includes('-- Chọn lý do nghỉ --')) {{
+                                selectWrap.classList.add(selectedClass);
+                            }}
+                        }}
+                    }}
+                }}
+
+                applyOptionColors();
+
+                if (!window.parent.__veraLeaveReasonColorObserverV92659) {{
+                    const ob = new MutationObserver(function() {{
+                        setTimeout(applyOptionColors, 20);
+                    }});
+                    ob.observe(D.body, {{childList:true, subtree:true}});
+                    window.parent.__veraLeaveReasonColorObserverV92659 = ob;
+                }}
+
+                setTimeout(applyOptionColors, 100);
+                setTimeout(applyOptionColors, 350);
+            }} catch(e) {{}}
+        }})();
+        </script>
         """,
-        unsafe_allow_html=True,
+        height=0,
+        width=0,
     )
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+
 def load_leave_daily_quota_config():
     """
     Đọc sheet Config của file lịch nghỉ:
@@ -27063,6 +27246,14 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 min-width:980px;
                 width:100%;
             }
+
+        /* V92.6.58: căn giữa toàn bộ cột Tổng nghỉ (cột thứ 3) */
+        .vera-daily-summary-table th:nth-child(3),
+        .vera-daily-summary-table td:nth-child(3) {
+            text-align: center !important;
+            vertical-align: middle !important;
+        }
+
             .vera-daily-summary-table th{
                 text-align:left;
                 font-weight:700;

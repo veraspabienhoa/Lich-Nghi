@@ -1,4 +1,4 @@
-# V92.6.60 - Sửa Lý do nghỉ theo đúng cột G LoaiNghi + tăng khoảng đệm giao diện lịch nghỉ (2026-08-22)
+# V92.6.61 - Ẩn ngoại lệ/hủy trên web + reset Lý do nghỉ + cho đổi CÓ/KHÔNG phép cùng ngày (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -8755,27 +8755,22 @@ def _parse_leave_policy_rule(rule_type, rule_value="", rule_kind="register"):
 
 
 def leave_notice_policy_text(reason):
+    """
+    V92.6.61 - Nội dung policy HIỂN THỊ trên web chỉ nêu điều kiện đăng ký.
+
+    Các cột K/N (ngoại lệ) và L/M/N (quy tắc hủy) vẫn được Rule Engine dùng đầy đủ
+    khi kiểm tra nghiệp vụ, nhưng không hiển thị ra giao diện Đăng ký lịch nghỉ.
+    """
     item = _leave_notice_policy_item(reason)
     if not item:
         return ""
 
-    def _fmt(kind):
-        if kind == "register":
-            typ = item.get("register_type", "") or "(chưa cấu hình)"
-            val = item.get("register_value", "")
-            exc = item.get("register_exceptions", "")
-        else:
-            typ = item.get("cancel_type", "") or "(chưa cấu hình)"
-            val = item.get("cancel_value", "")
-            exc = item.get("cancel_exceptions", "")
-        out = typ
-        if val:
-            out += f" · {val}"
-        if exc:
-            out += f" · ngoại lệ: {exc}"
-        return out
-
-    return f"Đăng ký: **{_fmt('register')}** · Hủy: **{_fmt('cancel')}**"
+    typ = item.get("register_type", "") or "(chưa cấu hình)"
+    val = item.get("register_value", "")
+    out = typ
+    if val:
+        out += f" · {val}"
+    return f"Đăng ký: **{out}**"
 
 
 def _leave_allowed_role_tokens(raw_value):
@@ -10674,7 +10669,8 @@ def validate_employee_leave_change_permission(
     - chỉ thao tác lịch của chính mình;
     - rule HỦY/SỬA bản ghi cũ lấy từ LoaiNghi!L/M/N theo đúng Lý do nghỉ;
     - khi sửa sang ngày/lý do mới, rule ĐĂNG KÝ mới lấy từ LoaiNghi!I/J/K;
-    - vẫn giữ các giới hạn nghiệp vụ về nhóm lý do và ownership.
+    - V92.6.61: cho phép đổi CÓ phép <-> KHÔNG phép nếu vẫn giữ NGUYÊN ngày;
+      lý do mới vẫn phải đạt điều kiện Trước N ngày / giờ / role / thứ và các rule khác.
     """
     today = today or get_vn_today()
     actor = normalize_login_name(current_user or st.session_state.get("current_user", ""))
@@ -10723,7 +10719,18 @@ def validate_employee_leave_change_permission(
     new_is_khong_phep = is_employee_khong_phep_leave_reason(new_reason)
     new_is_co_phep = is_employee_co_phep_leave_reason(new_reason)
 
-    # Giữ nguyên giới hạn chuyển nhóm nghiệp vụ hiện hành.
+    # V92.6.61 - Cho phép đổi CÓ phép <-> KHÔNG phép nhưng CHỈ khi giữ nguyên ngày.
+    # Đây là sửa lý do của bản ghi đã đăng ký, không phải chuyển lịch sang ngày khác.
+    # Rule của bản ghi cũ (HỦY/SỬA) đã kiểm ở trên; rule của lý do mới (ĐĂNG KÝ I/J/K)
+    # vẫn được kiểm ngay phía dưới, nên điều kiện Trước N ngày và các quy định khác vẫn giữ nguyên.
+    _cross_co_khong_phep_same_day_v92661 = (
+        new_date == old_date
+        and (
+            (old_is_khong_phep and new_is_co_phep)
+            or (old_is_co_phep and new_is_khong_phep)
+        )
+    )
+
     if old_is_leader_policy:
         if not (
             is_leader_policy_leave_reason(new_reason)
@@ -10734,16 +10741,16 @@ def validate_employee_leave_change_permission(
                 "hoặc Nghỉ phép quay video."
             )
     elif old_is_khong_phep:
-        if not (new_is_khong_phep or new_is_video):
+        if not (new_is_khong_phep or new_is_video or _cross_co_khong_phep_same_day_v92661):
             return False, (
-                "Lịch Nghỉ KHÔNG phép chỉ được sửa sang một Lý do nghỉ KHÔNG phép khác "
-                "hoặc Nghỉ phép quay video."
+                "Lịch Nghỉ KHÔNG phép chỉ được đổi sang CÓ phép khi giữ nguyên ngày "
+                "và lý do mới đáp ứng đầy đủ quy định đăng ký."
             )
     elif old_is_co_phep:
-        if not (new_is_co_phep or new_is_video):
+        if not (new_is_co_phep or new_is_video or _cross_co_khong_phep_same_day_v92661):
             return False, (
-                "Lịch Nghỉ CÓ phép chỉ được thay đổi giữa các Loại nghỉ CÓ phép "
-                "hoặc Nghỉ phép quay video."
+                "Lịch Nghỉ CÓ phép chỉ được đổi sang KHÔNG phép khi giữ nguyên ngày "
+                "và lý do mới đáp ứng đầy đủ quy định đăng ký."
             )
     elif not old_is_video:
         return False, "Lý do hiện tại không thuộc nhóm Nhân viên/Leader được phép sửa."
@@ -26530,12 +26537,15 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
     _can_leave_detail_delete = action_access("leave_detail_delete")
     is_admin_leave_registration = str(st.session_state.get("current_role", "")).strip().lower() == "admin"
 
-    # V88.4: reset toàn bộ widget đăng ký về mặc định ở lượt chạy SAU khi lưu thành công.
+    # V92.6.61: sau khi lưu thành công phải reset form; đặc biệt Lý do nghỉ luôn
+    # quay về option mặc định "-- Chọn lý do nghỉ --" ở lượt rerun kế tiếp.
     _leave_reset_pending = bool(st.session_state.pop("_leave_registration_reset_pending_v884", False))
     if _leave_reset_pending:
+        # Xóa state selectbox trước khi widget được tạo lại => Streamlit chọn index 0 mặc định.
+        st.session_state.pop("sb_loai_nghi_live", None)
         for _reset_key in [
             "sb_chosen_date", "sb_chosen_date_v92633_single",
-            "sb_chosen_nv", "sb_loai_nghi_live",
+            "sb_chosen_nv",
             "leave_reg_detail_input_v884",
         ]:
             st.session_state.pop(_reset_key, None)
@@ -27004,9 +27014,9 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                             _clear_leave_data_caches()
                             rerun_current_view()
 
-    # V92.6.60: khoảng đệm giữa nút Ghi lịch nghỉ và khối lọc thống kê.
-    # Chỉ tạo khoảng trắng, không thêm divider để giao diện nhẹ và dễ nhìn trên mobile.
-    st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+    # V92.6.61: tăng khoảng đệm giữa phần Đăng ký lịch nghỉ và phần lọc thống kê.
+    # Không thêm divider; chỉ tạo khoảng trắng để hai khu vực tách biệt rõ trên web/mobile.
+    st.markdown("<div style='height:48px'></div>", unsafe_allow_html=True)
 
     # V86.20: bỏ divider ở đây để tiết kiệm chiều cao hiển thị trên điện thoại.
     # Bộ lọc được đặt sát ngay dưới khối Đăng ký lịch nghỉ.

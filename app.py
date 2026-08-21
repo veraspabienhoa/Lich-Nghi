@@ -1,4 +1,4 @@
-# V92.6.17 - Ổn định tải tài khoản + Phân ca hỗ trợ copy/paste nhiều ô và clear dòng chọn (2026-08-21)
+# V92.6.18 - Snapshot nền: lọc thời gian + lịch sử hoạt động + data lưu trữ + Export Excel (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -872,6 +872,342 @@ def _timesoft_checkin_display_df(df):
         "TotalCheckInOneDay": "Số lần check-in",
     }
     return out.rename(columns=rename)
+
+
+
+def _timesoft_snapshot_storage_status_df():
+    """Danh sách dataset TimeSoft đang có trong PostgreSQL."""
+    if vpg is None or not _vpg_is_enabled():
+        return pd.DataFrame()
+    try:
+        df = vpg.get_status()
+        if not isinstance(df, pd.DataFrame) or df.empty or "dataset_key" not in df.columns:
+            return pd.DataFrame()
+        out = df[df["dataset_key"].astype(str).str.startswith("timesoft_")].copy()
+        if out.empty:
+            return out
+        def _extract_date(key):
+            m = re.search(r"_(\d{8})$", str(key or ""))
+            if not m:
+                return pd.NaT
+            try:
+                return pd.to_datetime(m.group(1), format="%Y%m%d", errors="coerce")
+            except Exception:
+                return pd.NaT
+        out["snapshot_date"] = out["dataset_key"].apply(_extract_date)
+        return out.sort_values(["snapshot_date", "dataset_key"], ascending=[False, True], na_position="last")
+    except Exception:
+        return pd.DataFrame()
+
+
+def _timesoft_available_snapshot_dates():
+    """Ngày snapshot thực sự đang tồn tại trong PostgreSQL."""
+    df = _timesoft_snapshot_storage_status_df()
+    if df.empty:
+        return []
+    mask = df["dataset_key"].astype(str).str.match(
+        r"^timesoft_(summary_invoice|summary_totals|employee_checkin)_\d{8}$",
+        na=False,
+    )
+    dates = []
+    for value in df.loc[mask, "snapshot_date"].dropna().tolist():
+        try:
+            dates.append(pd.Timestamp(value).date())
+        except Exception:
+            pass
+    return sorted(set(dates))
+
+
+def _timesoft_snapshot_events(start_date, end_date, limit=5000):
+    """Lịch sử hoạt động PostgreSQL. Hỗ trợ helper mới; helper cũ thì trả bảng rỗng."""
+    if vpg is None or not _vpg_is_enabled():
+        return pd.DataFrame()
+    fn = getattr(vpg, "get_sync_events", None)
+    if not callable(fn):
+        return pd.DataFrame()
+    try:
+        start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=VN_TZ)
+        end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time()).replace(tzinfo=VN_TZ)
+        df = fn(
+            dataset_prefix="timesoft_",
+            start_at=start_dt,
+            end_at=end_dt,
+            limit=max(100, min(int(limit), 20000)),
+        )
+        if not isinstance(df, pd.DataFrame):
+            return pd.DataFrame()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _timesoft_collect_snapshot_history(start_date, end_date):
+    """Gộp các snapshot theo ngày trong khoảng đã chọn."""
+    available = [d for d in _timesoft_available_snapshot_dates() if start_date <= d <= end_date]
+    summary_rows = []
+    invoice_frames = []
+    checkin_frames = []
+
+    for d in available:
+        snap = _timesoft_read_background_snapshot(d)
+        inv = snap.get("summary_invoice") if isinstance(snap, dict) else None
+        totals = snap.get("summary_totals") if isinstance(snap, dict) else None
+        chk = snap.get("employee_checkin") if isinstance(snap, dict) else None
+
+        inv_count = len(inv) if isinstance(inv, pd.DataFrame) else 0
+        chk_count = len(chk) if isinstance(chk, pd.DataFrame) else 0
+
+        tr = {}
+        if isinstance(totals, pd.DataFrame) and not totals.empty:
+            tr = totals.iloc[0].to_dict()
+
+        summary_rows.append({
+            "Ngày": d.strftime("%d/%m/%Y"),
+            "Doanh thu · dòng": inv_count,
+            "Chấm công · dòng": chk_count,
+            "Tổng tiền": float(tr.get("TotalMoney", 0) or 0),
+            "Giảm giá": float(tr.get("TotalDiscount", 0) or 0),
+            "Doanh thu thực": float(tr.get("TotalActualRevenu", 0) or 0),
+        })
+
+        if isinstance(inv, pd.DataFrame) and not inv.empty:
+            x = inv.copy()
+            x.insert(0, "Ngày snapshot", d.strftime("%d/%m/%Y"))
+            invoice_frames.append(x)
+
+        if isinstance(chk, pd.DataFrame) and not chk.empty:
+            x = chk.copy()
+            x.insert(0, "Ngày snapshot", d.strftime("%d/%m/%Y"))
+            checkin_frames.append(x)
+
+    summary_df = pd.DataFrame(summary_rows)
+    invoice_df = pd.concat(invoice_frames, ignore_index=True, sort=False) if invoice_frames else pd.DataFrame()
+    checkin_df = pd.concat(checkin_frames, ignore_index=True, sort=False) if checkin_frames else pd.DataFrame()
+    return available, summary_df, invoice_df, checkin_df
+
+
+def _timesoft_history_export_workbook(summary_df, invoice_df, checkin_df, events_df, storage_df, start_date, end_date):
+    """Export toàn bộ lịch sử đã lọc ra một file Excel."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        info = pd.DataFrame([
+            {"Thông tin": "Từ ngày", "Giá trị": start_date.strftime("%d/%m/%Y")},
+            {"Thông tin": "Đến ngày", "Giá trị": end_date.strftime("%d/%m/%Y")},
+            {"Thông tin": "Ngày export", "Giá trị": datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S")},
+            {"Thông tin": "Số ngày có snapshot", "Giá trị": len(summary_df) if isinstance(summary_df, pd.DataFrame) else 0},
+            {"Thông tin": "Dòng doanh thu", "Giá trị": len(invoice_df) if isinstance(invoice_df, pd.DataFrame) else 0},
+            {"Thông tin": "Dòng chấm công", "Giá trị": len(checkin_df) if isinstance(checkin_df, pd.DataFrame) else 0},
+        ])
+        info.to_excel(writer, index=False, sheet_name="ThongTin")
+        (summary_df if isinstance(summary_df, pd.DataFrame) else pd.DataFrame()).to_excel(
+            writer, index=False, sheet_name="TongHopNgay"
+        )
+        (invoice_df if isinstance(invoice_df, pd.DataFrame) else pd.DataFrame()).to_excel(
+            writer, index=False, sheet_name="DoanhThu"
+        )
+        chk_export = _timesoft_checkin_display_df(checkin_df) if isinstance(checkin_df, pd.DataFrame) else pd.DataFrame()
+        # Nếu hàm display bỏ cột Ngày snapshot, giữ bản raw khi cần.
+        if isinstance(checkin_df, pd.DataFrame) and "Ngày snapshot" in checkin_df.columns and "Ngày snapshot" not in chk_export.columns:
+            chk_export.insert(0, "Ngày snapshot", checkin_df["Ngày snapshot"].values)
+        chk_export.to_excel(writer, index=False, sheet_name="ChamCong")
+        (events_df if isinstance(events_df, pd.DataFrame) else pd.DataFrame()).to_excel(
+            writer, index=False, sheet_name="LichSuHoatDong"
+        )
+        (storage_df if isinstance(storage_df, pd.DataFrame) else pd.DataFrame()).to_excel(
+            writer, index=False, sheet_name="DataLuuTru"
+        )
+    return output.getvalue()
+
+
+def render_timesoft_snapshot_history_admin():
+    """Trang Admin: lọc thời gian, lịch sử hoạt động, data lưu trữ và export."""
+    if str(st.session_state.get("current_role", "")).strip().lower() != "admin":
+        return
+
+    if vpg is None or not _vpg_is_enabled():
+        st.warning(
+            "PostgreSQL chưa được bật nên chưa thể đọc lịch sử snapshot. "
+            "Khi PostgreSQL/Cloud SQL hoạt động, trang này sẽ tự đọc dữ liệu đã lưu."
+        )
+        return
+
+    today = get_vn_today()
+    available_dates = _timesoft_available_snapshot_dates()
+
+    if available_dates:
+        earliest = min(available_dates)
+        latest = max(available_dates)
+    else:
+        earliest = today
+        latest = today
+
+    st.markdown("### 🔎 Bộ lọc thời gian")
+    q1, q2, q3, q4 = st.columns(4)
+    if q1.button("Hôm nay", use_container_width=True, key="snap_range_today"):
+        st.session_state["snapshot_history_start"] = today
+        st.session_state["snapshot_history_end"] = today
+        rerun_current_view()
+    if q2.button("7 ngày", use_container_width=True, key="snap_range_7d"):
+        st.session_state["snapshot_history_start"] = max(earliest, today - timedelta(days=6))
+        st.session_state["snapshot_history_end"] = today
+        rerun_current_view()
+    if q3.button("30 ngày", use_container_width=True, key="snap_range_30d"):
+        st.session_state["snapshot_history_start"] = max(earliest, today - timedelta(days=29))
+        st.session_state["snapshot_history_end"] = today
+        rerun_current_view()
+    if q4.button("Tất cả dữ liệu", use_container_width=True, key="snap_range_all"):
+        st.session_state["snapshot_history_start"] = earliest
+        st.session_state["snapshot_history_end"] = latest
+        rerun_current_view()
+
+    default_start = st.session_state.get("snapshot_history_start", max(earliest, today - timedelta(days=6)))
+    default_end = st.session_state.get("snapshot_history_end", latest if available_dates else today)
+
+    c1, c2 = st.columns(2)
+    start_date = c1.date_input(
+        "Từ ngày",
+        value=default_start,
+        min_value=min(earliest, default_start),
+        max_value=today,
+        format="DD/MM/YYYY",
+        key="snapshot_history_start_input",
+    )
+    end_date = c2.date_input(
+        "Đến ngày",
+        value=default_end,
+        min_value=min(earliest, default_start),
+        max_value=today,
+        format="DD/MM/YYYY",
+        key="snapshot_history_end_input",
+    )
+    st.session_state["snapshot_history_start"] = start_date
+    st.session_state["snapshot_history_end"] = end_date
+
+    if start_date > end_date:
+        st.error("Ngày bắt đầu phải nhỏ hơn hoặc bằng ngày kết thúc.")
+        return
+
+    if (end_date - start_date).days > 3650:
+        st.warning("Khoảng lọc tối đa là 10 năm.")
+        return
+
+    available, summary_df, invoice_df, checkin_df = _timesoft_collect_snapshot_history(start_date, end_date)
+    events_df = _timesoft_snapshot_events(start_date, end_date, limit=10000)
+    storage_df = _timesoft_snapshot_storage_status_df()
+
+    # Chỉ giữ dataset có ngày snapshot trong khoảng; status/today không có date vẫn cho xem ở tab lưu trữ.
+    storage_range = storage_df.copy()
+    if not storage_range.empty and "snapshot_date" in storage_range.columns:
+        dated = storage_range["snapshot_date"].notna()
+        date_values = pd.to_datetime(storage_range["snapshot_date"], errors="coerce").dt.date
+        in_range = dated & date_values.ge(start_date) & date_values.le(end_date)
+        undated = ~dated
+        storage_range = storage_range[in_range | undated].copy()
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Ngày có snapshot", len(available))
+    m2.metric("Dòng doanh thu", len(invoice_df))
+    m3.metric("Dòng chấm công", len(checkin_df))
+    m4.metric("Sự kiện hệ thống", len(events_df))
+
+    if not summary_df.empty:
+        total_actual = float(pd.to_numeric(summary_df["Doanh thu thực"], errors="coerce").fillna(0).sum())
+        st.metric("Tổng doanh thu thực trong khoảng", f"{total_actual:,.0f} đ".replace(",", "."))
+
+    export_bytes = _timesoft_history_export_workbook(
+        summary_df, invoice_df, checkin_df, events_df, storage_range, start_date, end_date
+    )
+    st.download_button(
+        "📥 Export lịch sử Snapshot · Excel",
+        data=export_bytes,
+        file_name=f"VERA_SNAPSHOT_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="export_snapshot_history_xlsx",
+    )
+
+    tab_summary, tab_inv, tab_chk, tab_event, tab_store = st.tabs([
+        "📊 Tổng hợp theo ngày",
+        "💰 Doanh thu",
+        "🕒 Chấm công",
+        "🧾 Lịch sử hoạt động",
+        "🗄️ Data lưu trữ",
+    ])
+
+    with tab_summary:
+        if summary_df.empty:
+            st.info("Không có snapshot trong khoảng thời gian đã chọn.")
+        else:
+            view = summary_df.copy()
+            for c in ["Tổng tiền", "Giảm giá", "Doanh thu thực"]:
+                view[c] = pd.to_numeric(view[c], errors="coerce").fillna(0).map(
+                    lambda x: f"{float(x):,.0f} đ".replace(",", ".")
+                )
+            st.dataframe(view, hide_index=True, width="stretch", height=420)
+
+    with tab_inv:
+        if invoice_df.empty:
+            st.info("Không có dữ liệu doanh thu trong khoảng đã chọn.")
+        else:
+            st.dataframe(invoice_df, hide_index=True, width="stretch", height=520)
+
+    with tab_chk:
+        if checkin_df.empty:
+            st.info("Không có dữ liệu chấm công trong khoảng đã chọn.")
+        else:
+            chk_view = _timesoft_checkin_display_df(checkin_df)
+            if "Ngày snapshot" in checkin_df.columns and "Ngày snapshot" not in chk_view.columns:
+                chk_view.insert(0, "Ngày snapshot", checkin_df["Ngày snapshot"].values)
+
+            # Lọc nhân viên ngay trong chấm công lịch sử.
+            employee_col = None
+            for candidate in ["Nhân viên", "employeeInfo.Name", "Tên nhân viên"]:
+                if candidate in chk_view.columns:
+                    employee_col = candidate
+                    break
+            if employee_col:
+                names = sorted(
+                    [str(x).strip() for x in chk_view[employee_col].dropna().unique().tolist() if str(x).strip()],
+                    key=lambda x: normalize_login_name(x),
+                )
+                selected_employee = st.selectbox(
+                    "Nhân viên",
+                    ["Tất cả"] + names,
+                    key="snapshot_history_employee_filter",
+                )
+                if selected_employee != "Tất cả":
+                    chk_view = chk_view[chk_view[employee_col].astype(str).eq(selected_employee)].copy()
+            st.dataframe(chk_view, hide_index=True, width="stretch", height=520)
+
+    with tab_event:
+        if events_df.empty:
+            if callable(getattr(vpg, "get_sync_events", None)):
+                st.info("Chưa có sự kiện đồng bộ trong khoảng đã chọn.")
+            else:
+                st.warning(
+                    "vera_postgres.py hiện tại chưa có API đọc lịch sử sự kiện. "
+                    "Hãy triển khai file vera_postgres.py mới đi kèm bản này để xem đầy đủ lịch sử."
+                )
+        else:
+            ev = events_df.copy()
+            if "created_at" in ev.columns:
+                ev = ev.sort_values("created_at", ascending=False)
+            st.dataframe(ev, hide_index=True, width="stretch", height=520)
+
+    with tab_store:
+        st.caption(
+            "Mỗi ngày có 3 dataset lịch sử: tổng doanh thu, chi tiết doanh thu và chấm công. "
+            "Dataset có trạng thái stale vẫn có thể đọc vì trang lịch sử dùng allow_stale=True."
+        )
+        if storage_range.empty:
+            st.info("Chưa có dataset TimeSoft được lưu trong PostgreSQL.")
+        else:
+            show_cols = [
+                c for c in [
+                    "dataset_key", "row_count", "updated_at", "expires_at", "is_fresh", "snapshot_date"
+                ] if c in storage_range.columns
+            ]
+            st.dataframe(storage_range[show_cols], hide_index=True, width="stretch", height=520)
 
 
 def render_timesoft_background_snapshot_today(show_status=True):
@@ -21284,20 +21620,21 @@ elif selected_page == "⏸️ Auto Update phạt" and st.session_state.current_r
     )
 
 elif selected_page == "📦 Snapshot nền hôm nay" and st.session_state.current_role == "admin":
-    st.subheader("📦 Snapshot nền hôm nay")
+    st.subheader("📦 Snapshot nền · Lịch sử dữ liệu")
     st.caption(
-        "Trang riêng dành cho Admin. Dữ liệu được đọc từ snapshot TimeSoft nền trong PostgreSQL; "
-        "không gọi TimeSoft trực tiếp khi chỉ mở trang này."
+        "Theo dõi snapshot TimeSoft đã lưu trong PostgreSQL theo khoảng thời gian. "
+        "Trang này chỉ đọc dữ liệu đã lưu, không gọi TimeSoft trực tiếp."
     )
-    if st.button("🔄 Làm mới Snapshot", use_container_width=True, key="refresh_snapshot_today_admin"):
-        try:
-            if vpg is not None:
-                # Dataset đọc theo allow_stale; rerun để lấy lại trạng thái/dữ liệu mới nhất.
-                pass
-        except Exception:
-            pass
-        rerun_current_view()
-    render_timesoft_background_snapshot_today(show_status=True)
+    r1, r2 = st.columns([1, 3])
+    with r1:
+        if st.button("🔄 Làm mới", use_container_width=True, key="refresh_snapshot_history_admin"):
+            rerun_current_view()
+    with r2:
+        bg_status = _timesoft_background_status_row()
+        if bg_status:
+            last_sync = str(bg_status.get("synced_at_vn", "") or bg_status.get("synced_at", ""))
+            st.caption(f"Cloud Run Job gần nhất: {last_sync or 'chưa rõ'} · trạng thái {bg_status.get('status', 'unknown')}")
+    render_timesoft_snapshot_history_admin()
 
 
 elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sync"):

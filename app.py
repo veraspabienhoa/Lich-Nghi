@@ -1,4 +1,4 @@
-# V92.6.20 - Đổi tên thời gian nghỉ + bỏ scroll phân ca + Auto Nghỉ không phép khi thiếu check-in (2026-08-21)
+# V92.6.21 - PDF phân ca 3 nhóm gióng 2 mặt + font Unicode tự fallback (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -5854,11 +5854,19 @@ def get_nhanvien_shift_dataframe(credentials_df):
 
 
 def _shift_pdf_font_setup():
-    """Đăng ký font Unicode cho PDF. Không đóng gói font vào app; dùng font hệ thống."""
+    """
+    Đăng ký font Unicode cho PDF tiếng Việt.
+
+    V92.6.21:
+    - Ưu tiên font hệ thống DejaVu/Noto/Roboto/Liberation/Arial.
+    - Nếu Docker image không cài font hệ thống, tự tìm DejaVu Sans đi kèm
+      package matplotlib (nếu matplotlib có trong requirements).
+    - Không đóng gói/chia sẻ file font riêng trong ứng dụng.
+    """
     try:
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
-    except Exception as e:
+    except Exception:
         return None, None, (
             "Thiếu thư viện reportlab. Hãy thêm `reportlab>=4.0` vào requirements.txt "
             "rồi build/deploy lại."
@@ -5869,6 +5877,12 @@ def _shift_pdf_font_setup():
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Regular.ttf",
+        "/usr/share/fonts/truetype/roboto/Roboto-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/open-sans/OpenSans-Regular.ttf",
+        "/usr/local/share/fonts/DejaVuSans.ttf",
         "C:/Windows/Fonts/arial.ttf",
     ]
     bold_candidates = [
@@ -5876,16 +5890,46 @@ def _shift_pdf_font_setup():
         "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
         "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/roboto/unhinted/RobotoTTF/Roboto-Bold.ttf",
+        "/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/open-sans/OpenSans-Bold.ttf",
+        "/usr/local/share/fonts/DejaVuSans-Bold.ttf",
         "C:/Windows/Fonts/arialbd.ttf",
     ]
 
     regular_path = next((p for p in regular_candidates if os.path.exists(p)), None)
     bold_path = next((p for p in bold_candidates if os.path.exists(p)), None)
 
+    # Fallback không cần apt font: dùng DejaVu Sans đi kèm matplotlib.
+    if not regular_path:
+        try:
+            from matplotlib import font_manager
+            mpl_regular = font_manager.findfont(
+                "DejaVu Sans", fallback_to_default=False
+            )
+            if mpl_regular and os.path.exists(mpl_regular):
+                regular_path = mpl_regular
+            try:
+                prop = font_manager.FontProperties(
+                    family="DejaVu Sans", weight="bold"
+                )
+                mpl_bold = font_manager.findfont(
+                    prop, fallback_to_default=False
+                )
+                if mpl_bold and os.path.exists(mpl_bold):
+                    bold_path = mpl_bold
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     if not regular_path:
         return None, None, (
-            "Máy chủ chưa có font Unicode phù hợp để xuất PDF tiếng Việt. "
-            "Cần cài DejaVu Sans hoặc Noto Sans trong Docker image."
+            "Máy chủ chưa có font Unicode để xuất PDF tiếng Việt. "
+            "Cách nhanh nhất: thêm `matplotlib>=3.8` vào requirements.txt; "
+            "hoặc cài `fonts-dejavu-core` trong Docker image rồi build/deploy lại."
         )
 
     try:
@@ -5900,7 +5944,7 @@ def _shift_pdf_font_setup():
             bold_name = regular_name
         return regular_name, bold_name, ""
     except Exception as e:
-        return None, None, f"Không đăng ký được font PDF: {e}"
+        return None, None, f"Không đăng ký được font PDF Unicode: {e}"
 
 
 def _shift_pdf_group(shift_value, cycle_value=""):
@@ -5951,12 +5995,17 @@ def _shift_pdf_phone_map(credentials_df):
 
 def build_shift_assignment_duplex_pdf_bytes(shift_df, credentials_df, print_date=None):
     """
-    V92.6.19 - PDF phân ca Nhân viên + Leader theo mẫu:
-    - A4 ngang.
-    - Mặt 1: Ca 1 + Ca 2.
-    - Mặt 2: Cố định Ca 1 + Cố định Ca 2.
-    - 19 dòng/bảng; vượt 19 sẽ tạo thêm cặp 2 mặt.
-    - In duplex: lật cạnh dài (long-edge).
+    V92.6.21 - PDF phân ca Nhân viên + Leader, A4 ngang, in 2 mặt.
+
+    Bố cục MẶT 1 và MẶT 2 GIỐNG HỆT NHAU để in duplex gióng đúng vị trí:
+      1) Ca 1
+      2) Ca 2
+      3) Chung = Cố định Ca 1 + Cố định Ca 2
+
+    - 19 dòng/bảng.
+    - Nếu nhóm nào vượt 19 người, tự sinh thêm một CẶP mặt trước/mặt sau.
+    - Mặt 2 dùng cùng tọa độ, kích thước, thứ tự và dữ liệu như Mặt 1.
+    - Cột E của PDF không liên quan schema lịch nghỉ; đây chỉ là mẫu thẻ phân ca.
     """
     try:
         from reportlab.lib import colors
@@ -5978,7 +6027,7 @@ def build_shift_assignment_duplex_pdf_bytes(shift_df, credentials_df, print_date
         shift_df = pd.DataFrame()
     d = shift_df.copy()
 
-    # Chỉ lấy đúng nhóm Nhân viên + Leader.
+    # Chỉ lấy Nhân viên + Leader.
     if "Bộ phận" in d.columns:
         d = d[d["Bộ phận"].astype(str).eq("Nhân viên + Leader")].copy()
     elif "Phân quyền" in d.columns:
@@ -5990,13 +6039,10 @@ def build_shift_assignment_duplex_pdf_bytes(shift_df, credentials_df, print_date
         if c not in d.columns:
             d[c] = ""
 
-    # Điện thoại lấy từ danh sách tài khoản.
     phone_map = _shift_pdf_phone_map(credentials_df)
     d["SĐT"] = d["Tên nhân viên"].astype(str).apply(
         lambda x: phone_map.get(normalize_login_name(x), "")
     )
-
-    # Loại các dòng nhân viên rỗng.
     d = d[d["Tên nhân viên"].astype(str).str.strip().ne("")].copy()
     d["_group"] = d.apply(
         lambda r: _shift_pdf_group(r.get("Ca làm việc", ""), r.get("Chu kỳ", "")),
@@ -6005,13 +6051,14 @@ def build_shift_assignment_duplex_pdf_bytes(shift_df, credentials_df, print_date
     d["_sort"] = d["Tên nhân viên"].astype(str).apply(normalize_login_name)
     d = d.sort_values(["_group", "_sort"], kind="stable").reset_index(drop=True)
 
-    groups = {
-        "ca1": d[d["_group"].eq("ca1")].copy(),
-        "ca2": d[d["_group"].eq("ca2")].copy(),
-        "fixed1": d[d["_group"].eq("fixed1")].copy(),
-        "fixed2": d[d["_group"].eq("fixed2")].copy(),
-    }
+    ca1 = d[d["_group"].eq("ca1")].copy().sort_values("_sort", kind="stable")
+    ca2 = d[d["_group"].eq("ca2")].copy().sort_values("_sort", kind="stable")
+    fixed1 = d[d["_group"].eq("fixed1")].copy().sort_values("_sort", kind="stable")
+    fixed2 = d[d["_group"].eq("fixed2")].copy().sort_values("_sort", kind="stable")
+    common = pd.concat([fixed1, fixed2], ignore_index=True, sort=False)
     other = d[d["_group"].eq("other")].copy()
+
+    groups = {"ca1": ca1, "ca2": ca2, "common": common}
 
     rows_per_table = 19
     max_rows = max([len(x) for x in groups.values()] + [1])
@@ -6034,50 +6081,47 @@ def build_shift_assignment_duplex_pdf_bytes(shift_df, credentials_df, print_date
     page_w, page_h = landscape(A4)
     pdf = canvas.Canvas(out, pagesize=(page_w, page_h), pageCompression=1)
 
-    margin_x = 7 * mm
-    top_y = page_h - 7 * mm
-    gap = 5 * mm
+    # 3 bảng song song, Fit A4 ngang.
+    margin_x = 4.5 * mm
+    top_y = page_h - 6 * mm
+    gap = 2.5 * mm
     usable_w = page_w - 2 * margin_x
-    table_w = (usable_w - gap) / 2.0
+    table_w = (usable_w - 2 * gap) / 3.0
 
-    title_h = 12 * mm
+    title_h = 10 * mm
     section_y = top_y - title_h
-    table_y_top = section_y - 8 * mm
-    header_h = 9 * mm
-    row_h = 7.4 * mm
+    table_y_top = section_y - 6.5 * mm
+    header_h = 8.0 * mm
+    row_h = 7.2 * mm
     table_h = header_h + rows_per_table * row_h
     table_y = table_y_top - table_h
 
-    # Tỷ lệ cột bám gần mẫu Excel.
-    weights = [0.085, 0.25, 0.18, 0.16, 0.105, 0.14, 0.08]
+    # Tối ưu tỷ lệ cho 3 bảng trên cùng A4.
+    weights = [0.075, 0.255, 0.175, 0.155, 0.10, 0.145, 0.095]
     col_widths = [table_w * w / sum(weights) for w in weights]
     headers = ["STT", "Tên Nhân Viên", "SĐT", "Giờ vào Ca", "Ký tên", "Giờ vào ra", "Ký tên"]
-
-    def draw_page_header(side_label, batch_index):
-        pdf.setFont(font_bold, 13)
-        pdf.drawString(margin_x, top_y, "LỊCH LÀM VIỆC KTV")
-
-        total_people = int(len(d))
-        pdf.setFont(font_regular, 7.4)
-        pdf.drawCentredString(page_w / 2, top_y + 0.5 * mm, f"{total_people} Nhân viên")
-        pdf.drawRightString(
-            page_w - margin_x,
-            top_y + 0.5 * mm,
-            f"Ngày: {print_date.strftime('%d/%m/%Y')}",
-        )
-
-        # Nhãn mặt rất nhỏ để người in duplex không nhầm trang.
-        pdf.setFont(font_regular, 5.8)
-        pdf.drawRightString(
-            page_w - margin_x,
-            4 * mm,
-            f"{side_label} · Bộ {batch_index + 1}/{card_sets} · A4 ngang · in 2 mặt lật cạnh dài",
-        )
 
     def slice_group(gdf, batch_index):
         start = batch_index * rows_per_table
         end = start + rows_per_table
         return gdf.iloc[start:end].copy()
+
+    def page_heading(side_label, batch_index):
+        pdf.setFont(font_bold, 12)
+        pdf.drawString(margin_x, top_y, "LỊCH LÀM VIỆC KTV")
+        pdf.setFont(font_regular, 6.6)
+        pdf.drawCentredString(page_w / 2, top_y + 0.2 * mm, f"{len(d)} Nhân viên")
+        pdf.drawRightString(
+            page_w - margin_x,
+            top_y + 0.2 * mm,
+            f"Ngày: {print_date.strftime('%d/%m/%Y')}",
+        )
+        pdf.setFont(font_regular, 4.8)
+        pdf.drawRightString(
+            page_w - margin_x,
+            3.2 * mm,
+            f"{side_label} - Bộ {batch_index + 1}/{card_sets} - A4 ngang - duplex gióng cùng tọa độ",
+        )
 
     def table_data(gdf):
         data = [headers]
@@ -6088,19 +6132,15 @@ def build_shift_assignment_duplex_pdf_bytes(shift_df, credentials_df, print_date
                     str(i + 1),
                     str(r.get("Tên nhân viên", "") or "").strip(),
                     str(r.get("SĐT", "") or "").strip(),
-                    "",
-                    "",
-                    "",
-                    "",
+                    "", "", "", "",
                 ])
             else:
                 data.append([str(i + 1), "", "", "", "", "", ""])
         return data
 
     def draw_shift_table(gdf, x, heading):
-        pdf.setFont(font_bold, 7.7)
+        pdf.setFont(font_bold, 6.4)
         pdf.drawString(x, section_y, str(heading or "").strip())
-
         tbl = Table(
             table_data(gdf),
             colWidths=col_widths,
@@ -6110,60 +6150,54 @@ def build_shift_assignment_duplex_pdf_bytes(shift_df, credentials_df, print_date
         tbl.setStyle(TableStyle([
             ("FONTNAME", (0, 0), (-1, -1), font_regular),
             ("FONTNAME", (0, 0), (-1, 0), font_bold),
-            ("FONTSIZE", (0, 0), (-1, 0), 5.9),
-            ("FONTSIZE", (0, 1), (-1, -1), 6.1),
+            ("FONTSIZE", (0, 0), (-1, 0), 4.25),
+            ("FONTSIZE", (0, 1), (-1, -1), 4.55),
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9D9D9")),
             ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
             ("ALIGN", (0, 0), (0, -1), "CENTER"),
             ("ALIGN", (2, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 1.5),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 1.5),
-            ("TOPPADDING", (0, 0), (-1, -1), 1),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
-            ("GRID", (0, 0), (-1, -1), 0.55, colors.black),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0.8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0.8),
+            ("TOPPADDING", (0, 0), (-1, -1), 0.7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0.7),
+            ("GRID", (0, 0), (-1, -1), 0.45, colors.black),
         ]))
         tbl.wrapOn(pdf, table_w, table_h)
         tbl.drawOn(pdf, x, table_y)
 
-    for batch in range(card_sets):
-        # ---------- MẶT 1 ----------
-        ca1 = slice_group(groups["ca1"], batch)
-        ca2 = slice_group(groups["ca2"], batch)
-        draw_page_header("Mặt 1", batch)
-        draw_shift_table(
-            ca1, margin_x,
-            _shift_pdf_heading(ca1, "Ca 1 (10:00 - 23:00)")
-        )
-        draw_shift_table(
-            ca2, margin_x + table_w + gap,
-            _shift_pdf_heading(ca2, "Ca 2 (13:00 - 23:59)")
-        )
-        pdf.showPage()
+    def draw_same_layout(side_label, batch_index):
+        page_heading(side_label, batch_index)
+        g1 = slice_group(ca1, batch_index)
+        g2 = slice_group(ca2, batch_index)
+        gc = slice_group(common, batch_index)
+        xs = [
+            margin_x,
+            margin_x + table_w + gap,
+            margin_x + 2 * (table_w + gap),
+        ]
+        draw_shift_table(g1, xs[0], _shift_pdf_heading(g1, "Ca 1 (10:00 - 23:00)"))
+        draw_shift_table(g2, xs[1], _shift_pdf_heading(g2, "Ca 2 (13:00 - 23:59)"))
+        draw_shift_table(gc, xs[2], "Chung (Cố định Ca 1 + Cố định Ca 2)")
 
-        # ---------- MẶT 2 ----------
-        fixed1 = slice_group(groups["fixed1"], batch)
-        fixed2 = slice_group(groups["fixed2"], batch)
-        draw_page_header("Mặt 2", batch)
-        draw_shift_table(
-            fixed1, margin_x,
-            _shift_pdf_heading(fixed1, "Cố định Ca 1 (10:00 - 23:00)")
-        )
-        draw_shift_table(
-            fixed2, margin_x + table_w + gap,
-            _shift_pdf_heading(fixed2, "Cố định Ca 2 (13:00 - 23:59)")
-        )
-
-        if not other.empty and batch == 0:
-            unknown_names = ", ".join(other["Tên nhân viên"].astype(str).tolist()[:8])
-            if len(other) > 8:
-                unknown_names += f" và {len(other)-8} người khác"
-            pdf.setFont(font_regular, 5.3)
+        if not other.empty and batch_index == 0:
+            unknown_names = ", ".join(other["Tên nhân viên"].astype(str).tolist()[:5])
+            if len(other) > 5:
+                unknown_names += f" và {len(other)-5} người khác"
+            pdf.setFont(font_regular, 4.4)
             pdf.drawString(
                 margin_x,
-                2.5 * mm,
-                f"Lưu ý: {len(other)} nhân viên có tên ca không nhận diện Ca 1/Ca 2/Cố định: {unknown_names}",
+                2.0 * mm,
+                f"Chưa nhận diện ca: {unknown_names}",
             )
+
+    for batch in range(card_sets):
+        # Mặt 1: Ca1 + Ca2 + Chung.
+        draw_same_layout("Mặt 1", batch)
+        pdf.showPage()
+
+        # Mặt 2: cùng 3 bảng, cùng tọa độ - gióng chính xác với Mặt 1.
+        draw_same_layout("Mặt 2", batch)
         pdf.showPage()
 
     pdf.save()
@@ -21148,7 +21182,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                 disabled=['Tên nhân viên','Bộ phận','Phân quyền'],
             )
 
-            # V92.6.19 - Export dùng chính dữ liệu ĐANG HIỂN THỊ trong editor,
+            # V92.6.21 - Export dùng chính dữ liệu ĐANG HIỂN THỊ trong editor,
             # kể cả các thay đổi copy/paste chưa bấm Lưu.
             if dep == "Nhân viên + Leader":
                 st.markdown("#### 🖨️ Thẻ phân ca · PDF A4 ngang · in 2 mặt")
@@ -21158,14 +21192,15 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                         "Ngày in",
                         value=get_vn_today(),
                         format="DD/MM/YYYY",
-                        key="shift_duplex_pdf_date_v92619",
+                        key="shift_duplex_pdf_date_v92621",
                     )
                 with _pdf_info_col:
                     st.caption(
-                        "Mặt 1: **Ca 1 + Ca 2** · Mặt 2: **Cố định Ca 1 + Cố định Ca 2**. "
+                        "Mặt 1: **Ca 1 + Ca 2 + Chung (Cố định Ca 1 + Cố định Ca 2)**. "
+                        "Mặt 2 dùng **đúng cùng bố cục và tọa độ** để gióng Mặt 1 khi in duplex. "
                         "Mỗi bảng 19 người giống mẫu. PDF lấy cả thay đổi đang chỉnh trên bảng, "
                         "không bắt buộc phải bấm Lưu trước. Khi in chọn **A4 ngang**, "
-                        "**2 mặt / Duplex**, **lật cạnh dài (Long-edge)** và **Fit to printable area**."
+                        "**2 mặt / Duplex**, **Fit to printable area**. Mặt 2 đã được vẽ cùng tọa độ với Mặt 1."
                     )
 
                 _pdf_source = edited.drop(columns=['Chọn'], errors='ignore').copy()
@@ -21183,7 +21218,7 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                         file_name=f"VERA_THE_PHAN_CA_{_shift_pdf_date.strftime('%Y%m%d')}.pdf",
                         mime="application/pdf",
                         use_container_width=True,
-                        key="download_shift_duplex_pdf_v92619",
+                        key="download_shift_duplex_pdf_v92621",
                     )
 
             # Nút clear theo dòng đã check; trước khi clear vẫn giữ các chỉnh sửa chưa lưu ở dòng khác.

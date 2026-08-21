@@ -1,4 +1,4 @@
-# V93.0-PG1 - PostgreSQL Phase 1 config migration; nền V92.6.10 + fix mobile MENU/sidebar (2026-08-21)
+# V93.3-PG2 - PostgreSQL Phase 2: Phân quyền + Trạng thái nhân sự + Khóa đăng ký; giữ lịch nghỉ A:L (2026-08-21)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1892,7 +1892,18 @@ st.markdown("""
 # --- KẾT NỐI GSPREAD ---
 SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"
 SHEET_DU_PHONG_ID = "1Kz0aw-JatptAN9G7YSwZ6rJO09urOPaD-rS-18eZSY0"
-SHEET_LICH_NGHI_2_ID = "1bLxn-L5gXui8pCL1b9TxshCNcykM7jg0J49Dkr5b4DI"
+
+# V93.2 - LỊCH NGHỈ: Sheet1 của SHEET_DU_PHONG_ID là nguồn DUY NHẤT, schema vật lý A:L.
+# A Ngày | B Thứ ngày | C Tên nhân viên | D Lý do nghỉ | E Loại nghỉ |
+# F Chi tiết | G Số ngày tính | H Số ngày phép cộng dồn | I Phạt vi phạm |
+# J Ngày cập nhật | K Giờ cập nhật | L Người cập nhật.
+LEAVE_SHEET_RANGE = "A:L"
+LEAVE_SHEET_HEADERS = [
+    "Ngày", "Thứ ngày", "Tên nhân viên", "Lý do nghỉ", "Loại nghỉ",
+    "Chi tiết", "Số ngày tính", "Số ngày phép cộng dồn", "Phạt vi phạm",
+    "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật",
+]
+LEAVE_INTERNAL_COLUMNS = list(LEAVE_SHEET_HEADERS)
 SHEET_CHINH_ID = "1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT"
 BANG_TOUR_FILE_ID = "151d1ueCwH2KXX-HPQF1uj340uWSCS2dW"
 PAYROLL_SOURCE_SHEET_ID = "1WtYsbEAlifL1PZ-nSGBojgL4Bnur-1vF"
@@ -3321,7 +3332,7 @@ def _clear_leave_data_caches():
     """
     if vpg is not None and vpg.is_enabled():
         try:
-            vpg.invalidate_many("leave_primary", "leave_secondary")
+            vpg.invalidate_many("leave_primary")
         except Exception:
             pass
 
@@ -3534,19 +3545,107 @@ def _leave_sync_merge_key(row):
     )
 
 def _ensure_leave_sheet_header(sheet_dp):
-    header = [
-        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-        "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
-        "Giờ cập nhật", "Người cập nhật"
-    ]
-    current = _gs_call_with_backoff(sheet_dp.get, 'A1:J1')
-    current = current[0] if current else []
+    """Xác nhận Sheet1 dùng đúng schema A:L mới."""
+    current = _gs_call_with_backoff(sheet_dp.get, 'A1:L1')
+    current = list(current[0]) if current else []
+    current = current[:12] + [""] * max(0, 12 - len(current))
+    expected = list(LEAVE_SHEET_HEADERS)
+
     if not any(str(v).strip() for v in current):
-        gspread_update_range(sheet_dp, 'A1:J1', [header], value_input_option='USER_ENTERED')
-    return header
+        gspread_update_range(sheet_dp, 'A1:L1', [expected], value_input_option='USER_ENTERED')
+        return expected
+
+    normalized = [str(v).strip() for v in current]
+    expected_norm = [str(v).strip() for v in expected]
+    if normalized != expected_norm:
+        raise ValueError(
+            "Sheet1 lịch nghỉ chưa đúng schema A:L mới. Yêu cầu: "
+            "A=Ngày, B=Thứ ngày, C=Tên nhân viên, D=Lý do nghỉ, E=Loại nghỉ, "
+            "F=Chi tiết, G=Số ngày tính, H=Số ngày phép cộng dồn, I=Phạt vi phạm, "
+            "J=Ngày cập nhật, K=Giờ cập nhật, L=Người cập nhật. "
+            "Nếu Sheet đang là A:M cũ có cột E trống, hãy chạy migration A:M -> A:L trước."
+        )
+    return expected
+
+def _leave_sheet_row_to_record(row, source_id=None, source_row=None):
+    """Chuyển 1 dòng vật lý A:L thành record nội bộ."""
+    vals = list(row[:12]) + [""] * max(0, 12 - len(row))
+    rec = {
+        "Ngày": vals[0],
+        "Thứ ngày": vals[1],
+        "Tên nhân viên": vals[2],
+        "Lý do nghỉ": vals[3],
+        "Loại nghỉ": vals[4],
+        "Chi tiết": vals[5],
+        "Số ngày tính": vals[6],
+        "Số ngày phép cộng dồn": vals[7],
+        "Phạt vi phạm": vals[8],
+        "Ngày cập nhật": vals[9],
+        "Giờ cập nhật": vals[10],
+        "Người cập nhật": vals[11],
+    }
+    if source_id is not None:
+        rec['__source_sheet_id'] = str(source_id)
+    if source_row is not None:
+        rec['__source_row'] = int(source_row)
+    return rec
+
+def _leave_type_for_reason(reason, fallback=""):
+    """Lấy Loại nghỉ (cột E) từ danh mục LoaiNghi; nếu thiếu mapping thì giữ fallback."""
+    try:
+        mapping = _leave_reason_type_map(globals().get('df_loai_nghi', pd.DataFrame()))
+        mapped = clean_leave_reason_display(mapping.get(normalize_leave_reason(reason), ''))
+        if mapped:
+            return mapped
+    except Exception:
+        pass
+    return clean_leave_reason_display(fallback)
+
+
+def _leave_record_to_sheet_row(record, updated_by=None, force_audit_now=False):
+    """Chuyển record nội bộ thành đúng 12 cột A:L."""
+    rec = dict(record or {})
+    ngay = normalize_schedule_date(rec.get('Ngày', ''))
+    weekday = _vn_weekday_label(ngay) if ngay else ""
+    reason = clean_leave_reason_display(rec.get('Lý do nghỉ', ''))
+    leave_type = _leave_type_for_reason(reason, rec.get('Loại nghỉ', ''))
+
+    update_date = str(rec.get('Ngày cập nhật', '') or '')
+    update_time = str(rec.get('Giờ cập nhật', '') or '')
+    actor = str(rec.get('Người cập nhật', updated_by or '') or '')
+    if force_audit_now:
+        now_vn = datetime.now(VN_TZ)
+        update_date = now_vn.strftime('%d/%m/%Y')
+        update_time = now_vn.strftime('%H:%M:%S')
+        actor = str(updated_by or actor or 'Hệ thống')
+
+    return [
+        ngay,                                      # A Ngày
+        weekday,                                   # B Thứ ngày
+        str(rec.get('Tên nhân viên', '')).strip(), # C Tên nhân viên
+        reason,                                    # D Lý do nghỉ
+        leave_type,                                # E Loại nghỉ
+        str(rec.get('Chi tiết', '') or '').strip(),# F Chi tiết
+        rec.get('Số ngày tính', 0),                # G Số ngày tính
+        rec.get('Số ngày phép cộng dồn', 0),       # H Số ngày phép cộng dồn
+        rec.get('Phạt vi phạm', 0),                # I Phạt vi phạm
+        update_date,                               # J Ngày cập nhật
+        update_time,                               # K Giờ cập nhật
+        actor,                                     # L Người cập nhật
+    ]
+
+
+def _next_data_row_a_to_l(sheet):
+    """Tìm dòng kế tiếp sau last row thực tế trong vùng A:L."""
+    values = _gs_call_with_backoff(sheet.get, LEAVE_SHEET_RANGE)
+    last_non_empty = 0
+    for idx, row in enumerate(values, start=1):
+        if any(str(v).strip() != "" for v in row[:12]):
+            last_non_empty = idx
+    return max(2, last_non_empty + 1)
 
 def admin_sync_excel_to_gsheet_overwrite():
-    """Phiên bản 1: xóa dữ liệu cũ A2:J rồi paste toàn bộ Excel bắt đầu đúng A2."""
+    """Phiên bản 1: ghi đè dữ liệu lịch nghỉ vào Sheet1 theo schema A:L mới."""
     try:
         client = get_gspread_client()
         if not client:
@@ -3556,19 +3655,21 @@ def admin_sync_excel_to_gsheet_overwrite():
             return False, err
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
         _ensure_leave_sheet_header(sheet_dp)
-        # Chỉ xóa vùng dữ liệu A:J, không đụng header hàng 1 và không đụng các cột khác.
-        _gs_call_with_backoff(sheet_dp.batch_clear, ['A2:J'])
-        values = df_excel.iloc[:, :10].values.tolist() if not df_excel.empty else []
+        _gs_call_with_backoff(sheet_dp.batch_clear, ['A2:L'])
+        values = []
+        if isinstance(df_excel, pd.DataFrame) and not df_excel.empty:
+            for _, r in df_excel.iterrows():
+                values.append(_leave_record_to_sheet_row(r.to_dict()))
         if values:
             last_row = len(values) + 1
-            gspread_update_range(sheet_dp, f'A2:J{last_row}', values, value_input_option='USER_ENTERED')
+            gspread_update_range(sheet_dp, f'A2:L{last_row}', values, value_input_option='USER_ENTERED')
         _clear_dynamic_data_caches()
-        return True, f"Phiên bản 1 hoàn tất: đã GHI ĐÈ vùng A2:J và paste {len(values)} dòng từ Excel vào Sheet1."
+        return True, f"Phiên bản 1 hoàn tất: đã GHI ĐÈ vùng A2:L và ghi {len(values)} dòng theo schema A:L; E là Loại nghỉ."
     except Exception as e:
         return False, f"Lỗi đồng bộ Phiên bản 1: {e}"
 
 def admin_sync_excel_to_gsheet_append():
-    """Phiên bản 2: không sửa dòng hiện có; chỉ ghi các dòng mới vào đúng last row A:J."""
+    """Phiên bản 2: chỉ thêm dòng mới vào Sheet1 theo schema A:L, không ghi đè dữ liệu cũ."""
     try:
         client = get_gspread_client()
         if not client:
@@ -3580,30 +3681,25 @@ def admin_sync_excel_to_gsheet_append():
         _ensure_leave_sheet_header(sheet_dp)
 
         live = _live_sheet_to_leave_df(sheet_dp)
-        existing_keys = set()
-        if isinstance(live, pd.DataFrame) and not live.empty:
-            existing_keys = {_leave_sync_merge_key(r) for _, r in live.iterrows()}
+        existing_keys = {_leave_sync_merge_key(r) for _, r in live.iterrows()} if isinstance(live, pd.DataFrame) and not live.empty else set()
 
         rows = []
         seen_new = set()
         for _, r in df_excel.iterrows():
             key = _leave_sync_merge_key(r)
-            if key in existing_keys or key in seen_new:
-                continue
-            if not key[0] or not key[1] or not key[2]:
+            if key in existing_keys or key in seen_new or not all(key):
                 continue
             seen_new.add(key)
-            rows.append(r.iloc[:10].tolist())
+            rows.append(_leave_record_to_sheet_row(r.to_dict()))
 
         if not rows:
             return True, "Phiên bản 2: không có dòng mới; dữ liệu hiện tại trên Google Sheet được giữ nguyên."
 
-        target_row = _next_data_row_a_to_j(sheet_dp)
+        target_row = _next_data_row_a_to_l(sheet_dp)
         end_row = target_row + len(rows) - 1
-        # Ghi RANGE chính xác A:J tại last row; tuyệt đối không overwrite các dòng hiện hữu.
-        gspread_update_range(sheet_dp, f'A{target_row}:J{end_row}', rows, value_input_option='USER_ENTERED')
+        gspread_update_range(sheet_dp, f'A{target_row}:L{end_row}', rows, value_input_option='USER_ENTERED')
         _clear_dynamic_data_caches()
-        return True, f"Phiên bản 2 hoàn tất: đã thêm {len(rows)} dòng mới vào đúng A{target_row}:J{end_row}; không ghi đè dữ liệu cũ."
+        return True, f"Phiên bản 2 hoàn tất: đã thêm {len(rows)} dòng vào A{target_row}:L{end_row}; E là Loại nghỉ."
     except Exception as e:
         return False, f"Lỗi đồng bộ Phiên bản 2: {e}"
 
@@ -5394,32 +5490,23 @@ def batch_import_staff_list(import_df, updated_by, actor_role="admin"):
 
 # --- TẢI DỮ LIỆU TỪ GOOGLE SHEET DỰ PHÒNG ---
 def _load_backup_sheet_data_from_sheets():
-    """Đọc trực tiếp A:J của sheet lịch nghỉ chính, không phụ thuộc tên header và luôn giữ source row."""
-    expected = [
-        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-        "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
-    ]
+    """Đọc duy nhất Sheet1 1Kz0 theo schema A:L và giữ chính xác dòng vật lý."""
+    expected = list(LEAVE_INTERNAL_COLUMNS)
     try:
         client = get_gspread_client()
         if not client:
             return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
         sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        values = _gs_call_with_backoff(sheet.get, 'A:J')
-        if not values or len(values) < 2:
-            # Một số phiên bản gspread / thay đổi định dạng sheet có thể trả rỗng/chỉ header cho range.
-            # Fallback get_all_values bảo đảm Chi tiết danh sách không bị trắng.
-            values = _gs_call_with_backoff(sheet.get_all_values)
-            values = [list(r[:10]) for r in values]
+        _ensure_leave_sheet_header(sheet)
+        values = _gs_call_with_backoff(sheet.get, LEAVE_SHEET_RANGE)
         if not values or len(values) < 2:
             return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
         rows = []
         for sheet_row, row in enumerate(values[1:], start=2):
-            r = list(row[:10]) + [""] * max(0, 10 - len(row))
-            if not any(str(v).strip() for v in r):
+            vals = list(row[:12]) + [""] * max(0, 12 - len(row))
+            if not any(str(v).strip() for v in vals):
                 continue
-            item = dict(zip(expected, r[:10]))
-            item['__source_sheet_id'] = SHEET_DU_PHONG_ID
-            item['__source_row'] = sheet_row
+            item = _leave_sheet_row_to_record(vals, SHEET_DU_PHONG_ID, sheet_row)
             rows.append(item)
         return pd.DataFrame(rows) if rows else pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
     except Exception:
@@ -5437,47 +5524,12 @@ def load_backup_sheet_data():
     return _load_backup_sheet_data_from_sheets()
 
 def _load_secondary_leave_sheet_data_from_sheets():
-    """Đọc Sheet1 của Google Sheet thứ hai, chuẩn hóa về đúng A:J của lịch nghỉ."""
-    expected = [
-        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-        "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
-    ]
-    try:
-        client = get_gspread_client()
-        if not client:
-            return pd.DataFrame(columns=expected)
-        sheet = client.open_by_key(SHEET_LICH_NGHI_2_ID).get_worksheet(0)
-        values = _gs_call_with_backoff(sheet.get, 'A:J')
-        if not values or len(values) < 2:
-            # Một số phiên bản gspread / thay đổi định dạng sheet có thể trả rỗng/chỉ header cho range.
-            # Fallback get_all_values bảo đảm Chi tiết danh sách không bị trắng.
-            values = _gs_call_with_backoff(sheet.get_all_values)
-            values = [list(r[:10]) for r in values]
-        if not values or len(values) < 2:
-            return pd.DataFrame(columns=expected)
-
-        rows = []
-        for sheet_row, row in enumerate(values[1:], start=2):
-            r = list(row[:10]) + [""] * max(0, 10 - len(row))
-            if not any(str(v).strip() for v in r):
-                continue
-            item = dict(zip(expected, r[:10]))
-            item['__source_sheet_id'] = SHEET_LICH_NGHI_2_ID
-            item['__source_row'] = sheet_row
-            rows.append(item)
-        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
-    except Exception:
-        return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
+    """V93.2: nguồn 1bLxn... đã ngưng sử dụng hoàn toàn; không thực hiện request Google Sheets."""
+    return pd.DataFrame(columns=list(LEAVE_INTERNAL_COLUMNS) + ['__source_sheet_id', '__source_row'])
 
 @st.cache_data(ttl=45, show_spinner=False)
 def load_secondary_leave_sheet_data():
-    """V75: đọc qua PostgreSQL dùng chung giữa các Cloud Run instance; Google Sheets là nguồn đồng bộ dự phòng."""
-    if vpg is not None and vpg.is_enabled():
-        return vpg.load_dataset(
-            "leave_secondary",
-            _load_secondary_leave_sheet_data_from_sheets,
-            ttl_seconds=int(os.getenv("VERA_PG_TTL_LEAVE_SECONDARY", "90")),
-        )
+    """V93.2 compatibility shim: luôn rỗng; lịch nghỉ chỉ dùng Sheet1 của 1Kz0...."""
     return _load_secondary_leave_sheet_data_from_sheets()
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -5495,45 +5547,24 @@ def load_loai_nghi_from_gsheet():
 
 # --- GHI VÀ XÓA LỊCH ---
 def _next_data_row_a_to_j(sheet):
-    """Tìm dòng kế tiếp sau last row thực tế trong vùng A:J."""
-    values = _gs_call_with_backoff(sheet.get, 'A:J')
-    last_non_empty = 0
-    for idx, row in enumerate(values, start=1):
-        if any(str(v).strip() != "" for v in row[:10]):
-            last_non_empty = idx
-    return max(2, last_non_empty + 1)
+    """Deprecated alias: từ V93.2 mọi thao tác dùng A:L."""
+    return _next_data_row_a_to_l(sheet)
 
 def _live_sheet_to_leave_df(sheet):
-    """Đọc trực tiếp A:J để kiểm tra trùng/thứ tự ngay trước khi ghi."""
+    """Đọc LIVE đúng schema A:L để kiểm tra trùng, quota và phạt lũy tiến."""
     try:
-        values = _gs_call_with_backoff(sheet.get, 'A:J')
+        _ensure_leave_sheet_header(sheet)
+        values = _gs_call_with_backoff(sheet.get, LEAVE_SHEET_RANGE)
         if not values or len(values) < 2:
-            return pd.DataFrame(columns=[
-                "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-                "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
-            ])
-        header = [str(x).strip() for x in values[0][:10]]
-        expected = [
-            "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-            "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"
-        ]
-        if len(header) < 10 or not header[0]:
-            header = expected
+            return pd.DataFrame(columns=list(LEAVE_INTERNAL_COLUMNS))
         rows = []
         for row in values[1:]:
-            r = list(row[:10]) + [""] * max(0, 10 - len(row))
-            if any(str(v).strip() for v in r):
-                rows.append(r[:10])
-        df = pd.DataFrame(rows, columns=header[:10]) if rows else pd.DataFrame(columns=header[:10])
-        if 'Loại nghỉ' in df.columns and 'Lý do nghỉ' not in df.columns:
-            df = df.rename(columns={'Loại nghỉ': 'Lý do nghỉ'})
-        for c in expected:
-            if c not in df.columns:
-                df[c] = ""
-        return df[expected].copy()
+            vals = list(row[:12]) + [""] * max(0, 12 - len(row))
+            if any(str(v).strip() for v in vals):
+                rows.append(_leave_sheet_row_to_record(vals))
+        return pd.DataFrame(rows, columns=LEAVE_INTERNAL_COLUMNS) if rows else pd.DataFrame(columns=list(LEAVE_INTERNAL_COLUMNS))
     except Exception:
-        return pd.DataFrame()
-
+        return pd.DataFrame(columns=list(LEAVE_INTERNAL_COLUMNS))
 
 def _daily_leave_group(reason, reason_type_map=None):
     """
@@ -5668,7 +5699,7 @@ def load_leave_daily_quota_config():
 @st.cache_data(ttl=15, show_spinner=False)
 def load_live_leave_registration_cached():
     """
-    V92.0: snapshot ngắn 15 giây từ 2 Google Sheet lịch nghỉ.
+    V93.2: snapshot ngắn 15 giây từ nguồn duy nhất Sheet1 của 1Kz0....
     Sau mọi Thêm/Sửa/Xóa, _clear_leave_data_caches() xóa cache ngay nên quota vẫn chính xác.
     """
     try:
@@ -5943,37 +5974,20 @@ def _unexcused_ordinal_and_bonus(df_sources, ngay):
 
 def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ngay_cong_don, phat_vi_pham, updated_by, df_main_source=None):
     """
-    Chỉ ghi lịch vào Google Sheet dự phòng (SHEET_DU_PHONG_ID), Sheet1, đúng A:J ở last row.
-    KHÔNG ghi lịch đăng ký mới sang file chính (SHEET_CHINH_ID).
-    Trước khi ghi sẽ đọc LIVE Sheet1 để:
-    - chặn trùng cùng nhân viên + ngày + loại nghỉ;
-    - tính thứ tự riêng cho Nghỉ không phép / Đi trễ không phép / Về sớm không phép và tiền phạt lũy tiến.
+    Ghi DUY NHẤT vào Sheet1 của 1Kz0... theo schema A:L.
+    Khóa chống trùng = Ngày + Tên nhân viên + Lý do nghỉ (A + C + D).
+    B tự sinh từ A; E lấy Loại nghỉ từ danh mục; J/K/L là audit hiện tại.
     """
     try:
         client = get_gspread_client()
         if not client:
             return False, "Chưa cấu hình quyền kết nối Google Sheets."
 
-        ngay_cn = get_vn_today().strftime('%d/%m/%Y')
-        gio_cn = datetime.now(VN_TZ).strftime('%H:%M:%S')
-
         sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-        header = [
-            "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-            "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
-            "Giờ cập nhật", "Người cập nhật"
-        ]
-        current_header = sheet_dp.get('A1:J1')
-        current_header = current_header[0] if current_header else []
-        if not any(str(v).strip() for v in current_header):
-            gspread_update_range(sheet_dp, 'A1:J1', [header], value_input_option='USER_ENTERED')
+        _ensure_leave_sheet_header(sheet_dp)
+        live_primary = _live_sheet_to_leave_df(sheet_dp)
 
-        live_backup = _live_sheet_to_leave_df(sheet_dp)
-        combined_live = combine_leave_sources_for_daily_stats(df_main_source, live_backup)
-
-        # Chỉ chặn trùng CÙNG lý do. Cùng ngày + cùng nhân viên nhưng lý do khác
-        # (kể cả các lý do có Phạt vi phạm > 0) vẫn được phép ghi thành các dòng riêng.
-        if _leave_exists_in_sources(combined_live, ngay, nv, loai_nghi):
+        if _leave_exists_in_sources(live_primary, ngay, nv, loai_nghi):
             return False, f"Nhân viên '{nv}' đã có đúng lý do '{clean_leave_reason_display(loai_nghi)}' trong ngày {ngay}. Lý do khác vẫn được phép ghi riêng."
 
         save_detail = str(chi_tiet).strip()
@@ -5981,66 +5995,51 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         ordinal_note = ""
         progressive_reason = get_progressive_penalty_reason(loai_nghi)
         if progressive_reason:
-            ordinal, extra_penalty = _progressive_ordinal_and_bonus(combined_live, ngay, loai_nghi)
+            ordinal, extra_penalty = _progressive_ordinal_and_bonus(live_primary, ngay, loai_nghi)
             ordinal_note = f"Người Thứ {ordinal} {progressive_reason.lower()}"
             save_detail = f"{ordinal_note} | {save_detail}" if save_detail else ordinal_note
             save_penalty += extra_penalty
 
-        row_values = [
-            str(ngay),
-            str(nv),
-            clean_leave_reason_display(loai_nghi),
-            save_detail,
-            float(so_ngay) if so_ngay is not None else 0.0,
-            float(so_ngay_cong_don),
-            save_penalty,
-            str(ngay_cn),
-            str(gio_cn),
-            str(updated_by),
-        ]
-
-        target_row = _next_data_row_a_to_j(sheet_dp)
-        gspread_update_range(sheet_dp, f"A{target_row}:J{target_row}", [row_values], value_input_option='USER_ENTERED')
+        rec = {
+            'Ngày': ngay,
+            'Tên nhân viên': nv,
+            'Lý do nghỉ': loai_nghi,
+            'Loại nghỉ': _leave_type_for_reason(loai_nghi),
+            'Chi tiết': save_detail,
+            'Số ngày tính': float(so_ngay) if so_ngay is not None else 0.0,
+            'Số ngày phép cộng dồn': float(so_ngay_cong_don),
+            'Phạt vi phạm': save_penalty,
+        }
+        row_values = _leave_record_to_sheet_row(rec, updated_by=updated_by, force_audit_now=True)
+        target_row = _next_data_row_a_to_l(sheet_dp)
+        gspread_update_range(sheet_dp, f"A{target_row}:L{target_row}", [row_values], value_input_option='USER_ENTERED')
 
         _clear_leave_data_caches()
         if ordinal_note:
             extra = max(0, save_penalty - float(phat_vi_pham or 0))
             return True, f"{ordinal_note}. Phạt lũy tiến cộng thêm {extra:,.0f} VNĐ; tổng phạt {save_penalty:,.0f} VNĐ."
-        return True, "Đã ghi nhận lịch nghỉ thành công vào Google Sheet dự phòng!"
+        return True, "Đã ghi lịch nghỉ vào Sheet1 A:L."
     except Exception as e:
         return False, f"Lỗi ghi dữ liệu: {e}"
 
 def delete_backup_row(row_index_1_based, updated_by=None):
-    """Xóa 1 dòng ở Sheet dự phòng và tự xếp lại Người Thứ X/phạt lũy tiến nếu cần."""
+    """Xóa 1 dòng trong nguồn lịch nghỉ duy nhất và xếp lại phạt lũy tiến nếu cần."""
     try:
         client = get_gspread_client()
         sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        _ensure_leave_sheet_header(sheet)
         actor = str(updated_by or st.session_state.get("current_user", "Hệ thống"))
 
-        # Đọc bản ghi trước khi xóa để biết nhóm nào cần xếp lại.
-        row_values = sheet.get(f'A{row_index_1_based}:J{row_index_1_based}')
-        deleted_row = None
+        row_values = _gs_call_with_backoff(sheet.get, f'A{row_index_1_based}:L{row_index_1_based}')
         affected_groups = set()
         if row_values and row_values[0]:
-            expected = [
-                "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-                "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
-                "Giờ cập nhật", "Người cập nhật"
-            ]
-            vals = list(row_values[0][:10]) + [""] * max(0, 10 - len(row_values[0]))
-            deleted_row = dict(zip(expected, vals[:10]))
-            deleted_row['__source_sheet_id'] = SHEET_DU_PHONG_ID
-            deleted_row['__source_row'] = int(row_index_1_based)
+            deleted_row = _leave_sheet_row_to_record(row_values[0], SHEET_DU_PHONG_ID, row_index_1_based)
             group_key = _progressive_group_key(deleted_row)
             if group_key:
                 affected_groups.add(group_key)
 
-        sheet.delete_rows(row_index_1_based)
-
-        rebalanced = 0
-        if affected_groups:
-            rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor)
-
+        _gs_call_with_backoff(sheet.delete_rows, row_index_1_based)
+        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor) if affected_groups else 0
         _clear_leave_data_caches()
         if rebalanced:
             return True, f"Đã xóa lịch nghỉ và tự xếp lại thứ tự/phạt cho {rebalanced} bản ghi còn lại."
@@ -6048,20 +6047,21 @@ def delete_backup_row(row_index_1_based, updated_by=None):
     except Exception as e:
         return False, f"Lỗi xóa dòng: {e}"
 
-
 def _find_schedule_row_index(sheet, original_row):
-    """Tìm dòng Google Sheet theo Ngày + Nhân viên + Lý do (bộ ba đang được hệ thống chặn trùng)."""
-    values = _gs_call_with_backoff(sheet.get_all_values)
-    if len(values) < 2:
+    """Tìm dòng theo khóa Ngày + Tên nhân viên + Lý do nghỉ = A + C + D."""
+    try:
+        _ensure_leave_sheet_header(sheet)
+        values = _gs_call_with_backoff(sheet.get, LEAVE_SHEET_RANGE)
+        if len(values) < 2:
+            return None
+        target_key = schedule_key(original_row)
+        for idx, vals in enumerate(values[1:], start=2):
+            row_dict = _leave_sheet_row_to_record(vals)
+            if schedule_key(row_dict) == target_key:
+                return idx
+    except Exception:
         return None
-    headers = values[0]
-    target_key = schedule_key(original_row)
-    for idx, vals in enumerate(values[1:], start=2):
-        row_dict = {headers[i]: vals[i] if i < len(vals) else '' for i in range(len(headers))}
-        if schedule_key(row_dict) == target_key:
-            return idx
     return None
-
 
 def _parse_leave_number(value, default=0.0, money=False):
     """Chuẩn hóa số lấy từ sheet LoaiNghi, hỗ trợ dấu chấm/phẩy và ký hiệu tiền."""
@@ -6507,7 +6507,7 @@ TIMESOFT_SUPPORT_LATE_ALLOWANCES = {
 def _timesoft_support_for_day(employee, target_date):
     """Đọc Hỗ trợ cùng Ngày + Nhân viên từ dữ liệu lịch nghỉ đã hợp nhất."""
     sources = []
-    for name in ("df_leave_secondary", "df_backup"):
+    for name in ("df_backup",):
         value = globals().get(name)
         if isinstance(value, pd.DataFrame) and not value.empty:
             sources.append(value)
@@ -6750,36 +6750,29 @@ def _leave_type_series_from_reason(df):
 
 
 def add_source_leave_type_column(df):
-    """
-    V86.1: đồng nhất dữ liệu hiển thị lịch nghỉ:
-    - `Lý do nghỉ` = giá trị Lý do đã lưu, đối chiếu danh mục cột B của sheet LoaiNghi.
-    - `Loại nghỉ` = giá trị cột C tương ứng trong sheet LoaiNghi.
-    - `Thứ ngày` đặt ngay sau `Ngày`.
-
-    Không còn sao chép Lý do nghỉ sang Loại nghỉ.
-    """
+    """Hiển thị Thứ ngày/Loại nghỉ từ dữ liệu A:L; chỉ fallback danh mục khi E đang trống."""
     if not isinstance(df, pd.DataFrame):
         return df
-
-    d = add_weekday_column(df.copy())
+    d = df.copy()
+    if 'Ngày' in d.columns:
+        if 'Thứ ngày' not in d.columns:
+            pos = d.columns.get_loc('Ngày') + 1
+            d.insert(pos, 'Thứ ngày', d['Ngày'].apply(_vn_weekday_label))
+        else:
+            blank = d['Thứ ngày'].astype(str).str.strip().eq('')
+            d.loc[blank, 'Thứ ngày'] = d.loc[blank, 'Ngày'].apply(_vn_weekday_label)
     if 'Lý do nghỉ' not in d.columns:
         return d
-
-    # Làm sạch Lý do nghỉ để khớp đúng với cột B của danh mục.
     d['Lý do nghỉ'] = d['Lý do nghỉ'].apply(clean_leave_reason_display)
-
-    reason_type_map = _leave_reason_type_map(globals().get('df_loai_nghi', pd.DataFrame()))
-    type_values = d['Lý do nghỉ'].apply(
-        lambda v: reason_type_map.get(normalize_leave_reason(v), "")
-    )
-
-    if 'Loại nghỉ' in d.columns:
-        d = d.drop(columns=['Loại nghỉ'])
-
-    pos = d.columns.get_loc('Lý do nghỉ') + 1
-    d.insert(pos, 'Loại nghỉ', type_values)
+    mapping = _leave_reason_type_map(globals().get('df_loai_nghi', pd.DataFrame()))
+    derived = d['Lý do nghỉ'].apply(lambda v: mapping.get(normalize_leave_reason(v), ""))
+    if 'Loại nghỉ' not in d.columns:
+        pos = d.columns.get_loc('Lý do nghỉ') + 1
+        d.insert(pos, 'Loại nghỉ', derived)
+    else:
+        blank = d['Loại nghỉ'].astype(str).str.strip().isin(['', 'nan', 'None', 'NaN'])
+        d.loc[blank, 'Loại nghỉ'] = derived.loc[blank]
     return d
-
 
 def get_leave_reason_options(source_df=None, extra_values=None):
     """Danh sách dropdown Lý do nghỉ luôn chứa ĐÚNG chuỗi hiện có của dữ liệu lịch sử.
@@ -7362,8 +7355,10 @@ def recalculate_schedule_fields(original_row, edited_row, updated_by, all_leave_
 
     now_vn = datetime.now(VN_TZ)
     result['Ngày'] = ngay
+    result['Thứ ngày'] = _vn_weekday_label(ngay)
     result['Tên nhân viên'] = nv
     result['Lý do nghỉ'] = reason
+    result['Loại nghỉ'] = _leave_type_for_reason(reason, original_row.get('Loại nghỉ', ''))
     result['Chi tiết'] = detail
     result['Số ngày tính'] = float(so_ngay)
     result['Số ngày phép cộng dồn'] = float(accumulated)
@@ -7375,48 +7370,27 @@ def recalculate_schedule_fields(original_row, edited_row, updated_by, all_leave_
 
 
 def _load_live_two_leave_sheets(client):
-    """Đọc trực tiếp hai Google Sheet lịch nghỉ để tính/sửa bằng dữ liệu mới nhất."""
+    """Compatibility name cũ: từ V93.2 chỉ đọc LIVE Sheet1 của 1Kz0...."""
     primary = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
-    secondary = client.open_by_key(SHEET_LICH_NGHI_2_ID).get_worksheet(0)
-
-    df_primary = _live_sheet_to_leave_df(primary)
-    if not df_primary.empty:
-        df_primary['__source_sheet_id'] = SHEET_DU_PHONG_ID
-        # Gắn row sheet theo thứ tự A:J đã đọc; dùng key vẫn là lớp dự phòng chính nếu có dòng trống.
-        df_primary['__source_row'] = range(2, len(df_primary) + 2)
-
-    df_secondary = _live_sheet_to_leave_df(secondary)
-    if not df_secondary.empty:
-        df_secondary['__source_sheet_id'] = SHEET_LICH_NGHI_2_ID
-        df_secondary['__source_row'] = range(2, len(df_secondary) + 2)
-
-    return combine_leave_sources_for_daily_stats(df_secondary, df_primary)
-
+    return _read_leave_sheet_with_source(primary, SHEET_DU_PHONG_ID)
 
 def _read_leave_sheet_with_source(sheet, source_id):
-    """Đọc A:J và giữ chính xác số dòng vật lý của Google Sheet để có thể cập nhật lại đúng dòng."""
-    expected = [
-        "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-        "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
-        "Giờ cập nhật", "Người cập nhật"
-    ]
+    """Đọc A:L và giữ chính xác số dòng vật lý để sửa/xóa/rebalance đúng dòng."""
+    expected = list(LEAVE_INTERNAL_COLUMNS)
     try:
-        values = _gs_call_with_backoff(sheet.get, 'A:J')
+        _ensure_leave_sheet_header(sheet)
+        values = _gs_call_with_backoff(sheet.get, LEAVE_SHEET_RANGE)
         rows = []
         if not values or len(values) < 2:
             return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
         for sheet_row, values_row in enumerate(values[1:], start=2):
-            vals = list(values_row[:10]) + [""] * max(0, 10 - len(values_row))
-            if not any(str(v).strip() for v in vals[:10]):
+            vals = list(values_row[:12]) + [""] * max(0, 12 - len(values_row))
+            if not any(str(v).strip() for v in vals):
                 continue
-            item = dict(zip(expected, vals[:10]))
-            item['__source_sheet_id'] = str(source_id)
-            item['__source_row'] = int(sheet_row)
-            rows.append(item)
+            rows.append(_leave_sheet_row_to_record(vals, source_id, sheet_row))
         return pd.DataFrame(rows) if rows else pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
     except Exception:
         return pd.DataFrame(columns=expected + ['__source_sheet_id', '__source_row'])
-
 
 def _extract_progressive_ordinal(detail):
     """Lấy số X từ tiền tố 'Người Thứ X ...'."""
@@ -7456,18 +7430,7 @@ def _existing_base_penalty(row, catalog):
 
 
 def rebalance_progressive_penalty_groups(client, affected_groups, updated_by):
-    """
-    Xếp lại toàn bộ Người Thứ X và mức phạt lũy tiến của các nhóm bị ảnh hưởng.
-
-    Ví dụ sau khi Người Thứ 1 bị xóa/đổi sang Có phép:
-      cũ 2 -> mới 1
-      cũ 3 -> mới 2 (bỏ +100.000)
-      cũ 4 -> mới 3 (chỉ còn +100.000)
-    và ghi ngược vào đúng Google Sheet/dòng vật lý.
-
-    Nếu cùng một lịch xuất hiện ở cả hai nguồn, lịch đó chỉ chiếm 1 vị trí thứ tự,
-    nhưng mọi bản sao vật lý của nó đều được cập nhật để hai nguồn nhất quán.
-    """
+    """Xếp lại Người Thứ X/phạt lũy tiến trực tiếp trên nguồn duy nhất Sheet1 A:L."""
     clean_groups = set()
     for item in affected_groups or []:
         try:
@@ -7479,19 +7442,10 @@ def rebalance_progressive_penalty_groups(client, affected_groups, updated_by):
     if not clean_groups:
         return 0
 
-    # Đọc dữ liệu LIVE, giữ row vật lý của cả hai nguồn.
-    sheet_map = {
-        SHEET_DU_PHONG_ID: client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0),
-        SHEET_LICH_NGHI_2_ID: client.open_by_key(SHEET_LICH_NGHI_2_ID).get_worksheet(0),
-    }
-    frames = [
-        _read_leave_sheet_with_source(sheet_map[SHEET_DU_PHONG_ID], SHEET_DU_PHONG_ID),
-        _read_leave_sheet_with_source(sheet_map[SHEET_LICH_NGHI_2_ID], SHEET_LICH_NGHI_2_ID),
-    ]
-    frames = [f for f in frames if f is not None and not f.empty]
-    if not frames:
+    sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+    raw_all = _read_leave_sheet_with_source(sheet, SHEET_DU_PHONG_ID)
+    if raw_all is None or raw_all.empty:
         return 0
-    raw_all = pd.concat(frames, ignore_index=True)
     raw_all['_reb_date'] = raw_all['Ngày'].apply(normalize_schedule_date)
     raw_all['_reb_reason'] = raw_all['Lý do nghỉ'].astype(str).apply(get_progressive_penalty_reason)
 
@@ -7500,104 +7454,60 @@ def rebalance_progressive_penalty_groups(client, affected_groups, updated_by):
     actor = str(updated_by or 'Hệ thống')
     update_date = now_vn.strftime('%d/%m/%Y')
     update_time = now_vn.strftime('%H:%M:%S')
-    updated_physical_rows = 0
+    updated_rows = 0
 
     for ngay, canonical in sorted(clean_groups):
         group = raw_all[(raw_all['_reb_date'] == ngay) & (raw_all['_reb_reason'] == canonical)].copy()
         if group.empty:
             continue
 
-        # Một lịch logic = Ngày + Nhân viên + Lý do. Gom mọi bản sao vật lý của lịch đó.
-        logical = {}
-        for _, r in group.iterrows():
-            key = schedule_key(r)
-            logical.setdefault(key, []).append(r.copy())
-
         ordered = []
-        for logical_key, physical_rows in logical.items():
-            # Ưu tiên thứ tự Người Thứ X đã lưu; đây là thứ tự lịch sử đáng tin cậy nhất.
-            ordinals = [
-                _extract_progressive_ordinal(r.get('Chi tiết', ''))
-                for r in physical_rows
-            ]
-            ordinals = [x for x in ordinals if x is not None]
-            old_ordinal = min(ordinals) if ordinals else None
+        for _, r in group.iterrows():
+            old_ordinal = _extract_progressive_ordinal(r.get('Chi tiết', ''))
+            row_idx = int(float(r.get('__source_row', 10**9) or 10**9))
+            ordered.append((old_ordinal, row_idx, r.copy()))
+        ordered.sort(key=lambda x: (x[0] is None, x[0] if x[0] is not None else 10**9, x[1], normalize_login_name(x[2].get('Tên nhân viên', ''))))
 
-            # Representative ưu tiên Sheet dự phòng, rồi theo row vật lý.
-            representative = sorted(
-                physical_rows,
-                key=lambda r: (
-                    0 if str(r.get('__source_sheet_id', '')) == SHEET_DU_PHONG_ID else 1,
-                    int(float(r.get('__source_row', 10**9) or 10**9)),
-                )
-            )[0]
-            fallback_row = int(float(representative.get('__source_row', 10**9) or 10**9))
-            ordered.append((old_ordinal, fallback_row, logical_key, representative, physical_rows))
-
-        # Những bản ghi có Người Thứ cũ được giữ đúng trật tự cũ; dữ liệu rất cũ không có tiền tố xếp sau theo row.
-        ordered.sort(key=lambda x: (x[0] is None, x[0] if x[0] is not None else 10**9, x[1], normalize_login_name(x[3].get('Tên nhân viên', ''))))
-
-        for new_ordinal, (_, _, logical_key, representative, physical_rows) in enumerate(ordered, start=1):
-            base_penalty = _existing_base_penalty(representative, catalog)
+        for new_ordinal, (_, row_idx, physical) in enumerate(ordered, start=1):
+            base_penalty = _existing_base_penalty(physical, catalog)
             extra_penalty = max(0, new_ordinal - 2) * 100000
             new_penalty = float(base_penalty) + float(extra_penalty)
             prefix = f"Người Thứ {new_ordinal} {canonical.lower()}"
+            user_note = _strip_generated_progressive_prefix(physical.get('Chi tiết', ''))
+            new_detail = f"{prefix} | {user_note}" if user_note else prefix
 
-            for physical in physical_rows:
-                source_id = str(physical.get('__source_sheet_id', '')).strip()
-                try:
-                    row_idx = int(float(physical.get('__source_row')))
-                except Exception:
-                    continue
-                target = sheet_map.get(source_id)
-                if target is None:
-                    continue
+            # F:L = Chi tiết, Số ngày tính, Số ngày phép cộng dồn, Phạt, Ngày/Giờ/Người cập nhật.
+            values_f_to_l = [[
+                new_detail,
+                physical.get('Số ngày tính', ''),
+                physical.get('Số ngày phép cộng dồn', ''),
+                new_penalty,
+                update_date,
+                update_time,
+                actor,
+            ]]
+            gspread_update_range(sheet, f'F{row_idx}:L{row_idx}', values_f_to_l, value_input_option='USER_ENTERED')
+            updated_rows += 1
 
-                user_note = _strip_generated_progressive_prefix(physical.get('Chi tiết', ''))
-                new_detail = f"{prefix} | {user_note}" if user_note else prefix
-
-                # Chỉ thay phần cần thiết; giữ nguyên Số ngày tính và Số ngày phép cộng dồn hiện có.
-                e_val = physical.get('Số ngày tính', '')
-                f_val = physical.get('Số ngày phép cộng dồn', '')
-                values_d_to_j = [[
-                    new_detail,
-                    e_val,
-                    f_val,
-                    new_penalty,
-                    update_date,
-                    update_time,
-                    actor,
-                ]]
-                gspread_update_range(target, f'D{row_idx}:J{row_idx}', values_d_to_j, value_input_option='USER_ENTERED')
-                updated_physical_rows += 1
-
-    if updated_physical_rows:
+    if updated_rows:
         _clear_leave_data_caches()
-    return updated_physical_rows
-
+    return updated_rows
 
 def update_schedule_record(original_row, edited_row, updated_by):
-    """
-    Sửa đúng dòng ở Google Sheet nguồn của bản ghi đang hiển thị.
-    Sau khi sửa, tự động xếp lại Người Thứ X/phạt lũy tiến của nhóm cũ và nhóm mới.
-    """
+    """Sửa đúng dòng trên nguồn duy nhất Sheet1 A:L và xếp lại phạt lũy tiến."""
     try:
         client = get_gspread_client()
         if not client:
             return False, "Chưa cấu hình quyền kết nối Google Sheets."
 
-        # Nhớ nhóm cũ trước khi thay đổi để sau đó có thể co lại thứ tự 2->1, 3->2...
         affected_groups = set()
         old_group = _progressive_group_key(original_row)
         if old_group:
             affected_groups.add(old_group)
 
-        # Đọc LIVE cả hai nguồn để tránh dùng cache khi tính lại hoặc kiểm tra trùng.
         live_all = _load_live_two_leave_sheets(client)
         recalculated = recalculate_schedule_fields(
-            original_row,
-            edited_row,
-            updated_by,
+            original_row, edited_row, updated_by,
             all_leave_data=live_all,
             source_df=globals().get('df_loai_nghi', pd.DataFrame()),
         )
@@ -7608,125 +7518,77 @@ def update_schedule_record(original_row, edited_row, updated_by):
         if not nv or not lydo:
             return False, "Tên nhân viên và Lý do nghỉ không được để trống."
 
-        # Chỉ chặn nếu sửa thành CÙNG Ngày + Nhân viên + Lý do đã tồn tại.
-        # Nếu lý do khác nhau thì được phép có nhiều dòng trong cùng ngày, kể cả Phạt vi phạm > 0.
         others = _exclude_original_from_leave_df(live_all, original_row)
         if _leave_exists_in_sources(others, ngay, nv, lydo):
             return False, f"'{nv}' đã có đúng lý do '{lydo}' trong ngày {ngay}. Có thể ghi thêm nếu là lý do khác."
 
-        new_values = [
-            ngay,
-            nv,
-            lydo,
-            str(recalculated.get('Chi tiết', '')).strip(),
-            float(recalculated.get('Số ngày tính', 0) or 0),
-            float(recalculated.get('Số ngày phép cộng dồn', 0) or 0),
-            float(recalculated.get('Phạt vi phạm', 0) or 0),
-            str(recalculated.get('Ngày cập nhật', '')),
-            str(recalculated.get('Giờ cập nhật', '')),
-            str(recalculated.get('Người cập nhật', updated_by)),
-        ]
-
-        source_id = str(original_row.get('__source_sheet_id', '')).strip() or SHEET_DU_PHONG_ID
-        target = client.open_by_key(source_id).get_worksheet(0)
+        target = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        _ensure_leave_sheet_header(target)
         row_idx = _find_schedule_row_index(target, original_row)
         if not row_idx:
-            return False, "Không tìm thấy dòng tương ứng trong Google Sheet nguồn."
-        gspread_update_range(target, f'A{row_idx}:J{row_idx}', [new_values], raw=False)
+            return False, "Không tìm thấy dòng tương ứng trong Sheet1 nguồn lịch nghỉ."
 
-        # Nhóm mới cũng phải được chuẩn hóa. Nếu đổi Không phép -> Có phép thì new_group=None,
-        # nhưng old_group vẫn được xếp lại để Người 2 trở thành Người 1, v.v.
+        new_values = _leave_record_to_sheet_row(recalculated, updated_by=updated_by, force_audit_now=True)
+        gspread_update_range(target, f'A{row_idx}:L{row_idx}', [new_values], raw=False)
+
         new_group = _progressive_group_key(recalculated)
         if new_group:
             affected_groups.add(new_group)
-
         rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, updated_by)
 
         _clear_leave_data_caches()
         if rebalanced:
-            return True, f"Đã cập nhật lịch nghỉ và tự xếp lại thứ tự/phạt lũy tiến cho {rebalanced} bản ghi trong nhóm bị ảnh hưởng."
+            return True, f"Đã cập nhật lịch nghỉ A:L và tự xếp lại thứ tự/phạt lũy tiến cho {rebalanced} bản ghi."
         return True, "Đã cập nhật lịch nghỉ thành công."
     except Exception as e:
         return False, f"Lỗi cập nhật lịch nghỉ: {e}"
 
 def delete_schedule_records(original_rows, updated_by=None):
-    """
-    V91.5: xóa LOGICAL record ở cả 2 Google Sheet.
-    Nếu cùng Ngày + Nhân viên + Lý do đang tồn tại ở cả hai nguồn, phải xóa cả hai;
-    nếu chỉ xóa một bản sao thì quota ngày vẫn có thể bị tính là còn người nghỉ.
-    """
+    """Xóa logical record chỉ trên Sheet1 1Kz0..., khóa = Ngày + Tên nhân viên + Lý do nghỉ."""
     try:
         client = get_gspread_client()
         if not client:
             return False, "Chưa cấu hình quyền kết nối Google Sheets."
         actor = str(updated_by or st.session_state.get("current_user", "Hệ thống"))
-
         target_keys = {schedule_key(r) for r in (original_rows or []) if schedule_key(r)}
+        if not target_keys:
+            return False, "Không tìm thấy lịch cần xóa."
+
         affected_groups = set()
         for row in (original_rows or []):
             group_key = _progressive_group_key(row)
             if group_key:
                 affected_groups.add(group_key)
 
-        if not target_keys:
-            return False, "Không tìm thấy lịch cần xóa."
+        target = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        _ensure_leave_sheet_header(target)
+        values = _gs_call_with_backoff(target.get, LEAVE_SHEET_RANGE)
+        indices = []
+        if values and len(values) > 1:
+            for sheet_row, vals in enumerate(values[1:], start=2):
+                row_dict = _leave_sheet_row_to_record(vals, SHEET_DU_PHONG_ID, sheet_row)
+                if not any(str(row_dict.get(c, '')).strip() for c in LEAVE_INTERNAL_COLUMNS):
+                    continue
+                if schedule_key(row_dict) in target_keys:
+                    g = _progressive_group_key(row_dict)
+                    if g:
+                        affected_groups.add(g)
+                    indices.append(sheet_row)
 
-        source_ids = [SHEET_DU_PHONG_ID, SHEET_LICH_NGHI_2_ID]
-        deleted = 0
+        for idx in sorted(set(indices), reverse=True):
+            _gs_call_with_backoff(target.delete_rows, idx)
 
-        expected = [
-            "Ngày", "Tên nhân viên", "Lý do nghỉ", "Chi tiết", "Số ngày tính",
-            "Số ngày phép cộng dồn", "Phạt vi phạm", "Ngày cập nhật",
-            "Giờ cập nhật", "Người cập nhật"
-        ]
-
-        for source_id in source_ids:
-            target = client.open_by_key(source_id).get_worksheet(0)
-            values = _gs_call_with_backoff(target.get, 'A:J')
-            indices = []
-            if values and len(values) > 1:
-                header = [str(x).strip() for x in values[0][:10]]
-                if len(header) < 10 or not header[0]:
-                    header = expected
-                for sheet_row, vals in enumerate(values[1:], start=2):
-                    row_vals = list(vals[:10]) + [""] * max(0, 10 - len(vals))
-                    if not any(str(v).strip() for v in row_vals):
-                        continue
-                    row_dict = {
-                        header[i] if i < len(header) else expected[i]:
-                        row_vals[i] if i < len(row_vals) else ""
-                        for i in range(10)
-                    }
-                    if 'Loại nghỉ' in row_dict and 'Lý do nghỉ' not in row_dict:
-                        row_dict['Lý do nghỉ'] = row_dict.get('Loại nghỉ', '')
-                    if schedule_key(row_dict) in target_keys:
-                        g = _progressive_group_key(row_dict)
-                        if g:
-                            affected_groups.add(g)
-                        indices.append(sheet_row)
-
-            for idx in sorted(set(indices), reverse=True):
-                _gs_call_with_backoff(target.delete_rows, idx)
-                deleted += 1
-
-        rebalanced = (
-            rebalance_progressive_penalty_groups(client, affected_groups, actor)
-            if affected_groups else 0
-        )
-
+        deleted = len(set(indices))
+        rebalanced = rebalance_progressive_penalty_groups(client, affected_groups, actor) if affected_groups else 0
         _clear_leave_data_caches()
 
         if deleted <= 0:
-            return False, "Không tìm thấy dòng tương ứng trong Google Sheet để xóa."
+            return False, "Không tìm thấy dòng tương ứng trong Sheet1 để xóa."
         if rebalanced:
-            return True, (
-                f"Đã xóa {deleted} dòng vật lý của lịch và tự xếp lại thứ tự/phạt "
-                f"cho {rebalanced} bản ghi còn lại."
-            )
-        return True, f"Đã xóa lịch khỏi toàn bộ nguồn Google Sheet ({deleted} dòng vật lý)."
+            return True, f"Đã xóa {deleted} dòng và tự xếp lại thứ tự/phạt cho {rebalanced} bản ghi còn lại."
+        return True, f"Đã xóa {deleted} dòng lịch nghỉ khỏi Sheet1."
     except Exception as e:
         return False, f"Lỗi xóa lịch nghỉ: {e}"
-
 
 # --- HÀM TẢI FILE TỪ DRIVE ---
 def download_file_from_google_drive(id, destination):
@@ -8620,23 +8482,16 @@ def render_bang_tour_fast_v920():
 
 def combine_leave_sources_for_daily_stats(*sources):
     """
-    Hợp nhất một hoặc nhiều nguồn lịch nghỉ. Loại trùng theo:
-    Ngày + Tên nhân viên + Lý do nghỉ. Nguồn truyền vào SAU sẽ được ưu tiên
-    khi cùng một bản ghi xuất hiện ở nhiều nguồn.
+    Hợp nhất dữ liệu lịch nghỉ theo khóa Ngày + Tên nhân viên + Lý do nghỉ.
+    V93.2 chỉ có một nguồn Sheet1 1Kz0..., nhưng giữ hàm này để tương thích các chỗ gọi cũ.
     """
-    expected = [
-        'Ngày', 'Tên nhân viên', 'Lý do nghỉ', 'Chi tiết', 'Số ngày tính',
-        'Số ngày phép cộng dồn', 'Phạt vi phạm', 'Ngày cập nhật',
-        'Giờ cập nhật', 'Người cập nhật'
-    ]
+    expected = list(LEAVE_INTERNAL_COLUMNS)
     meta_cols = ['__source_sheet_id', '__source_row']
     prepared = []
     for source in sources:
-        if source is None or source.empty:
+        if source is None or not isinstance(source, pd.DataFrame) or source.empty:
             continue
         d = source.copy()
-        if 'Loại nghỉ' in d.columns and 'Lý do nghỉ' not in d.columns:
-            d = d.rename(columns={'Loại nghỉ': 'Lý do nghỉ'})
         for col in expected:
             if col not in d.columns:
                 d[col] = ""
@@ -8644,10 +8499,18 @@ def combine_leave_sources_for_daily_stats(*sources):
             if col not in d.columns:
                 d[col] = ""
         d = d[expected + meta_cols].copy()
-        # Đọc từng ô để không làm mất các dòng có ngày dạng serial Excel/Google Sheets
-        # hoặc dữ liệu ngày bị trộn dd/mm/yyyy, dd-mm-yyyy, yyyy-mm-dd.
         d['Ngày'] = d['Ngày'].apply(_parse_vn_date)
         d = d[d['Ngày'].notna()].copy()
+        # B/F là dữ liệu thật của schema mới; chỉ điền fallback nếu dòng lịch sử đang trống.
+        blank_weekday = d['Thứ ngày'].astype(str).str.strip().eq('')
+        if blank_weekday.any():
+            d.loc[blank_weekday, 'Thứ ngày'] = d.loc[blank_weekday, 'Ngày'].apply(_vn_weekday_label)
+        blank_type = d['Loại nghỉ'].astype(str).str.strip().eq('')
+        if blank_type.any():
+            mapping = _leave_reason_type_map(globals().get('df_loai_nghi', pd.DataFrame()))
+            d.loc[blank_type, 'Loại nghỉ'] = d.loc[blank_type, 'Lý do nghỉ'].apply(
+                lambda v: mapping.get(normalize_leave_reason(v), "")
+            )
         for _money_col in ['Số ngày tính', 'Số ngày phép cộng dồn']:
             d[_money_col] = d[_money_col].apply(lambda _v: _parse_leave_number(_v, 0.0, money=False))
         d['Phạt vi phạm'] = d['Phạt vi phạm'].apply(lambda _v: _parse_leave_number(_v, 0.0, money=True))
@@ -8666,7 +8529,6 @@ def combine_leave_sources_for_daily_stats(*sources):
     return combined.reset_index(drop=True)
 
 
-@st.cache_data(ttl=60)
 def load_lich_nghi(url):
     try:
         file_id = url.split('/d/')[1].split('/')[0]
@@ -12542,7 +12404,7 @@ def ensure_employee_in_tichluy(employee_name, start_work_date=None):
 def ensure_employee_in_leave_employee_list(employee_name, start_work_date=None):
     """
     Đồng bộ nhân viên mới sang file lịch nghỉ 1Kz0... vào sheet DanhSachNV.
-    Không chèn dòng giả vào Sheet1 A:J vì Sheet1 là dữ liệu lịch nghỉ nghiệp vụ.
+    Không chèn dòng giả vào Sheet1 A:L vì Sheet1 là dữ liệu lịch nghỉ nghiệp vụ.
     """
     try:
         name = str(employee_name or '').strip()
@@ -16061,7 +15923,6 @@ if isinstance(df_credentials, pd.DataFrame) and not df_credentials.empty and 'T�
         __employee_sort=df_credentials['Tên nhân viên'].astype(str).apply(normalize_login_name)
     ).sort_values('__employee_sort', kind='stable').drop(columns='__employee_sort').reset_index(drop=True)
 df_backup = load_backup_sheet_data()
-df_leave_secondary = load_secondary_leave_sheet_data()
 df_loai_nghi_gsheet = load_loai_nghi_from_gsheet()
 
 # V92.0: NGƯNG HOÀN TOÀN nguồn file LichNghi chính/XLSB.
@@ -16349,6 +16210,374 @@ def save_system_maintenance_mode(enabled, username, message=""):
         pg_ok, pg_err = _phase1_pg_write("system", MAINTENANCE_MODE_KEY, payload, username, source="dual_write")
         if not pg_ok:
             msg += f" ⚠️ PostgreSQL mirror lỗi: {pg_err}"
+    return ok, msg
+
+
+
+# ==========================================================
+# V93.3-PG2 - POSTGRESQL PHASE 2: ACCESS / EMPLOYMENT / LOCKS
+# ==========================================================
+# Giữ nguyên UI và API nghiệp vụ. 3 domain được chuyển theo backend mode:
+#   sheets   : hành vi Google Sheets cũ.
+#   dual     : đọc Sheets, mirror PG; ghi Sheets trước rồi dual-write PG.
+#   postgres : đọc/ghi PG; chỉ seed từ Sheets đúng 1 lần khi domain chưa init.
+# Nếu vera_postgres.py chưa có Phase 2 API thì tự quay về Sheets.
+_PHASE2_REQUIRED_VPG = (
+    "domain_is_initialized",
+    "read_feature_permissions", "sync_feature_permissions", "replace_feature_permission_scope",
+    "read_employment_statuses", "sync_employment_statuses", "upsert_employment_status",
+    "read_registration_role_locks", "sync_registration_role_locks", "upsert_registration_role_lock",
+)
+_PHASE2_DOMAIN_FEATURE = "feature_permissions"
+_PHASE2_DOMAIN_EMPLOYMENT = "employment_status"
+_PHASE2_DOMAIN_REGISTRATION = "registration_role_locks"
+
+# Giữ handle của implementation Google Sheets trước khi redefine.
+_gs_load_registration_role_locks = load_registration_role_locks
+_gs_set_registration_role_lock = set_registration_role_lock
+_gs_load_employment_status_map = load_employment_status_map
+_gs_set_employee_employment_status = set_employee_employment_status
+_gs_load_feature_permissions = load_feature_permissions
+_gs_rewrite_feature_permission_scope = _rewrite_feature_permission_scope
+
+
+def _phase2_storage_mode():
+    if vpg is None or not vpg.is_enabled():
+        return "sheets"
+    if not all(hasattr(vpg, name) for name in _PHASE2_REQUIRED_VPG):
+        return "sheets"
+    try:
+        mode = str(vpg.data_backend_mode()).strip().lower()
+    except Exception:
+        mode = str(os.getenv("VERA_DATA_BACKEND", "sheets") or "sheets").strip().lower()
+    return mode if mode in {"sheets", "dual", "postgres"} else "sheets"
+
+
+def _phase2_pg_initialized(domain_key):
+    if _phase2_storage_mode() not in {"dual", "postgres"}:
+        return False
+    try:
+        return bool(vpg.domain_is_initialized(str(domain_key)))
+    except Exception:
+        return False
+
+
+def _phase2_clear_access_caches():
+    for fn_name in (
+        "load_registration_role_locks",
+        "load_employment_status_map",
+        "load_feature_permissions",
+    ):
+        try:
+            fn = globals().get(fn_name)
+            if fn is not None and hasattr(fn, "clear"):
+                fn.clear()
+        except Exception:
+            pass
+
+
+# ---------- Google Sheets snapshot helpers ----------
+def _phase2_sheet_registration_snapshot():
+    locks = {role: False for role in REGISTRATION_LOCK_ROLES}
+    rows = []
+    try:
+        ws = _registration_lock_ws()
+        if ws is None:
+            return locks, rows
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        if not vals:
+            gspread_update_range(ws, "A1:E1", [REGISTRATION_LOCK_HEADERS], value_input_option="USER_ENTERED")
+            return locks, rows
+        header = [normalize_login_name(x) for x in vals[0]]
+        role_idx = header.index(normalize_login_name("Vai trò")) if normalize_login_name("Vai trò") in header else 0
+        lock_idx = header.index(normalize_login_name("Khóa đăng ký")) if normalize_login_name("Khóa đăng ký") in header else 1
+        actor_idx = header.index(normalize_login_name("Người cập nhật")) if normalize_login_name("Người cập nhật") in header else 4
+        for row in vals[1:]:
+            role = str(row[role_idx] if role_idx < len(row) else "").strip().lower()
+            if role not in locks:
+                continue
+            locked = is_locked_value(row[lock_idx] if lock_idx < len(row) else "")
+            locks[role] = locked
+            rows.append({
+                "role": role,
+                "locked": bool(locked),
+                "updated_by": str(row[actor_idx] if actor_idx < len(row) else "").strip(),
+                "source": "google_sheets",
+            })
+    except Exception:
+        return _gs_load_registration_role_locks(), []
+    return locks, rows
+
+
+def _phase2_sheet_employment_snapshot():
+    result, rows = {}, []
+    try:
+        ws = _get_employment_status_worksheet()
+        if ws is None:
+            return result, rows
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        for row in vals[1:]:
+            if len(row) < 2:
+                continue
+            employee_name = str(row[1] if len(row) > 1 else "").strip()
+            key = normalize_login_name(employee_name)
+            if not key:
+                continue
+            raw_status = str(row[2] if len(row) > 2 else EMPLOYMENT_STATUS_ACTIVE).strip()
+            status = EMPLOYMENT_STATUS_ALIASES.get(normalize_login_name(raw_status), EMPLOYMENT_STATUS_ACTIVE)
+            result[key] = status
+            rows.append({
+                "employee_key": key,
+                "employee_name": employee_name,
+                "status": status,
+                "updated_by": str(row[5] if len(row) > 5 else "").strip(),
+                "source": "google_sheets",
+            })
+    except Exception:
+        return _gs_load_employment_status_map(), []
+    return result, rows
+
+
+def _phase2_sheet_feature_snapshot():
+    role_cfg, account_cfg, rows = {}, {}, []
+    try:
+        ws = _get_feature_permission_worksheet()
+        if ws is None:
+            return role_cfg, account_cfg, rows
+        values = _gs_call_with_backoff(ws.get_all_values)
+        for row in values[1:]:
+            if len(row) < 4:
+                continue
+            scope_raw = normalize_login_name(row[0])
+            target_display = str(row[1]).strip()
+            feature = str(row[2]).strip()
+            if feature not in FEATURE_DEFINITIONS or not target_display:
+                continue
+            allowed = str(row[3]).strip().casefold() in {'1','true','yes','on','x','co','có'}
+            if scope_raw in {'role','vai tro','vai trò'}:
+                scope = 'role'
+                target_key = target_display.lower()
+                role_cfg[(target_key, feature)] = allowed
+            elif scope_raw in {'account','tai khoan','tài khoản'}:
+                scope = 'account'
+                target_key = normalize_login_name(target_display)
+                account_cfg[(target_key, feature)] = allowed
+            else:
+                continue
+            rows.append({
+                "scope": scope,
+                "target_key": target_key,
+                "target_display": target_display,
+                "feature_key": feature,
+                "allowed": bool(allowed),
+                "updated_by": str(row[6] if len(row) > 6 else "").strip(),
+                "source": "google_sheets",
+            })
+    except Exception:
+        role_cfg, account_cfg = _gs_load_feature_permissions()
+        rows = []
+        for (target, feature), allowed in role_cfg.items():
+            rows.append({"scope":"role","target_key":str(target).lower(),"target_display":str(target),"feature_key":feature,"allowed":bool(allowed),"source":"google_sheets"})
+        for (target, feature), allowed in account_cfg.items():
+            rows.append({"scope":"account","target_key":normalize_login_name(target),"target_display":str(target),"feature_key":feature,"allowed":bool(allowed),"source":"google_sheets"})
+    return role_cfg, account_cfg, rows
+
+
+# ---------- Registration role locks ----------
+@st.cache_data(ttl=15, show_spinner=False)
+def load_registration_role_locks():
+    mode = _phase2_storage_mode()
+    if mode == "sheets":
+        return _gs_load_registration_role_locks()
+
+    if mode == "postgres" and _phase2_pg_initialized(_PHASE2_DOMAIN_REGISTRATION):
+        try:
+            df = vpg.read_registration_role_locks()
+            locks = {role: False for role in REGISTRATION_LOCK_ROLES}
+            if isinstance(df, pd.DataFrame):
+                for _, row in df.iterrows():
+                    role = str(row.get("role", "")).strip().lower()
+                    if role in locks:
+                        locks[role] = bool(row.get("locked", False))
+            return locks
+        except Exception:
+            pass
+
+    locks, rows = _phase2_sheet_registration_snapshot()
+    try:
+        vpg.sync_registration_role_locks(rows, updated_by="Google Sheets seed/mirror", source="google_sheets")
+    except Exception:
+        if mode == "postgres":
+            return locks
+    return locks
+
+
+def set_registration_role_lock(role, locked, actor=""):
+    role = str(role or "").strip().lower()
+    actor = str(actor or st.session_state.get("current_user", "")).strip()
+    if role == "admin":
+        return False, "Admin luôn được mở quyền đăng ký và không thể bị khóa."
+    if role not in REGISTRATION_LOCK_ROLES:
+        return False, f"Vai trò không hợp lệ: {role}"
+    mode = _phase2_storage_mode()
+    if mode == "postgres":
+        try:
+            vpg.upsert_registration_role_lock(role, bool(locked), updated_by=actor, source="app")
+            _phase2_clear_access_caches()
+            return True, f"Đã {'KHÓA' if locked else 'MỞ'} quyền đăng ký của vai trò {REGISTRATION_LOCK_LABELS.get(role, role)}."
+        except Exception as exc:
+            return False, f"Lỗi lưu khóa quyền đăng ký trên PostgreSQL: {exc}"
+
+    ok, msg = _gs_set_registration_role_lock(role, locked, actor)
+    _phase2_clear_access_caches()
+    if ok and mode == "dual":
+        try:
+            vpg.upsert_registration_role_lock(role, bool(locked), updated_by=actor, source="dual_write")
+        except Exception as exc:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {exc}"
+    return ok, msg
+
+
+# ---------- Employment status ----------
+@st.cache_data(ttl=120, show_spinner=False)
+def load_employment_status_map():
+    mode = _phase2_storage_mode()
+    if mode == "sheets":
+        return _gs_load_employment_status_map()
+
+    if mode == "postgres" and _phase2_pg_initialized(_PHASE2_DOMAIN_EMPLOYMENT):
+        try:
+            df = vpg.read_employment_statuses()
+            result = {}
+            if isinstance(df, pd.DataFrame):
+                for _, row in df.iterrows():
+                    key = str(row.get("employee_key", "")).strip()
+                    status = EMPLOYMENT_STATUS_ALIASES.get(
+                        normalize_login_name(row.get("status", "")), EMPLOYMENT_STATUS_ACTIVE
+                    )
+                    if key:
+                        result[key] = status
+            return result
+        except Exception:
+            pass
+
+    result, rows = _phase2_sheet_employment_snapshot()
+    try:
+        vpg.sync_employment_statuses(rows, updated_by="Google Sheets seed/mirror", source="google_sheets")
+    except Exception:
+        pass
+    return result
+
+
+def set_employee_employment_status(employee_name, status, updated_by):
+    status = EMPLOYMENT_STATUS_ALIASES.get(normalize_login_name(status), "")
+    if status not in EMPLOYMENT_STATUS_OPTIONS:
+        return False, "Trạng thái không hợp lệ."
+
+    # Giữ nguyên validation nghiệp vụ của V93.2.
+    try:
+        creds = load_credentials_recent()
+        target_key = normalize_login_name(employee_name)
+        role = ''
+        if isinstance(creds, pd.DataFrame) and not creds.empty:
+            hit = creds[creds['Tên nhân viên'].apply(normalize_login_name) == target_key]
+            if not hit.empty:
+                role = str(hit.iloc[0].get('Phân quyền', '')).strip().lower()
+        if role not in EMPLOYMENT_STATUS_MANAGEABLE_ROLES:
+            return False, "Chỉ có thể cập nhật trạng thái làm việc cho tài khoản nhân sự."
+    except Exception as exc:
+        return False, f"Không kiểm tra được tài khoản nhân sự: {exc}"
+
+    mode = _phase2_storage_mode()
+    if mode == "postgres":
+        try:
+            vpg.upsert_employment_status(
+                target_key, str(employee_name).strip(), status,
+                updated_by=str(updated_by).strip(), source="app"
+            )
+            _phase2_clear_access_caches()
+            return True, f"Đã cập nhật {employee_name}: {status}."
+        except Exception as exc:
+            return False, f"Lỗi cập nhật trạng thái nhân sự trên PostgreSQL: {exc}"
+
+    ok, msg = _gs_set_employee_employment_status(employee_name, status, updated_by)
+    _phase2_clear_access_caches()
+    if ok and mode == "dual":
+        try:
+            vpg.upsert_employment_status(
+                target_key, str(employee_name).strip(), status,
+                updated_by=str(updated_by).strip(), source="dual_write"
+            )
+        except Exception as exc:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {exc}"
+    return ok, msg
+
+
+# ---------- Feature permissions ----------
+@st.cache_data(ttl=300, show_spinner=False)
+def load_feature_permissions():
+    mode = _phase2_storage_mode()
+    if mode == "sheets":
+        return _gs_load_feature_permissions()
+
+    if mode == "postgres" and _phase2_pg_initialized(_PHASE2_DOMAIN_FEATURE):
+        try:
+            df = vpg.read_feature_permissions()
+            role_cfg, account_cfg = {}, {}
+            if isinstance(df, pd.DataFrame):
+                for _, row in df.iterrows():
+                    scope = str(row.get("scope", "")).strip().lower()
+                    target_key = str(row.get("target_key", "")).strip()
+                    feature = str(row.get("feature_key", "")).strip()
+                    if feature not in FEATURE_DEFINITIONS or not target_key:
+                        continue
+                    allowed = bool(row.get("allowed", False))
+                    if scope == "role":
+                        role_cfg[(target_key.lower(), feature)] = allowed
+                    elif scope == "account":
+                        account_cfg[(target_key, feature)] = allowed
+            return role_cfg, account_cfg
+        except Exception:
+            pass
+
+    role_cfg, account_cfg, rows = _phase2_sheet_feature_snapshot()
+    try:
+        vpg.sync_feature_permissions(rows, updated_by="Google Sheets seed/mirror", source="google_sheets")
+    except Exception:
+        pass
+    return role_cfg, account_cfg
+
+
+def _rewrite_feature_permission_scope(scope, target, allowed_features, updated_by, inherit=False):
+    scope_norm = normalize_login_name(scope)
+    scope_clean = 'account' if scope_norm in {'account','tai khoan','tài khoản'} else 'role'
+    target_display = str(target or '').strip()
+    target_key = normalize_login_name(target_display) if scope_clean == 'account' else target_display.lower()
+    allowed_set = {str(k).strip() for k in (allowed_features or []) if str(k).strip() in FEATURE_DEFINITIONS}
+    feature_states = {key: (key in allowed_set) for key in FEATURE_DEFINITIONS}
+    mode = _phase2_storage_mode()
+
+    if mode == "postgres":
+        try:
+            vpg.replace_feature_permission_scope(
+                scope_clean, target_key, target_display, feature_states,
+                updated_by=str(updated_by).strip(), source="app", inherit=bool(inherit)
+            )
+            _clear_feature_permission_cache()
+            return True, 'Đã lưu phân quyền chức năng.' if not inherit else 'Đã xóa quyền riêng; tài khoản sẽ dùng quyền theo vai trò.'
+        except Exception as exc:
+            return False, f'Lỗi lưu phân quyền PostgreSQL: {exc}'
+
+    ok, msg = _gs_rewrite_feature_permission_scope(scope, target, allowed_features, updated_by, inherit=inherit)
+    _clear_feature_permission_cache()
+    if ok and mode == "dual":
+        try:
+            vpg.replace_feature_permission_scope(
+                scope_clean, target_key, target_display, feature_states,
+                updated_by=str(updated_by).strip(), source="dual_write", inherit=bool(inherit)
+            )
+        except Exception as exc:
+            msg += f" ⚠️ PostgreSQL mirror lỗi: {exc}"
     return ok, msg
 
 
@@ -20191,7 +20420,6 @@ elif selected_page == "⚙️ Giao diện tùy chỉnh" and st.session_state.cur
                     _sync_jobs = [
                         ("credentials", _load_credentials_from_sheets, 30),
                         ("leave_primary", _load_backup_sheet_data_from_sheets, 45),
-                        ("leave_secondary", _load_secondary_leave_sheet_data_from_sheets, 90),
                         ("tichluy", _load_tichluy_tracking_from_sheets, 90),
                         ("violation_debt", _load_violation_debt_ledger_from_sheets, 60),
                         ("payroll_history", _load_payroll_history_from_sheets, 90),
@@ -20908,7 +21136,7 @@ elif selected_page == "⏸️ Auto Update phạt" and st.session_state.current_r
         "• **KHÔNG dọn vệ sinh ca 1**: chỉ áp dụng cho role `nhanvien` đang làm **Ca 1 trong tuần hiện tại**, "
         "không có **Hỗ trợ Ca 1 đi trễ 2 tiếng / Hỗ trợ Ca 1 đi trễ 3 tiếng / Hỗ trợ Ca 2 đi trễ 1 tiếng**, "
         "và hôm đó có **Đi trễ <=30 / <=60 / >60 đến <=120 phút** theo đúng loại nghỉ đã cấu hình.  \n"
-        "• Tiền phạt và Số ngày tính lấy trực tiếp từ sheet **LoaiNghi**; dữ liệu phạt ghi vào Sheet1 A:J và không tạo trùng cùng Ngày + Nhân viên + Lý do.  \n"
+        "• Tiền phạt và Số ngày tính lấy trực tiếp từ sheet **LoaiNghi**; dữ liệu phạt ghi vào Sheet1 A:L và không tạo trùng cùng Ngày + Nhân viên + Lý do.  \n"
         "• **Email bắt buộc cho mọi Auto Update có Phạt vi phạm > 0**: gửi từ `veraspabienhoa@gmail.com` đến nhân viên bị phạt; CC `veraspabienhoa@gmail.com + quanly + letan`. Email lỗi sẽ được Job kế tiếp tự thử gửi lại."
     )
 
@@ -21154,13 +21382,10 @@ elif selected_page == "🔄 Đồng bộ dữ liệu" and has_feature_access("sy
         st.markdown("### ☁️ Dữ liệu lịch nghỉ · Google Sheets")
         st.info(
             "V92.0 đã ngưng sử dụng file LichNghi chính/XLSB làm nguồn dữ liệu. "
-            "Hệ thống hiện chỉ đọc và quản lý lịch nghỉ trên 2 Google Sheet."
+            "Hệ thống chỉ đọc và quản lý lịch nghỉ trên Sheet1 của Google Sheet 1Kz0... theo schema A:L."
         )
 
-        _google_leave_export = combine_leave_sources_for_daily_stats(
-            df_leave_secondary,
-            df_backup,
-        )
+        _google_leave_export = combine_leave_sources_for_daily_stats(df_backup)
         st.download_button(
             "📥 Tải Excel lịch nghỉ hiện tại từ Google Sheets",
             data=to_excel(_google_leave_export),
@@ -22914,7 +23139,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
 
             # V91.5: mọi kiểm quota/trùng trong form dùng dữ liệu LIVE Google Sheet.
             _registration_live_df = _load_live_leave_registration_for_validation(
-                [df_leave_secondary, df_backup]
+                [df_backup]
             )
 
             # --- CẢNH BÁO SỚM SỐ NGƯỜI NGHỈ ---
@@ -23148,7 +23373,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                             # Cuối tuần gồm cả Thứ 7 và Chủ nhật.
                             if can_proceed:
                                 _weekend_all_sources = _load_live_leave_registration_for_validation(
-                                    [df_leave_secondary, df_backup]
+                                    [df_backup]
                                 )
                                 _weekend_ok, _weekend_msg = _validate_monthly_weekend_registration_limit(
                                     _weekend_all_sources,
@@ -23175,7 +23400,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                                 if pd.isna(limit_pn): limit_pn = 0
 
                                 _personal_live = _load_live_leave_registration_for_validation(
-                                    [df_leave_secondary, df_backup]
+                                    [df_backup]
                                 )
                                 user_hist = (
                                     _personal_live[
@@ -23239,7 +23464,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                                         # - không 0.5 + 0.5;
                                         # - không 2 lần CÓ phép / KHÔNG phép / PHÁT SINH.
                                         latest_registration_df = _load_live_leave_registration_for_validation(
-                                            [df_leave_secondary, df_backup]
+                                            [df_backup]
                                         )
 
                                         if not is_admin_leave_registration:
@@ -23435,19 +23660,15 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             _clear_leave_data_caches()
             rerun_current_view()
 
-    # Lọc dữ liệu: phần thống kê/Chi tiết danh sách dùng ĐÚNG 2 Google Sheet:
-    # 1) SHEET_DU_PHONG_ID (nơi nhập liệu hiện tại)
-    # 2) SHEET_LICH_NGHI_2_ID
-    # Nếu trùng Ngày + Tên nhân viên + Lý do nghỉ thì ưu tiên Sheet dự phòng.
-    detail_all_df = combine_leave_sources_for_daily_stats(df_leave_secondary, df_backup)
+    # V93.2: thống kê/Chi tiết danh sách chỉ dùng Sheet1 của SHEET_DU_PHONG_ID (1Kz0...), schema A:L.
+    detail_all_df = combine_leave_sources_for_daily_stats(df_backup)
     # Nếu cache nguồn từng trả về rỗng do lỗi API tạm thời, chủ động đọc lại đúng một lần
     # để phần Chi tiết danh sách không bị trắng dù Google Sheet đang có dữ liệu.
     if detail_all_df.empty:
         try:
-            load_backup_sheet_data.clear(); load_secondary_leave_sheet_data.clear()
+            load_backup_sheet_data.clear()
             df_backup = load_backup_sheet_data()
-            df_leave_secondary = load_secondary_leave_sheet_data()
-            detail_all_df = combine_leave_sources_for_daily_stats(df_leave_secondary, df_backup)
+            detail_all_df = combine_leave_sources_for_daily_stats(df_backup)
         except Exception:
             pass
     if not detail_all_df.empty:

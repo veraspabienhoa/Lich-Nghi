@@ -1,9 +1,11 @@
 """Shared PostgreSQL data layer for Vera Spa Streamlit on Cloud Run.
 
 Phase 1 keeps the existing shared dataset-cache API and adds PostgreSQL-primary
-storage for low-risk application settings. Google Sheets can stay authoritative
-while VERA_DATA_BACKEND=dual mirrors settings into PostgreSQL. After validation,
-VERA_DATA_BACKEND=postgres promotes PostgreSQL to the primary setting store.
+storage for low-risk application settings. Phase 2 adds normalized PostgreSQL
+business tables for feature permissions, employment status, and registration-role
+locks. Google Sheets can stay authoritative while VERA_DATA_BACKEND=dual mirrors
+these domains into PostgreSQL. After validation, VERA_DATA_BACKEND=postgres promotes
+PostgreSQL to the primary store while Sheets are used only for one-time seeding.
 
 Supported VERA_DATA_BACKEND values:
 - sheets   : current behavior; PostgreSQL dataset cache may still be used.
@@ -31,7 +33,16 @@ CACHE_TABLE = "vera_dataset_cache"
 EVENT_TABLE = "vera_sync_event"
 SETTING_TABLE = "vera_app_setting"
 SCHEMA_VERSION_TABLE = "vera_schema_version"
+DOMAIN_STATE_TABLE = "vera_domain_state"
+FEATURE_PERMISSION_TABLE = "vera_feature_permission"
+EMPLOYMENT_STATUS_TABLE = "vera_employment_status"
+REGISTRATION_LOCK_TABLE = "vera_registration_role_lock"
 PHASE1_SCHEMA_VERSION = 1
+PHASE2_SCHEMA_VERSION = 2
+
+DOMAIN_FEATURE_PERMISSIONS = "feature_permissions"
+DOMAIN_EMPLOYMENT_STATUS = "employment_status"
+DOMAIN_REGISTRATION_LOCKS = "registration_role_locks"
 
 
 def _truthy(value: object) -> bool:
@@ -151,6 +162,54 @@ def ensure_schema(engine: Optional[Engine] = None) -> None:
         """,
         f"CREATE INDEX IF NOT EXISTS idx_{SETTING_TABLE}_updated ON {SETTING_TABLE}(updated_at DESC)",
         f"""
+        CREATE TABLE IF NOT EXISTS {DOMAIN_STATE_TABLE} (
+            domain_key TEXT PRIMARY KEY,
+            initialized BOOLEAN NOT NULL DEFAULT FALSE,
+            row_count INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT '',
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {FEATURE_PERMISSION_TABLE} (
+            scope TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            target_display TEXT NOT NULL DEFAULT '',
+            feature_key TEXT NOT NULL,
+            allowed BOOLEAN NOT NULL DEFAULT FALSE,
+            source TEXT NOT NULL DEFAULT 'app',
+            updated_by TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (scope, target_key, feature_key)
+        )
+        """,
+        f"CREATE INDEX IF NOT EXISTS idx_{FEATURE_PERMISSION_TABLE}_target ON {FEATURE_PERMISSION_TABLE}(scope, target_key)",
+        f"CREATE INDEX IF NOT EXISTS idx_{FEATURE_PERMISSION_TABLE}_feature ON {FEATURE_PERMISSION_TABLE}(feature_key)",
+        f"""
+        CREATE TABLE IF NOT EXISTS {EMPLOYMENT_STATUS_TABLE} (
+            employee_key TEXT PRIMARY KEY,
+            employee_name TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'app',
+            updated_by TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        f"CREATE INDEX IF NOT EXISTS idx_{EMPLOYMENT_STATUS_TABLE}_status ON {EMPLOYMENT_STATUS_TABLE}(status)",
+        f"""
+        CREATE TABLE IF NOT EXISTS {REGISTRATION_LOCK_TABLE} (
+            role TEXT PRIMARY KEY,
+            locked BOOLEAN NOT NULL DEFAULT FALSE,
+            source TEXT NOT NULL DEFAULT 'app',
+            updated_by TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        f"""
         CREATE TABLE IF NOT EXISTS {SCHEMA_VERSION_TABLE} (
             component TEXT PRIMARY KEY,
             version INTEGER NOT NULL,
@@ -160,6 +219,13 @@ def ensure_schema(engine: Optional[Engine] = None) -> None:
         f"""
         INSERT INTO {SCHEMA_VERSION_TABLE}(component, version, updated_at)
         VALUES ('phase1_settings', {PHASE1_SCHEMA_VERSION}, NOW())
+        ON CONFLICT (component) DO UPDATE
+        SET version = GREATEST({SCHEMA_VERSION_TABLE}.version, EXCLUDED.version),
+            updated_at = NOW()
+        """,
+        f"""
+        INSERT INTO {SCHEMA_VERSION_TABLE}(component, version, updated_at)
+        VALUES ('phase2_access_status', {PHASE2_SCHEMA_VERSION}, NOW())
         ON CONFLICT (component) DO UPDATE
         SET version = GREATEST({SCHEMA_VERSION_TABLE}.version, EXCLUDED.version),
             updated_at = NOW()
@@ -364,6 +430,354 @@ def list_settings(category: Optional[str] = None) -> pd.DataFrame:
         return pd.DataFrame(out)
     except Exception:
         return pd.DataFrame(columns=["category", "setting_key", "value", "source", "updated_by", "revision", "updated_at"])
+
+
+
+# ============================================================
+# PHASE 2: ACCESS / EMPLOYMENT STATUS / REGISTRATION LOCKS
+# ============================================================
+def _mark_domain_conn(conn, domain_key: str, row_count: int, source: str = "", updated_by: str = "") -> None:
+    conn.execute(
+        text(
+            f"""
+            INSERT INTO {DOMAIN_STATE_TABLE}
+                (domain_key, initialized, row_count, source, updated_by, updated_at)
+            VALUES (:domain_key, TRUE, :row_count, :source, :updated_by, NOW())
+            ON CONFLICT (domain_key)
+            DO UPDATE SET initialized=TRUE, row_count=EXCLUDED.row_count,
+                          source=EXCLUDED.source, updated_by=EXCLUDED.updated_by,
+                          updated_at=NOW()
+            """
+        ),
+        {
+            "domain_key": str(domain_key),
+            "row_count": max(0, int(row_count or 0)),
+            "source": str(source or ""),
+            "updated_by": str(updated_by or ""),
+        },
+    )
+
+
+def domain_is_initialized(domain_key: str) -> bool:
+    if not is_enabled():
+        return False
+    try:
+        with get_engine().connect() as conn:
+            value = conn.execute(
+                text(f"SELECT initialized FROM {DOMAIN_STATE_TABLE} WHERE domain_key=:k"),
+                {"k": str(domain_key)},
+            ).scalar()
+        return bool(value)
+    except Exception:
+        return False
+
+
+def get_phase2_domain_status() -> pd.DataFrame:
+    if not is_enabled():
+        return pd.DataFrame(columns=["domain_key", "initialized", "row_count", "source", "updated_by", "updated_at"])
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(
+                text(f"SELECT domain_key,initialized,row_count,source,updated_by,updated_at FROM {DOMAIN_STATE_TABLE} ORDER BY domain_key")
+            ).mappings().all()
+        return pd.DataFrame([dict(r) for r in rows])
+    except Exception:
+        return pd.DataFrame(columns=["domain_key", "initialized", "row_count", "source", "updated_by", "updated_at"])
+
+
+def _bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "x", "co", "có", "locked", "khoa", "khóa"}
+
+
+# ---------- Feature permissions ----------
+def read_feature_permissions() -> pd.DataFrame:
+    cols = ["scope", "target_key", "target_display", "feature_key", "allowed", "source", "updated_by", "updated_at"]
+    if not is_enabled():
+        return pd.DataFrame(columns=cols)
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT scope,target_key,target_display,feature_key,allowed,source,updated_by,updated_at
+                FROM {FEATURE_PERMISSION_TABLE}
+                ORDER BY scope,target_key,feature_key
+                """
+            )
+        ).mappings().all()
+    return pd.DataFrame([dict(r) for r in rows], columns=cols)
+
+
+def sync_feature_permissions(rows, updated_by: str = "Google Sheets mirror", source: str = "google_sheets") -> int:
+    clean = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        scope = str(row.get("scope", "")).strip().lower()
+        target_key = str(row.get("target_key", "")).strip()
+        target_display = str(row.get("target_display", row.get("target", "")) or "").strip()
+        feature_key = str(row.get("feature_key", "")).strip()
+        if scope not in {"role", "account"} or not target_key or not feature_key:
+            continue
+        clean.append({
+            "scope": scope,
+            "target_key": target_key,
+            "target_display": target_display,
+            "feature_key": feature_key,
+            "allowed": _bool_value(row.get("allowed", False)),
+            "source": str(row.get("source", source) or source),
+            "updated_by": str(row.get("updated_by", updated_by) or updated_by),
+        })
+    with get_engine().begin() as conn:
+        conn.execute(text(f"DELETE FROM {FEATURE_PERMISSION_TABLE}"))
+        for item in clean:
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {FEATURE_PERMISSION_TABLE}
+                        (scope,target_key,target_display,feature_key,allowed,source,updated_by,created_at,updated_at)
+                    VALUES (:scope,:target_key,:target_display,:feature_key,:allowed,:source,:updated_by,NOW(),NOW())
+                    """
+                ),
+                item,
+            )
+        _mark_domain_conn(conn, DOMAIN_FEATURE_PERMISSIONS, len(clean), source, updated_by)
+        conn.execute(
+            text(f"INSERT INTO {EVENT_TABLE}(dataset_key,event_type,detail) VALUES (:k,'phase2_sync',:d)"),
+            {"k": DOMAIN_FEATURE_PERMISSIONS, "d": f"rows={len(clean)}; source={source}"},
+        )
+    return len(clean)
+
+
+def replace_feature_permission_scope(
+    scope: str,
+    target_key: str,
+    target_display: str,
+    feature_states: dict,
+    updated_by: str = "",
+    source: str = "app",
+    inherit: bool = False,
+) -> int:
+    scope = str(scope or "").strip().lower()
+    target_key = str(target_key or "").strip()
+    target_display = str(target_display or "").strip()
+    if scope not in {"role", "account"}:
+        raise ValueError("scope phải là role hoặc account")
+    if not target_key:
+        raise ValueError("target_key không được để trống")
+    states = feature_states if isinstance(feature_states, dict) else {}
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(f"DELETE FROM {FEATURE_PERMISSION_TABLE} WHERE scope=:scope AND target_key=:target_key"),
+            {"scope": scope, "target_key": target_key},
+        )
+        count = 0
+        if not inherit:
+            for feature_key, allowed in states.items():
+                feature_key = str(feature_key or "").strip()
+                if not feature_key:
+                    continue
+                conn.execute(
+                    text(
+                        f"""
+                        INSERT INTO {FEATURE_PERMISSION_TABLE}
+                            (scope,target_key,target_display,feature_key,allowed,source,updated_by,created_at,updated_at)
+                        VALUES (:scope,:target_key,:target_display,:feature_key,:allowed,:source,:updated_by,NOW(),NOW())
+                        """
+                    ),
+                    {
+                        "scope": scope,
+                        "target_key": target_key,
+                        "target_display": target_display,
+                        "feature_key": feature_key,
+                        "allowed": bool(allowed),
+                        "source": str(source or "app"),
+                        "updated_by": str(updated_by or ""),
+                    },
+                )
+                count += 1
+        total = conn.execute(text(f"SELECT COUNT(*) FROM {FEATURE_PERMISSION_TABLE}")).scalar() or 0
+        _mark_domain_conn(conn, DOMAIN_FEATURE_PERMISSIONS, int(total), source, updated_by)
+        conn.execute(
+            text(f"INSERT INTO {EVENT_TABLE}(dataset_key,event_type,detail) VALUES (:k,'phase2_write',:d)"),
+            {"k": DOMAIN_FEATURE_PERMISSIONS, "d": f"scope={scope}; target={target_key}; rows={count}; inherit={bool(inherit)}"},
+        )
+    return count
+
+
+# ---------- Employment status ----------
+def read_employment_statuses() -> pd.DataFrame:
+    cols = ["employee_key", "employee_name", "status", "source", "updated_by", "updated_at"]
+    if not is_enabled():
+        return pd.DataFrame(columns=cols)
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT employee_key,employee_name,status,source,updated_by,updated_at
+                FROM {EMPLOYMENT_STATUS_TABLE}
+                ORDER BY employee_name,employee_key
+                """
+            )
+        ).mappings().all()
+    return pd.DataFrame([dict(r) for r in rows], columns=cols)
+
+
+def sync_employment_statuses(rows, updated_by: str = "Google Sheets mirror", source: str = "google_sheets") -> int:
+    by_key = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("employee_key", "")).strip()
+        status = str(row.get("status", "")).strip()
+        if not key or not status:
+            continue
+        by_key[key] = {
+            "employee_key": key,
+            "employee_name": str(row.get("employee_name", "") or "").strip(),
+            "status": status,
+            "source": str(row.get("source", source) or source),
+            "updated_by": str(row.get("updated_by", updated_by) or updated_by),
+        }
+    clean = list(by_key.values())
+    with get_engine().begin() as conn:
+        conn.execute(text(f"DELETE FROM {EMPLOYMENT_STATUS_TABLE}"))
+        for item in clean:
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {EMPLOYMENT_STATUS_TABLE}
+                        (employee_key,employee_name,status,source,updated_by,created_at,updated_at)
+                    VALUES (:employee_key,:employee_name,:status,:source,:updated_by,NOW(),NOW())
+                    """
+                ),
+                item,
+            )
+        _mark_domain_conn(conn, DOMAIN_EMPLOYMENT_STATUS, len(clean), source, updated_by)
+        conn.execute(
+            text(f"INSERT INTO {EVENT_TABLE}(dataset_key,event_type,detail) VALUES (:k,'phase2_sync',:d)"),
+            {"k": DOMAIN_EMPLOYMENT_STATUS, "d": f"rows={len(clean)}; source={source}"},
+        )
+    return len(clean)
+
+
+def upsert_employment_status(employee_key: str, employee_name: str, status: str, updated_by: str = "", source: str = "app") -> None:
+    employee_key = str(employee_key or "").strip()
+    status = str(status or "").strip()
+    if not employee_key or not status:
+        raise ValueError("employee_key và status không được để trống")
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                INSERT INTO {EMPLOYMENT_STATUS_TABLE}
+                    (employee_key,employee_name,status,source,updated_by,created_at,updated_at)
+                VALUES (:employee_key,:employee_name,:status,:source,:updated_by,NOW(),NOW())
+                ON CONFLICT (employee_key)
+                DO UPDATE SET employee_name=EXCLUDED.employee_name,status=EXCLUDED.status,
+                              source=EXCLUDED.source,updated_by=EXCLUDED.updated_by,updated_at=NOW()
+                """
+            ),
+            {
+                "employee_key": employee_key,
+                "employee_name": str(employee_name or "").strip(),
+                "status": status,
+                "source": str(source or "app"),
+                "updated_by": str(updated_by or ""),
+            },
+        )
+        total = conn.execute(text(f"SELECT COUNT(*) FROM {EMPLOYMENT_STATUS_TABLE}")).scalar() or 0
+        _mark_domain_conn(conn, DOMAIN_EMPLOYMENT_STATUS, int(total), source, updated_by)
+        conn.execute(
+            text(f"INSERT INTO {EVENT_TABLE}(dataset_key,event_type,detail) VALUES (:k,'phase2_write',:d)"),
+            {"k": DOMAIN_EMPLOYMENT_STATUS, "d": f"employee={employee_key}; status={status}"},
+        )
+
+
+# ---------- Registration role locks ----------
+def read_registration_role_locks() -> pd.DataFrame:
+    cols = ["role", "locked", "source", "updated_by", "updated_at"]
+    if not is_enabled():
+        return pd.DataFrame(columns=cols)
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT role,locked,source,updated_by,updated_at
+                FROM {REGISTRATION_LOCK_TABLE}
+                ORDER BY role
+                """
+            )
+        ).mappings().all()
+    return pd.DataFrame([dict(r) for r in rows], columns=cols)
+
+
+def sync_registration_role_locks(rows, updated_by: str = "Google Sheets mirror", source: str = "google_sheets") -> int:
+    by_role = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("role", "")).strip().lower()
+        if not role:
+            continue
+        by_role[role] = {
+            "role": role,
+            "locked": _bool_value(row.get("locked", False)),
+            "source": str(row.get("source", source) or source),
+            "updated_by": str(row.get("updated_by", updated_by) or updated_by),
+        }
+    clean = list(by_role.values())
+    with get_engine().begin() as conn:
+        conn.execute(text(f"DELETE FROM {REGISTRATION_LOCK_TABLE}"))
+        for item in clean:
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {REGISTRATION_LOCK_TABLE}
+                        (role,locked,source,updated_by,created_at,updated_at)
+                    VALUES (:role,:locked,:source,:updated_by,NOW(),NOW())
+                    """
+                ),
+                item,
+            )
+        _mark_domain_conn(conn, DOMAIN_REGISTRATION_LOCKS, len(clean), source, updated_by)
+        conn.execute(
+            text(f"INSERT INTO {EVENT_TABLE}(dataset_key,event_type,detail) VALUES (:k,'phase2_sync',:d)"),
+            {"k": DOMAIN_REGISTRATION_LOCKS, "d": f"rows={len(clean)}; source={source}"},
+        )
+    return len(clean)
+
+
+def upsert_registration_role_lock(role: str, locked: bool, updated_by: str = "", source: str = "app") -> None:
+    role = str(role or "").strip().lower()
+    if not role:
+        raise ValueError("role không được để trống")
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                INSERT INTO {REGISTRATION_LOCK_TABLE}
+                    (role,locked,source,updated_by,created_at,updated_at)
+                VALUES (:role,:locked,:source,:updated_by,NOW(),NOW())
+                ON CONFLICT (role)
+                DO UPDATE SET locked=EXCLUDED.locked,source=EXCLUDED.source,
+                              updated_by=EXCLUDED.updated_by,updated_at=NOW()
+                """
+            ),
+            {
+                "role": role,
+                "locked": bool(locked),
+                "source": str(source or "app"),
+                "updated_by": str(updated_by or ""),
+            },
+        )
+        total = conn.execute(text(f"SELECT COUNT(*) FROM {REGISTRATION_LOCK_TABLE}")).scalar() or 0
+        _mark_domain_conn(conn, DOMAIN_REGISTRATION_LOCKS, int(total), source, updated_by)
+        conn.execute(
+            text(f"INSERT INTO {EVENT_TABLE}(dataset_key,event_type,detail) VALUES (:k,'phase2_write',:d)"),
+            {"k": DOMAIN_REGISTRATION_LOCKS, "d": f"role={role}; locked={bool(locked)}"},
+        )
 
 
 # ============================================================

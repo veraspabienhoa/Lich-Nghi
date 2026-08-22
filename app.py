@@ -18524,7 +18524,7 @@ SPECIAL_FILTER_BOX_UI_KEY_V92689 = "special_filter_box_ui_v92689"
 
 def _special_filter_box_default_v92689():
     one = {
-        "bg_color": "#F5A627", "text_color": "#000000", "border_color": "#D88900",
+        "bg_color": "#FAD18F", "text_color": "#000000", "border_color": "#D88900",
         "border_width": 2, "radius": 10, "font_weight": 700,
     }
     return {"desktop": dict(one), "mobile": dict(one)}

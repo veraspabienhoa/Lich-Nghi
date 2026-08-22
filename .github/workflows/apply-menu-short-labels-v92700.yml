@@ -1,0 +1,110 @@
+name: Apply short menu labels V92.7.00
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-menu-short-labels-v92700.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Patch app.py
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('app.py')
+          s = p.read_text(encoding='utf-8')
+
+          if not s.startswith('# V92.6.99'):
+              raise SystemExit('ERROR: expected V92.6.99 current app.py')
+
+          first, rest = s.split('\n', 1)
+          s = '# V92.7.00 - Rut gon ten MENU hien thi, giu nguyen route noi bo (2026-08-23)\n' + rest
+
+          old = '_MENU_DISPLAY_LABELS_V92699 = {"🧾 Log Book": "Log Book"}'
+          new = '''_MENU_DISPLAY_LABELS_V92700 = {
+    "📅 Đăng ký nghỉ phép": "📅 Đăng ký nghỉ",
+    "⏰ Quản lý ca làm việc": "⏰ Quản lý ca",
+    "🏷️ Trạng thái nhân viên": "🏷️ Trạng thái NV",
+    "⚙️ Giao diện tùy chỉnh": "⚙️ Giao diện",
+    "🏖️ Phép năm - Làm đẹp": "🏖️ Phép năm",
+    "🔐 Phân quyền chức năng": "🔐 Phân quyền",
+    "🔐 Khóa đăng ký LNP": "🔐 Khóa đăn ký",
+    "📘 Hướng dẫn sử dụng": "📘 Hướng dẫn",
+    "🧾 Log Book": "Log Book",
+}'''
+          if old not in s:
+              raise SystemExit('ERROR: display label map V92.6.99 not found')
+          s = s.replace(old, new, 1)
+          s = s.replace(
+              '_menu_label_v92699 = _MENU_DISPLAY_LABELS_V92699.get(page_name, page_name)',
+              '_menu_label_v92700 = _MENU_DISPLAY_LABELS_V92700.get(page_name, page_name)',
+              1,
+          )
+          s = s.replace(
+              'if st.sidebar.button(_menu_label_v92699, key=f"nav_{PAGE_SLUGS[page_name]}"',
+              'if st.sidebar.button(_menu_label_v92700, key=f"nav_{PAGE_SLUGS[page_name]}"',
+              1,
+          )
+
+          # Bảo đảm tiêu đề chỉ là MENU và vẫn căn giữa ngay trên danh sách nút.
+          s = s.replace(
+              "<div style='font-size:18px;font-weight:800;line-height:1.15;margin:2px 0 10px 0;text-align:center;'>MENU</div>",
+              "<div style='font-size:18px;font-weight:800;line-height:1.15;margin:2px 0 10px 0;text-align:center;'>MENU</div>",
+              1,
+          )
+
+          p.write_text(s, encoding='utf-8', newline='\n')
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          s = Path('app.py').read_text(encoding='utf-8')
+          ast.parse(s)
+          required = [
+              '# V92.7.00',
+              '"📅 Đăng ký nghỉ phép": "📅 Đăng ký nghỉ"',
+              '"⏰ Quản lý ca làm việc": "⏰ Quản lý ca"',
+              '"🏷️ Trạng thái nhân viên": "🏷️ Trạng thái NV"',
+              '"⚙️ Giao diện tùy chỉnh": "⚙️ Giao diện"',
+              '"🏖️ Phép năm - Làm đẹp": "🏖️ Phép năm"',
+              '"🔐 Phân quyền chức năng": "🔐 Phân quyền"',
+              '"🔐 Khóa đăng ký LNP": "🔐 Khóa đăn ký"',
+              '"📘 Hướng dẫn sử dụng": "📘 Hướng dẫn"',
+              "text-align:center;'>MENU</div>",
+          ]
+          missing = [x for x in required if x not in s]
+          if missing:
+              raise SystemExit('Missing: ' + repr(missing))
+          if '📌 Ghim MENU chức năng' in s:
+              raise SystemExit('Ghim MENU unexpectedly returned')
+          print('V92.7.00 validation OK')
+          PY
+          git diff --check
+
+      - name: Commit and clean workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git rm .github/workflows/apply-menu-short-labels-v92700.yml
+          git commit -m 'feat: shorten menu labels V92.7.00'
+          git push origin HEAD:main

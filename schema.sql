@@ -1,7 +1,7 @@
 -- Vera Spa PostgreSQL schema (Cloud SQL for PostgreSQL)
--- V92.7.0 Phase 2 safe-migration foundation.
+-- V92.8.0 Phase 3 normalized CRUD + safe reconciliation foundation.
 -- Google Sheets remains write-through/fallback during dual mode while PostgreSQL
--- stores durable primary snapshots for a controlled cutover.
+-- stores durable snapshots plus normalized employees / leave_records mirrors.
 
 CREATE TABLE IF NOT EXISTS vera_dataset_cache (
     dataset_key TEXT PRIMARY KEY,
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS vera_sync_event (
 CREATE INDEX IF NOT EXISTS idx_vera_sync_event_dataset_created
     ON vera_sync_event(dataset_key, created_at DESC);
 
--- Row-level mirror used for validation and the next cutover step to true PostgreSQL-primary CRUD.
+-- Row-level mirror used for validation and controlled cutover.
 CREATE TABLE IF NOT EXISTS vera_source_row (
     dataset_key TEXT NOT NULL,
     source_id TEXT NOT NULL DEFAULT '',
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS vera_source_row (
 CREATE INDEX IF NOT EXISTS idx_vera_source_row_natural
     ON vera_source_row(dataset_key, natural_key);
 
--- Normalized target tables for the full PostgreSQL-primary cutover.
+-- Phase 3: normalized employee CRUD mirror.
 CREATE TABLE IF NOT EXISTS employees (
     username TEXT PRIMARY KEY,
     stt INTEGER,
@@ -80,10 +80,22 @@ CREATE TABLE IF NOT EXISTS employees (
     login_locked BOOLEAN NOT NULL DEFAULT FALSE,
     remember_token_hash TEXT NOT NULL DEFAULT '',
     remember_token_expiry TEXT NOT NULL DEFAULT '',
+    employment_start_date TEXT NOT NULL DEFAULT '',
+    source_sheet_id TEXT NOT NULL DEFAULT 'credentials',
+    source_row INTEGER,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- Safe upgrades for databases created by Phase 1/2.
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS employment_start_date TEXT NOT NULL DEFAULT '';
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS source_sheet_id TEXT NOT NULL DEFAULT 'credentials';
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS source_row INTEGER;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_employees_role ON employees(role);
+CREATE INDEX IF NOT EXISTS idx_employees_source_row ON employees(source_sheet_id, source_row);
 
+-- Phase 3: normalized leave CRUD mirror. source_sheet_id + source_row preserves
+-- the exact Google Sheet row identity used by existing edit/delete business logic.
 CREATE TABLE IF NOT EXISTS leave_records (
     id BIGSERIAL PRIMARY KEY,
     source_sheet_id TEXT NOT NULL DEFAULT '',
@@ -99,14 +111,37 @@ CREATE TABLE IF NOT EXISTS leave_records (
     update_date TEXT NOT NULL DEFAULT '',
     update_time TEXT NOT NULL DEFAULT '',
     updated_by TEXT NOT NULL DEFAULT '',
+    weekday_label TEXT NOT NULL DEFAULT '',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(source_sheet_id, source_row)
 );
+ALTER TABLE leave_records ADD COLUMN IF NOT EXISTS weekday_label TEXT NOT NULL DEFAULT '';
+ALTER TABLE leave_records ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_leave_records_source
+    ON leave_records(source_sheet_id, source_row);
 CREATE INDEX IF NOT EXISTS idx_leave_records_date_employee
     ON leave_records(leave_date, employee_name);
 CREATE INDEX IF NOT EXISTS idx_leave_records_employee_date
     ON leave_records(employee_name, leave_date DESC);
+
+-- Reconciliation state separates a temporarily stale normalized mirror from a
+-- confirmed current snapshot. Existing invalidate calls set stale=TRUE; the next
+-- successful load clears it after a transactional full reconciliation.
+CREATE TABLE IF NOT EXISTS vera_normalized_sync_state (
+    dataset_key TEXT PRIMARY KEY,
+    table_name TEXT NOT NULL,
+    row_count INTEGER NOT NULL DEFAULT 0,
+    checksum TEXT NOT NULL DEFAULT '',
+    revision BIGINT NOT NULL DEFAULT 1,
+    is_stale BOOLEAN NOT NULL DEFAULT FALSE,
+    last_error TEXT NOT NULL DEFAULT '',
+    synced_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_vera_normalized_sync_state_stale
+    ON vera_normalized_sync_state(is_stale, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS payroll_history_rows (
     id BIGSERIAL PRIMARY KEY,

@@ -1,0 +1,99 @@
+name: Apply MENU V92.7.00
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-menu-v92700.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Update visible MENU labels only
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('app.py')
+          s = p.read_text(encoding='utf-8')
+
+          # Nâng version, giữ toàn bộ nghiệp vụ/route hiện tại.
+          first, rest = s.split('\n', 1)
+          first = '# V92.7.00 - Rut gon ten hien thi MENU, giu nguyen route/phan quyen (2026-08-23)'
+          s = first + '\n' + rest
+
+          old = '_MENU_DISPLAY_LABELS_V92699 = {"🧾 Log Book": "Log Book"}'
+          new = '''_MENU_DISPLAY_LABELS_V92699 = {
+    "📅 Đăng ký nghỉ phép": "📅 Đăn ký nghỉ",
+    "⏰ Quản lý ca làm việc": "⏰ Quản lý ca",
+    "🏷️ Trạng thái nhân viên": "🏷️ Trạng thái NV",
+    "⚙️ Giao diện tùy chỉnh": "⚙️ Giao diện",
+    "🏖️ Phép năm - Làm đẹp": "🏖️ Phép năm",
+    "🔐 Phân quyền chức năng": "🔐 Phân quyền",
+    "🔐 Khóa đăng ký LNP": "🔐 Khóa đăn ký",
+    "📘 Hướng dẫn sử dụng": "📘 Hướng dẫn",
+    "🧾 Log Book": "Log Book",
+}'''
+          if old not in s:
+              raise SystemExit('ERROR: display label mapping V92.6.99 not found')
+          s = s.replace(old, new, 1)
+
+          # Bảo đảm tiêu đề MENU đúng yêu cầu, căn giữa ngay phía trên mục đầu tiên.
+          if "<div style='font-size:18px;font-weight:800;line-height:1.15;margin:2px 0 10px 0;text-align:center;'>MENU</div>" not in s:
+              raise SystemExit('ERROR: centered MENU header not found')
+
+          p.write_text(s, encoding='utf-8', newline='\n')
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          s = Path('app.py').read_text(encoding='utf-8')
+          ast.parse(s)
+          required = [
+              '# V92.7.00',
+              '"📅 Đăng ký nghỉ phép": "📅 Đăn ký nghỉ"',
+              '"📘 Hướng dẫn sử dụng": "📘 Hướng dẫn"',
+              '"⚙️ Giao diện tùy chỉnh": "⚙️ Giao diện"',
+              '"🔐 Phân quyền chức năng": "🔐 Phân quyền"',
+              '"🏖️ Phép năm - Làm đẹp": "🏖️ Phép năm"',
+              '"⏰ Quản lý ca làm việc": "⏰ Quản lý ca"',
+              '"🏷️ Trạng thái nhân viên": "🏷️ Trạng thái NV"',
+              '"🔐 Khóa đăng ký LNP": "🔐 Khóa đăn ký"',
+              ">MENU</div>",
+              'SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"',
+              'SHEET_DU_PHONG_ID = "1Kz0aw-JatptAN9G7YSwZ6rJO09urOPaD-rS-18eZSY0"',
+          ]
+          missing = [x for x in required if x not in s]
+          if missing:
+              raise SystemExit('Missing requested markers: ' + repr(missing))
+          if '"📌 Ghim MENU chức năng"' in s:
+              raise SystemExit('Ghim MENU button unexpectedly returned')
+          print('V92.7.00 validation OK')
+          PY
+          git diff --check
+
+      - name: Commit to main and remove workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git rm .github/workflows/apply-menu-v92700.yml
+          git commit -m 'feat: V92.7.00 shorten MENU labels'
+          git push origin HEAD:main

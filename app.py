@@ -1,4 +1,4 @@
-# V92.6.84 - Log Book + menu auto-hide/swipe mở + quyền nghỉ dài hạn + kế hoạch Nghỉ việc + giữ trạng thái show/hide (2026-08-22)
+# V92.6.87 - Bộ lọc thời gian Kiểm tra nghỉ giữa ca từ TimeSoft (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -1157,6 +1157,48 @@ def _timesoft_available_snapshot_dates():
         except Exception:
             pass
     return sorted(set(dates))
+
+
+def _timesoft_collect_checkin_range_v92686(start_date, end_date):
+    """V92.6.86 - Chỉ đọc dataset chấm công TimeSoft trong khoảng được chọn.
+
+    Không tải summary_invoice/summary_totals vì màn hình Kiểm tra nghỉ giữa ca chỉ cần
+    employee_checkin. Mỗi ngày snapshot chỉ đọc 1 dataset PostgreSQL.
+    """
+    if not isinstance(start_date, date) or not isinstance(end_date, date):
+        return [], pd.DataFrame()
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    available = [
+        d for d in _timesoft_available_snapshot_dates()
+        if start_date <= d <= end_date
+    ]
+    if not available or vpg is None or not _vpg_is_enabled():
+        return available, pd.DataFrame()
+
+    frames = []
+    for d in available:
+        try:
+            chk = vpg.read_dataset(
+                _timesoft_bg_key("timesoft_employee_checkin", d),
+                allow_stale=True,
+            )
+        except Exception:
+            chk = pd.DataFrame()
+        if not isinstance(chk, pd.DataFrame) or chk.empty:
+            continue
+        x = chk.copy()
+        # Chỉ bổ sung ngày snapshot để người dùng dễ đối chiếu; engine vẫn ưu tiên
+        # WorkDate/WorkDateStr của TimeSoft khi chúng tồn tại.
+        if "Ngày snapshot" not in x.columns:
+            x.insert(0, "Ngày snapshot", d.strftime("%d/%m/%Y"))
+        frames.append(x)
+
+    return available, (
+        pd.concat(frames, ignore_index=True, sort=False)
+        if frames else pd.DataFrame()
+    )
 
 
 def _timesoft_snapshot_events(start_date, end_date, limit=5000):
@@ -9731,7 +9773,6 @@ def render_staff_statistics_v92678(credentials_df, key_prefix='staff_stats'):
     c2.metric('Đang làm việc', stats['active'])
     c3.metric('Tạm thời nghỉ việc', stats['temp'])
     c4.metric('Đã nghỉ việc', stats['left'])
-    st.caption('Tổng số nhân sự không tính tài khoản Admin. Bảng dưới thống kê đầy đủ từng bộ phận, kể cả người tạm nghỉ/đã nghỉ.')
     st.dataframe(
         stats['departments'], hide_index=True, width='stretch', height='content',
     )
@@ -26856,11 +26897,6 @@ elif selected_page == "⏰ Quản lý ca làm việc" and has_feature_access("sh
     # V92.6.81 - KẾ HOẠCH / HẸN NGÀY NHÂN SỰ
     # ======================================================
     with st.expander("🗓️ Kế hoạch / hẹn ngày nhân sự", expanded=False):
-        st.caption(
-            "Lập kế hoạch trước theo ngày. Hỗ trợ Đổi ca, Nghỉ dài hạn và Nghỉ việc. "
-            "Nghỉ dài hạn dùng 'Ngày bắt đầu quay lại' làm mốc tự chuyển từ Tạm thời nghỉ việc "
-            "về Đang làm việc; Nghỉ việc sẽ tự chuyển trạng thái thành Đã nghỉ việc từ ngày hiệu lực."
-        )
         _plan_today_v92681 = get_vn_today()
         _plan_active_names_v92681 = (
             shift_base["Tên nhân viên"].dropna().astype(str).tolist()
@@ -27087,11 +27123,6 @@ elif selected_page == "⏰ Quản lý ca làm việc" and has_feature_access("sh
             expanded=False,
         ):
             _mid_cfg = load_midshift_deadline_config()
-            st.info(
-                "Quy tắc này áp dụng theo từng ngày/từng người. "
-                "Không phải ngày nào nhân viên cũng bắt buộc nghỉ giữa ca. "
-                "Nếu có nghỉ, ngoài giới hạn thời gian nghỉ giữa ca của ca còn phải quay lại trước giờ giới hạn."
-            )
 
             _mc1, _mc2 = st.columns(2)
             with _mc1:
@@ -27745,11 +27776,6 @@ elif selected_page == "⏰ Quản lý ca làm việc" and has_feature_access("sh
             _assignment_validation_context[dep] = set(opts)
 
             st.caption(
-                '📋 Bảng hỗ trợ thao tác kiểu Excel: **bôi đen nhiều ô → Ctrl+C**, '
-                '**chọn ô đầu → Ctrl+V để dán nhiều dòng/cột**, và **Delete/Backspace để xóa nội dung ô**. '
-                'Cột Ca làm việc/Chu kỳ dùng ô text để việc copy-paste hàng loạt không bị Selectbox chặn.'
-            )
-            st.caption(
                 '☕ Nghỉ giữa ca được cấu hình riêng trong từng ca. Khi Lưu, hệ thống sẽ kiểm tra '
                 'tên ca có thuộc đúng bộ phận và Chu kỳ có hợp lệ trước khi ghi Google Sheet.'
             )
@@ -27806,22 +27832,12 @@ elif selected_page == "⏰ Quản lý ca làm việc" and has_feature_access("sh
             # kể cả các thay đổi copy/paste chưa bấm Lưu.
             if dep == "Nhân viên + Leader":
                 st.markdown("#### 🖨️ Thẻ phân ca · PDF A4 ngang · in 2 mặt")
-                _pdf_date_col, _pdf_info_col = st.columns([1, 2])
-                with _pdf_date_col:
-                    _shift_pdf_date = st.date_input(
-                        "Ngày in",
-                        value=get_vn_today(),
-                        format="DD/MM/YYYY",
-                        key="shift_duplex_pdf_date_v92621",
-                    )
-                with _pdf_info_col:
-                    st.caption(
-                        "Mặt 1: **Ca 1 + Ca 2 + Chung (Cố định Ca 1 + Cố định Ca 2)**. "
-                        "Mặt 2 dùng **đúng cùng bố cục và tọa độ** để gióng Mặt 1 khi in duplex. "
-                        "Mỗi bảng 19 người giống mẫu. PDF lấy cả thay đổi đang chỉnh trên bảng, "
-                        "không bắt buộc phải bấm Lưu trước. Khi in chọn **A4 ngang**, "
-                        "**2 mặt / Duplex**, **Fit to printable area**. Mặt 2 đã được vẽ cùng tọa độ với Mặt 1."
-                    )
+                _shift_pdf_date = st.date_input(
+                    "Ngày in",
+                    value=get_vn_today(),
+                    format="DD/MM/YYYY",
+                    key="shift_duplex_pdf_date_v92621",
+                )
 
                 _pdf_source = edited.drop(columns=['Chọn'], errors='ignore').copy()
                 _pdf_bytes, _pdf_err = build_shift_assignment_duplex_pdf_bytes(
@@ -27961,13 +27977,79 @@ elif selected_page == "⏰ Quản lý ca làm việc" and has_feature_access("sh
                 f"từ đủ {_mid_cfg_view.get('late_threshold_minutes',5)} phút sau giới hạn "
                 "sẽ tính Ra ngoài vào muộn. Không dùng check-out cuối ngày."
             )
-            _bg = _timesoft_read_background_snapshot(get_vn_today())
-            _chk = _bg.get("employee_checkin") if isinstance(_bg, dict) else None
+
+            # V92.6.86 - Bộ lọc thời gian riêng cho Kiểm tra nghỉ giữa ca từ TimeSoft.
+            _mid_today_v92686 = get_vn_today()
+            _mid_dates_v92686 = _timesoft_available_snapshot_dates()
+            _mid_earliest_v92686 = min(_mid_dates_v92686) if _mid_dates_v92686 else _mid_today_v92686
+            _mid_latest_v92686 = max(_mid_dates_v92686) if _mid_dates_v92686 else _mid_today_v92686
+
+            _mf1_v92686, _mf2_v92686 = st.columns([1.35, 3.65])
+            with _mf1_v92686:
+                _mid_preset_v92686 = st.selectbox(
+                    "Lọc thời gian",
+                    SNAPSHOT_RANGE_PRESETS_V92657,
+                    index=1,
+                    key="midshift_timesoft_time_preset_v92686",
+                )
+
+            _mid_start_v92686, _mid_end_v92686 = _snapshot_preset_range_v92657(
+                _mid_preset_v92686,
+                _mid_today_v92686,
+                earliest=_mid_earliest_v92686,
+                latest=_mid_latest_v92686,
+            )
+            with _mf2_v92686:
+                if _mid_preset_v92686 == "Tùy chỉnh":
+                    _mid_custom_v92686 = st.date_input(
+                        "📅 Khoảng thời gian kiểm tra nghỉ giữa ca",
+                        value=(_mid_today_v92686, _mid_today_v92686),
+                        max_value=_mid_today_v92686,
+                        format="DD/MM/YYYY",
+                        key="midshift_timesoft_custom_range_v92686",
+                    )
+                    if isinstance(_mid_custom_v92686, (tuple, list)) and len(_mid_custom_v92686) >= 2:
+                        _mid_start_v92686, _mid_end_v92686 = _mid_custom_v92686[0], _mid_custom_v92686[1]
+                    elif isinstance(_mid_custom_v92686, (tuple, list)) and len(_mid_custom_v92686) == 1:
+                        _mid_start_v92686 = _mid_end_v92686 = _mid_custom_v92686[0]
+                    else:
+                        _mid_start_v92686 = _mid_end_v92686 = _mid_custom_v92686 or _mid_today_v92686
+                else:
+                    st.caption(
+                        f"📅 {_mid_start_v92686.strftime('%d/%m/%Y')} → "
+                        f"{_mid_end_v92686.strftime('%d/%m/%Y')}"
+                    )
+
+            if _mid_start_v92686 > _mid_end_v92686:
+                _mid_start_v92686, _mid_end_v92686 = _mid_end_v92686, _mid_start_v92686
+
+            _mid_selected_dates_v92686, _chk = _timesoft_collect_checkin_range_v92686(
+                _mid_start_v92686, _mid_end_v92686
+            )
+            st.caption(
+                f"Có {len(_mid_selected_dates_v92686)} ngày Snapshot TimeSoft trong phạm vi đã chọn."
+            )
+
             if isinstance(_chk, pd.DataFrame) and not _chk.empty:
                 _break_status = calculate_midshift_break_from_timesoft(
                     _chk, df_credentials
                 )
                 if not _break_status.empty:
+                    try:
+                        _break_status = _break_status.copy()
+                        _break_status["__sort_date_v92686"] = pd.to_datetime(
+                            _break_status["Ngày"], dayfirst=True, errors="coerce"
+                        )
+                        _break_status = (
+                            _break_status.sort_values(
+                                ["__sort_date_v92686", "Tên nhân viên"],
+                                ascending=[False, True],
+                                na_position="last",
+                            )
+                            .drop(columns=["__sort_date_v92686"], errors="ignore")
+                        )
+                    except Exception:
+                        pass
                     st.dataframe(
                         _break_status,
                         hide_index=True,
@@ -27976,12 +28058,12 @@ elif selected_page == "⏰ Quản lý ca làm việc" and has_feature_access("sh
                     )
                 else:
                     st.info(
-                        "Có dữ liệu chấm công nhưng chưa có nhân viên/ca áp dụng nghỉ giữa ca "
-                        "hoặc chưa có dữ liệu FaceID phù hợp."
+                        "Có dữ liệu chấm công trong phạm vi đã chọn nhưng chưa có nhân viên/ca "
+                        "áp dụng nghỉ giữa ca hoặc chưa có dữ liệu FaceID phù hợp."
                     )
             else:
                 st.info(
-                    "Chưa có snapshot chấm công TimeSoft hôm nay. "
+                    "Chưa có Snapshot chấm công TimeSoft trong phạm vi đã chọn. "
                     "Phần cấu hình nghỉ giữa ca vẫn được lưu và sẽ áp dụng khi có dữ liệu."
                 )
 
@@ -32464,12 +32546,6 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                     if c != "Chọn"
                 ]
 
-            if _detail_can_edit_cells:
-                st.caption(
-                    "✏️ Chỉ sửa cột Lý do nghỉ. Ngày và nhân viên được giữ nguyên; "
-                    "Loại nghỉ, Người Thứ, số ngày, phạt vi phạm và thông tin cập nhật sẽ tự tính lại khi bấm Lưu."
-                )
-
             editor_version = int(st.session_state.get('_detail_editor_version', 1))
             editor_key = f"detail_schedule_editor_batch_v{editor_version}"
             detail_col_config = table_layout_column_config("leave_detail", list(editor_df.columns))
@@ -32959,14 +33035,6 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
         elif _manage_employee_system_locked:
             st.error("🔒 Admin đang khóa quyền thay đổi lịch nghỉ của nhân viên. Bảng chỉ được xem cho đến khi mở khóa.")
             manage_derived = list(manage_visible.columns)
-
-        if not manage_edit_locked:
-            st.caption(
-                "✏️ Chỉ sửa cột Lý do nghỉ. Ngày và nhân viên được giữ nguyên; "
-                "Loại nghỉ, Người Thứ, số ngày, phạt vi phạm và thông tin cập nhật sẽ tự tính lại khi bấm Lưu. "
-                "Riêng lịch CÓ phép 1.0 của ngày mai: chính nhân viên được đổi trong cùng ngày sang KHÔNG phép "
-                "hoặc CÓ phép 0.5 ngày mà không bị chặn bởi mốc Trước N ngày."
-            )
 
         with st.form('leave_manage_batch_edit_form_v92659', clear_on_submit=False):
             manage_editor = st.data_editor(

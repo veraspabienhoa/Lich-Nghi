@@ -1,5 +1,5 @@
-# V92.20.0 - PostgreSQL Phase 15 shift data + Phase 14/13/12/11/10/9/8/7/6/5/4 (2026-08-23)
-"""VERA SPA V92.20.0.
+# V92.21.0 - PostgreSQL Phase 16 residual paths + Phase 15/14/13/12/11/10/9/8/7/6/5/4 (2026-08-23)
+"""VERA SPA V92.21.0.
 
 Giữ nguyên V92.6.99, MENU V92.6.101 và PostgreSQL Phase 2/3/4/5/6/7/8/9.
 Phase 4: CRUD Nhân viên + Lịch nghỉ ghi PostgreSQL trước, Google Sheets mirror.
@@ -24,6 +24,8 @@ Phase 14: TrangThaiNhanSu, NghiDaiHan và LichHenNhanSu đọc/ghi PostgreSQL-pr
 bằng bản ghi durable có logical ID; Google Sheets tiếp tục là mirror đồng bộ.
 Phase 15: CauHinhCaLamViec, CauHinhNghiGiuaCa và phân ca O:P:Q
 đọc/ghi PostgreSQL-primary; phân ca dùng chung dataset credentials đã migrate.
+Phase 16: Log Book NhatKyLichNghi, thông báo sửa/xóa lịch và các write-path điều khiển
+tài khoản còn sót đọc/ghi PostgreSQL-primary; Google Sheets tiếp tục là mirror đồng bộ.
 
 Rollback tức thời:
 - VERA_DATA_BACKEND=dual             -> quay 5 dataset về chế độ chuyển tiếp.
@@ -39,6 +41,7 @@ Rollback tức thời:
 - VERA_PHASE13_CONFIG_BACKEND=sheets -> MENU/cột/cấu hình lương Phase 13 về Sheets.
 - VERA_PHASE14_OPERATIONS_BACKEND=sheets -> Trạng thái/Nghỉ dài hạn/Lịch hẹn Phase 14 về Sheets.
 - VERA_PHASE15_SHIFT_BACKEND=sheets -> danh mục ca/nghỉ giữa ca/phân ca Phase 15 về Sheets.
+- VERA_PHASE16_RESIDUAL_BACKEND=sheets -> Log Book/thông báo/điều khiển tài khoản Phase 16 về Sheets.
 
 Route, PAGE_FEATURE_KEYS, PAGE_SLUGS, phân quyền, giao diện và nghiệp vụ không đổi.
 Hai Google Sheet cũ và ID của chúng không bị thay đổi.
@@ -107,7 +110,6 @@ if _vpg_runtime is not None:
     except Exception:
         pass
 
-
 if _vpg_runtime is not None:
     try:
         from vera_postgres_phase10 import install as _install_vpg_phase10
@@ -147,6 +149,13 @@ if _vpg_runtime is not None:
     try:
         from vera_postgres_phase15 import install as _install_vpg_phase15
         _install_vpg_phase15(_vpg_runtime)
+    except Exception:
+        pass
+
+if _vpg_runtime is not None:
+    try:
+        from vera_postgres_phase16 import install as _install_vpg_phase16
+        _install_vpg_phase16(_vpg_runtime)
     except Exception:
         pass
 
@@ -248,6 +257,13 @@ try:
 except Exception as _phase15_patch_error_v92130:
     _phase15_patch_warnings_v92130 = [f"patch_module:{type(_phase15_patch_error_v92130).__name__}"]
 
+_phase16_patch_warnings_v92130 = []
+try:
+    from vera_postgres_phase16_patch import apply as _apply_phase16_patches
+    _source_v92130, _phase16_patch_warnings_v92130 = _apply_phase16_patches(_source_v92130)
+except Exception as _phase16_patch_error_v92130:
+    _phase16_patch_warnings_v92130 = [f"patch_module:{type(_phase16_patch_error_v92130).__name__}"]
+
 # Existing V92.6.101 display-only MENU patch.
 _old_menu_map_v92130 = '_MENU_DISPLAY_LABELS_V92699 = {"🧾 Log Book": "Log Book"}'
 _new_menu_map_v92130 = """_MENU_DISPLAY_LABELS_V92699 = {
@@ -268,97 +284,67 @@ else:
 _source_v92130 = _source_v92130.replace("MENU CHỨC NĂNG", "MENU")
 _first_line_v92130, _sep_v92130, _rest_v92130 = _source_v92130.partition("\n")
 _source_v92130 = (
-    "# V92.20.0 - PostgreSQL Phase 15 shift data + Phase 14/13/12/11/10/9/8/7/6/5/4 (2026-08-23)\n"
+    "# V92.21.0 - PostgreSQL Phase 16 residual paths + Phase 15/14/13/12/11/10/9/8/7/6/5/4 (2026-08-23)\n"
     + _rest_v92130
 )
 
 if _phase4_patch_warnings_v92130 and _vpg_runtime is not None:
     try:
-        _vpg_runtime.record_event(
-            "phase4",
-            "phase4_patch_warning",
-            ",".join(_phase4_patch_warnings_v92130)[:1800],
-        )
+        _vpg_runtime.record_event("phase4", "phase4_patch_warning", ",".join(_phase4_patch_warnings_v92130)[:1800])
     except Exception:
         pass
 
 if _phase7_patch_warnings_v92130 and _vpg_runtime is not None:
     try:
-        _vpg_runtime.record_event(
-            "phase7",
-            "phase7_patch_warning",
-            ",".join(_phase7_patch_warnings_v92130)[:1800],
-        )
+        _vpg_runtime.record_event("phase7", "phase7_patch_warning", ",".join(_phase7_patch_warnings_v92130)[:1800])
     except Exception:
         pass
 
 if _phase8_patch_warnings_v92130 and _vpg_runtime is not None:
     try:
-        _vpg_runtime.record_event(
-            "phase8",
-            "phase8_patch_warning",
-            ",".join(_phase8_patch_warnings_v92130)[:1800],
-        )
+        _vpg_runtime.record_event("phase8", "phase8_patch_warning", ",".join(_phase8_patch_warnings_v92130)[:1800])
     except Exception:
         pass
 
 if _phase10_patch_warnings_v92130 and _vpg_runtime is not None:
     try:
-        _vpg_runtime.record_event(
-            "phase10",
-            "phase10_patch_warning",
-            ",".join(_phase10_patch_warnings_v92130)[:1800],
-        )
+        _vpg_runtime.record_event("phase10", "phase10_patch_warning", ",".join(_phase10_patch_warnings_v92130)[:1800])
     except Exception:
         pass
 
 if _phase11_patch_warnings_v92130 and _vpg_runtime is not None:
     try:
-        _vpg_runtime.record_event(
-            "phase11",
-            "phase11_patch_warning",
-            ",".join(_phase11_patch_warnings_v92130)[:1800],
-        )
+        _vpg_runtime.record_event("phase11", "phase11_patch_warning", ",".join(_phase11_patch_warnings_v92130)[:1800])
     except Exception:
         pass
 
 if _phase12_patch_warnings_v92130 and _vpg_runtime is not None:
     try:
-        _vpg_runtime.record_event(
-            "phase12",
-            "phase12_patch_warning",
-            ",".join(_phase12_patch_warnings_v92130)[:1800],
-        )
+        _vpg_runtime.record_event("phase12", "phase12_patch_warning", ",".join(_phase12_patch_warnings_v92130)[:1800])
     except Exception:
         pass
 
 if _phase13_patch_warnings_v92130 and _vpg_runtime is not None:
     try:
-        _vpg_runtime.record_event(
-            "phase13",
-            "phase13_patch_warning",
-            ",".join(_phase13_patch_warnings_v92130)[:1800],
-        )
+        _vpg_runtime.record_event("phase13", "phase13_patch_warning", ",".join(_phase13_patch_warnings_v92130)[:1800])
     except Exception:
         pass
 
 if _phase14_patch_warnings_v92130 and _vpg_runtime is not None:
     try:
-        _vpg_runtime.record_event(
-            "phase14",
-            "phase14_patch_warning",
-            ",".join(_phase14_patch_warnings_v92130)[:1800],
-        )
+        _vpg_runtime.record_event("phase14", "phase14_patch_warning", ",".join(_phase14_patch_warnings_v92130)[:1800])
     except Exception:
         pass
 
 if _phase15_patch_warnings_v92130 and _vpg_runtime is not None:
     try:
-        _vpg_runtime.record_event(
-            "phase15",
-            "phase15_patch_warning",
-            ",".join(_phase15_patch_warnings_v92130)[:1800],
-        )
+        _vpg_runtime.record_event("phase15", "phase15_patch_warning", ",".join(_phase15_patch_warnings_v92130)[:1800])
+    except Exception:
+        pass
+
+if _phase16_patch_warnings_v92130 and _vpg_runtime is not None:
+    try:
+        _vpg_runtime.record_event("phase16", "phase16_patch_warning", ",".join(_phase16_patch_warnings_v92130)[:1800])
     except Exception:
         pass
 

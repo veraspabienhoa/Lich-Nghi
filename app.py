@@ -1,4 +1,4 @@
-# V92.6.97 - Them nhan vien: nhap va luu Ngay bat dau lam cung ho so (2026-08-22)
+# V92.6.98 - Thu tu MENU chuan 1-20 dung chung Desktop va Mobile (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -2909,6 +2909,31 @@ UI_THEME_WORKSHEET = "CauHinhGiaoDien"
 ADMIN_MENU_CONFIG_WORKSHEET = "CauHinhMenuAdmin"
 ADMIN_MENU_CONFIG_HEADERS = ["ConfigKey", "Thứ tự JSON", "Cập nhật lúc", "Người cập nhật"]
 ADMIN_MENU_CONFIG_KEY = "admin_menu_order"
+# V92.6.98 - Thu tu MENU chuan do Admin yeu cau, ap dung giong nhau cho Desktop/Mobile.
+# Log Book giu ten noi bo cu de khong anh huong dieu huong/phan quyen.
+ADMIN_MENU_ORDER_VERSION_V92698 = "V92.6.98"
+CANONICAL_MENU_ORDER_V92698 = [
+    "📅 Đăng ký nghỉ phép",
+    "✏️ Quản lý lịch nghỉ",
+    "🧭 BẢNG TOUR",
+    "💰 Bảng lương",
+    "👥 Danh sách nhân viên",
+    "⏰ Quản lý ca làm việc",
+    "🏷️ Trạng thái nhân viên",
+    "➕ Thêm nhân viên",
+    "📦 Snapshot",
+    "🤖 Auto Check",
+    "⚙️ Giao diện tùy chỉnh",
+    "🏖️ Phép năm - Làm đẹp",
+    "🔐 Phân quyền chức năng",
+    "🔐 Khóa đăng ký LNP",
+    "🔒 Khóa đăng nhập",
+    "🔄 Đồng bộ dữ liệu",
+    "🎂 Sinh nhật",
+    "👤 Hồ sơ cá nhân",
+    "📘 Hướng dẫn sử dụng",
+    "🧾 Log Book",
+]
 # V86.4 - Tài liệu Hướng dẫn sử dụng lưu bền vững trong Google Sheet dưới dạng base64 chunks.
 USAGE_GUIDE_WORKSHEET = "HuongDanSuDung"
 USAGE_GUIDE_MAX_BYTES = 4 * 1024 * 1024
@@ -17170,11 +17195,19 @@ def _ui_device_label(device):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_admin_menu_order():
-    """V92.1: trả về thứ tự MENU riêng desktop/mobile; tự nâng dữ liệu cũ dạng list."""
-    empty = {"desktop": [], "mobile": []}
+    """
+    V92.6.98: Desktop va Mobile dung cung thu tu chuan 1-20.
+    Cau hinh cu chua version V92.6.98 se duoc coi la legacy de khong ghi de
+    thu tu moi sau khi deploy. Sau khi Admin chu dong sap xep va bam Luu,
+    save_admin_menu_order() se gan version moi va cau hinh tuy chinh lai co hieu luc.
+    """
+    canonical = {
+        "desktop": list(CANONICAL_MENU_ORDER_V92698),
+        "mobile": list(CANONICAL_MENU_ORDER_V92698),
+    }
     ws, err = _ensure_admin_menu_config_storage()
     if err or ws is None:
-        return empty, err
+        return canonical, err
     try:
         values = _gs_call_with_backoff(ws.get_all_values)
         for row in values[1:]:
@@ -17184,22 +17217,29 @@ def load_admin_menu_order():
                 raw = json.loads(row[1]) if len(row) > 1 and str(row[1]).strip() else {}
             except Exception:
                 raw = {}
+
+            # Dữ liệu cũ dạng list hoặc dict chưa có version: ép về thứ tự chuẩn mới.
             if isinstance(raw, list):
-                arr = [str(x) for x in raw if str(x).strip()]
-                return {"desktop": list(arr), "mobile": list(arr)}, ""
-            if isinstance(raw, dict):
-                out = {}
-                for device in ("desktop", "mobile"):
-                    vals = raw.get(device, [])
-                    out[device] = [str(x) for x in vals if str(x).strip()] if isinstance(vals, list) else []
-                if not out["desktop"] and out["mobile"]:
-                    out["desktop"] = list(out["mobile"])
-                if not out["mobile"] and out["desktop"]:
-                    out["mobile"] = list(out["desktop"])
-                return out, ""
-        return empty, ""
+                return canonical, ""
+            if not isinstance(raw, dict):
+                return canonical, ""
+            if str(raw.get("version", "")).strip() != ADMIN_MENU_ORDER_VERSION_V92698:
+                return canonical, ""
+
+            out = {}
+            for device in ("desktop", "mobile"):
+                vals = raw.get(device, [])
+                vals = [str(x) for x in vals if str(x).strip()] if isinstance(vals, list) else []
+                valid = [x for x in vals if x in CANONICAL_MENU_ORDER_V92698]
+                out[device] = valid + [x for x in CANONICAL_MENU_ORDER_V92698 if x not in valid]
+            if not out["desktop"]:
+                out["desktop"] = list(CANONICAL_MENU_ORDER_V92698)
+            if not out["mobile"]:
+                out["mobile"] = list(CANONICAL_MENU_ORDER_V92698)
+            return out, ""
+        return canonical, ""
     except Exception as e:
-        return empty, f"Lỗi đọc thứ tự MENU admin: {e}"
+        return canonical, f"Lỗi đọc thứ tự MENU admin: {e}"
 
 
 def _clear_admin_menu_order_cache():
@@ -17241,7 +17281,7 @@ def save_admin_menu_order(order, username, device=None):
             if row and str(row[0]).strip() == ADMIN_MENU_CONFIG_KEY:
                 row_idx = idx; break
         now = datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M:%S")
-        row_value = [ADMIN_MENU_CONFIG_KEY, json.dumps(pair, ensure_ascii=False), now, str(username)]
+        row_value = [ADMIN_MENU_CONFIG_KEY, json.dumps({"version": ADMIN_MENU_ORDER_VERSION_V92698, **pair}, ensure_ascii=False), now, str(username)]
         if row_idx:
             gspread_update_range(ws, f"A{row_idx}:D{row_idx}", [row_value])
         else:
@@ -25106,13 +25146,12 @@ def has_page_access(page_name):
     key = PAGE_FEATURE_KEYS.get(page_name)
     return bool(key and has_feature_access(key))
 
-DEFAULT_PAGE_ORDER = list(PAGE_FEATURE_KEYS.keys())
-# V92.6.63: đặt Nhật ký ngay cạnh nhóm Lịch nghỉ trong MENU Admin.
-try:
-    _leave_audit_menu_pos = DEFAULT_PAGE_ORDER.index("✏️ Quản lý lịch nghỉ") + 1
-except ValueError:
-    _leave_audit_menu_pos = len(DEFAULT_PAGE_ORDER)
-DEFAULT_PAGE_ORDER.insert(_leave_audit_menu_pos, "🧾 Log Book")
+# V92.6.98 - Thu tu MENU co dinh mac dinh 1-20 cho moi role, Desktop va Mobile.
+# Cac trang user khong co quyen se bi an, nhung cac trang con lai van giu dung thu tu tuong doi nay.
+DEFAULT_PAGE_ORDER = [
+    p for p in CANONICAL_MENU_ORDER_V92698
+    if p == "🧾 Log Book" or p in PAGE_FEATURE_KEYS
+]
 PAGE_ORDER = admin_menu_order_for_pages(DEFAULT_PAGE_ORDER)
 allowed_pages = [p for p in PAGE_ORDER if has_page_access(p)]
 # Admin luôn giữ trang phân quyền để tránh tự khóa hệ thống.
@@ -29543,10 +29582,10 @@ elif selected_page == "⚙️ Giao diện tùy chỉnh" and has_feature_access("
 
     with st.expander("📌 Sắp xếp MENU CHỨC NĂNG · Web / Mobile", expanded=False):
         st.caption(
-            "Thứ tự MENU của Admin có thể khác nhau giữa Web/Desktop và Mobile. "
-            "Hai phiên bản được chỉnh song song."
+            "V92.6.98: Web/Desktop và Mobile bắt đầu bằng cùng thứ tự chuẩn 1-20. "
+            "Admin vẫn có thể chủ động chỉnh riêng từng thiết bị và bấm Lưu nếu cần sau này."
         )
-        _menu_default = list(PAGE_FEATURE_KEYS.keys())
+        _menu_default = list(CANONICAL_MENU_ORDER_V92698)
         _menu_pair, _menu_err = load_admin_menu_order()
         if _menu_err:
             st.warning(_menu_err)

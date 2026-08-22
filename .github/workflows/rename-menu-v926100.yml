@@ -1,0 +1,86 @@
+name: Rename VERA menu labels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/rename-menu-v926100.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  rename:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Rename visible menu labels only
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app.py')
+          s = p.read_text(encoding='utf-8')
+
+          old = '_MENU_DISPLAY_LABELS_V92699 = {"🧾 Log Book": "Log Book"}'
+          new = '''_MENU_DISPLAY_LABELS_V92699 = {
+    "📅 Đăng ký nghỉ phép": "📅 Đăn ký nghỉ",
+    "📘 Hướng dẫn sử dụng": "📘 Hướng dẫn",
+    "⚙️ Giao diện tùy chỉnh": "⚙️ Giao diện",
+    "🔐 Phân quyền chức năng": "🔐 Phân quyền",
+    "🏖️ Phép năm - Làm đẹp": "🏖️ Phép năm",
+    "⏰ Quản lý ca làm việc": "⏰ Quản lý ca",
+    "🏷️ Trạng thái nhân viên": "🏷️ Trạng thái NV",
+    "🔐 Khóa đăng ký LNP": "🔐 Khóa đăn ký",
+    "🧾 Log Book": "Log Book",
+}'''
+          if old not in s:
+              raise SystemExit('ERROR: menu display mapping marker not found')
+          s = s.replace(old, new, 1)
+
+          first, rest = s.split('\n', 1)
+          first = '# V92.6.100 - Doi ten nhan MENU hien thi Desktop/Mobile (2026-08-23)'
+          s = first + '\n' + rest
+
+          p.write_text(s, encoding='utf-8', newline='\n')
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          s = Path('app.py').read_text(encoding='utf-8')
+          ast.parse(s)
+          required = [
+            '"📅 Đăng ký nghỉ phép": "📅 Đăn ký nghỉ"',
+            '"📘 Hướng dẫn sử dụng": "📘 Hướng dẫn"',
+            '"⚙️ Giao diện tùy chỉnh": "⚙️ Giao diện"',
+            '"🔐 Phân quyền chức năng": "🔐 Phân quyền"',
+            '"🏖️ Phép năm - Làm đẹp": "🏖️ Phép năm"',
+            '"⏰ Quản lý ca làm việc": "⏰ Quản lý ca"',
+            '"🏷️ Trạng thái nhân viên": "🏷️ Trạng thái NV"',
+            '"🔐 Khóa đăng ký LNP": "🔐 Khóa đăn ký"',
+          ]
+          missing = [x for x in required if x not in s]
+          if missing:
+              raise SystemExit('Missing menu labels: ' + repr(missing))
+          print('menu label validation OK')
+          PY
+          git diff --check
+
+      - name: Commit to main and remove workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git rm .github/workflows/rename-menu-v926100.yml
+          git commit -m 'feat: V92.6.100 rename menu labels'
+          git push origin HEAD:main

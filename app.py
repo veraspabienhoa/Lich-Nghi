@@ -243,7 +243,7 @@ except Exception as _phase14_patch_error_v92130:
 
 _phase15_patch_warnings_v92130 = []
 try:
-    from vera_postgres_phase15_patch import apply as _apply_phase15_patches
+    from vera_postgres_phase15_patch_fix import apply as _apply_phase15_patches
     _source_v92130, _phase15_patch_warnings_v92130 = _apply_phase15_patches(_source_v92130)
 except Exception as _phase15_patch_error_v92130:
     _phase15_patch_warnings_v92130 = [f"patch_module:{type(_phase15_patch_error_v92130).__name__}"]

@@ -1,4 +1,4 @@
-# V92.6.80 - Auto Check Manual gửi email theo lô + đồng bộ tên nút Auto Check (2026-08-22)
+# V92.6.83 - Phép năm - Làm đẹp + nghỉ bệnh nhiều ngày + Auto Check bỏ qua nghỉ dài hạn + UI/menu mới (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -2833,7 +2833,7 @@ SHEET_CHINH_ID = "1xTjmi6BaQFSqsgn9-EM7MjVS2n2FNuxT"
 BANG_TOUR_FILE_ID = "151d1ueCwH2KXX-HPQF1uj340uWSCS2dW"
 PAYROLL_SOURCE_SHEET_ID = "1WtYsbEAlifL1PZ-nSGBojgL4Bnur-1vF"
 
-# V84 - Điều khiển Auto Update phạt. Trạng thái lưu trên Google Sheet để mọi instance dùng chung.
+# V84 - Auto Check. Trạng thái lưu trên Google Sheet để mọi instance dùng chung.
 AUTO_PENALTY_CONFIG_WORKSHEET = "CauHinhAutoPhat"
 AUTO_PENALTY_MINUTES = 5
 AUTO_PENALTY_CONFIG_HEADERS = [
@@ -2914,26 +2914,26 @@ FEATURE_DEFINITIONS = {
     "payroll_history": "🗂 Xem Lịch sử bảng lương",
     "leave": "📅 Xem Đăng ký nghỉ phép",
     "leave_manage": "✏️ Xem Quản lý lịch nghỉ",
-    "long_leave": "🏖️ Xem Lịch nghỉ dài hạn",
-    "shift": "⏰ Xem Thiết lập ca làm việc",
-    "staff_list": "👥 Xem Danh sách nhân sự",
+    "long_leave": "🏖️ Xem Phép năm - Làm đẹp",
+    "shift": "⏰ Xem Quản lý ca làm việc",
+    "staff_list": "👥 Xem Danh sách nhân viên",
     "employee_add": "➕ Vào trang Thêm nhân viên",
-    "employee_edit": "✏️ Vào trang Sửa nhân viên",
+    "employee_edit": "✏️ Vào trang Cập nhật trạng thái nhân viên",
     "employment_status": "🏷️ Vào chức năng Trạng thái làm việc",
     "employee_delete": "🗑️ Vào chức năng Xóa nhân viên",
     "account_lock": "🔒 Vào trang Khóa đăng nhập",
-    "registration_lock": "🔐 Vào trang Khóa quyền đăng ký",
-    "auto_penalty": "⏸️ Xem Auto Update phạt",
+    "registration_lock": "🔐 Vào trang Khóa đăng ký LNP",
+    "auto_penalty": "⏸️ Xem Auto Check",
     "snapshot_today": "📦 Xem Snapshot",
     "sync": "🔄 Xem Đồng bộ dữ liệu",
     "column_config": "⚙️ Xem Giao diện tùy chỉnh",
     "profile": "👤 Xem Hồ sơ cá nhân",
-    "birthday": "🎂 Xem Sinh nhật nhân sự",
+    "birthday": "🎂 Xem Sinh nhật",
     "permission_admin": "🔐 Quản trị Phân quyền chức năng",
     "guide_manage": "📘 Hướng dẫn sử dụng · Tải/Sửa/Xóa tài liệu",
 
     # ===== BẢNG TOUR =====
-    "tour_refresh": "🧭 Bảng tour · Làm mới dữ liệu",
+    "tour_refresh": "🧭 BẢNG TOUR · Làm mới dữ liệu",
 
     # ===== LỊCH NGHỈ =====
     "leave_create": "📅 Lịch nghỉ · Đăng ký / ghi lịch nghỉ",
@@ -2977,8 +2977,8 @@ FEATURE_DEFINITIONS = {
     "registration_lock_edit": "🔐 Nhân sự · Khóa/Mở quyền đăng ký",
 
     # ===== AUTO UPDATE / SNAPSHOT / SYNC =====
-    "auto_penalty_control": "⏸️ Auto Update · Tạm dừng / Mở lại",
-    "auto_penalty_run": "▶️ Auto Update · Chạy ngay",
+    "auto_penalty_control": "⏸️ Auto Check · Tạm dừng / Mở lại",
+    "auto_penalty_run": "▶️ Auto Check · Chạy thủ công",
     "snapshot_export": "📥 Snapshot · Export lịch sử Excel",
     "sync_timesoft_fetch": "📥 Đồng bộ · Lấy dữ liệu TimeSoft",
     "sync_timesoft_api": "🔍 Đồng bộ · Phát hiện / cấu hình API TimeSoft",
@@ -3002,7 +3002,7 @@ FEATURE_DEFINITIONS = {
 }
 
 FEATURE_PERMISSION_GROUPS = {
-    "🧭 Bảng tour": [
+    "🧭 BẢNG TOUR": [
         "tour", "tour_refresh",
     ],
     "📅 Lịch nghỉ": [
@@ -3011,17 +3011,17 @@ FEATURE_PERMISSION_GROUPS = {
         "leave_manage", "leave_manage_edit", "leave_manage_delete",
         "leave_today_khong_phep_edit_delete",
     ],
-    "🏖️ Nghỉ dài hạn": [
+    "🏖️ Phép năm - Làm đẹp": [
         "long_leave", "long_leave_form", "long_leave_pause", "long_leave_stats", "long_leave_document",
         "long_leave_manual_add", "long_leave_approve", "long_leave_reject",
         "long_leave_end", "long_leave_delete", "long_leave_export",
     ],
-    "⏰ Ca làm việc": [
+    "⏰ Quản lý ca làm việc": [
         "shift", "shift_definition_edit", "shift_break_config_edit",
         "shift_assignment_edit", "shift_assignment_clear",
         "shift_export_pdf", "shift_import",
     ],
-    "👥 Nhân sự": [
+    "👥 Danh sách nhân viên": [
         "staff_list", "staff_export", "staff_import",
         "employee_add", "employee_add_save",
         "employee_edit", "employee_edit_save",
@@ -3036,7 +3036,7 @@ FEATURE_PERMISSION_GROUPS = {
         "payroll_email", "payroll_history", "payroll_history_edit",
         "payroll_history_delete",
     ],
-    "🤖 Auto Update / Dữ liệu nền": [
+    "🤖 Auto Check / Dữ liệu nền": [
         "auto_penalty", "auto_penalty_control", "auto_penalty_run",
         "snapshot_today", "snapshot_export",
         "sync", "sync_timesoft_fetch", "sync_timesoft_api",
@@ -3122,13 +3122,35 @@ LONG_LEAVE_HEADERS = [
     "Lý do nghỉ dài hạn", "Chi tiết", "Trạng thái", "Lý do không duyệt",
     "Ngày gửi", "Giờ gửi", "Người duyệt", "Ngày duyệt", "Giờ duyệt",
     "Nguồn", "Người cập nhật", "Cập nhật lúc",
-    "Tài liệu JSON", "Nhắc tải tài liệu", "Ngày nhắc", "Người nhắc", "Email CC"
+    "Tài liệu JSON", "Nhắc tải tài liệu", "Ngày nhắc", "Người nhắc", "Email CC",
+    # V92.6.82: append ở cuối để không làm lệch dữ liệu lịch sử của worksheet NghiDaiHan.
+    "Loại đơn"
 ]
 LONG_LEAVE_PENDING = "Chờ duyệt"
 LONG_LEAVE_APPROVED = "Đã duyệt"
 LONG_LEAVE_REJECTED = "Không duyệt"
 LONG_LEAVE_ENDED = "Đã kết thúc"
 LONG_LEAVE_ADMIN_EMAIL = "veraspabienhoa@gmail.com"
+LONG_LEAVE_REQUEST_TYPE_LONG = "Nghỉ dài hạn"
+LONG_LEAVE_REQUEST_TYPE_ANNUAL = "Nghỉ Phép năm"
+
+# ==========================================================
+# V92.6.81 - KẾ HOẠCH / HẸN NGÀY NHÂN SỰ TRONG PHẦN CHIA CA
+# ==========================================================
+STAFF_PLAN_WORKSHEET = "LichHenNhanSu"
+STAFF_PLAN_HEADERS = [
+    "ID", "Tên nhân viên", "Loại kế hoạch", "Từ ngày", "Đến ngày",
+    "Ca áp dụng", "Chu kỳ", "Ghi chú", "Trạng thái",
+    "Ngày tạo", "Giờ tạo", "Người tạo",
+    "Ngày áp dụng", "Giờ áp dụng", "Kết quả",
+]
+STAFF_PLAN_SHIFT = "Đổi ca"
+STAFF_PLAN_LONG_LEAVE = "Nghỉ dài hạn"
+STAFF_PLAN_PENDING = "Chờ áp dụng"
+STAFF_PLAN_ACTIVE = "Đang hiệu lực"
+STAFF_PLAN_DONE = "Đã hoàn tất"
+STAFF_PLAN_CANCELLED = "Đã hủy"
+STAFF_PLAN_ERROR = "Lỗi"
 
 
 def _long_leave_last_col():
@@ -3199,7 +3221,7 @@ def _long_leave_request_id(employee_name):
 
 def append_long_leave_request(
     employee_name, role, start_date, end_date, reason, detail,
-    status, source, updated_by, email_cc=""
+    status, source, updated_by, email_cc="", request_type=LONG_LEAVE_REQUEST_TYPE_LONG
 ):
     try:
         ws = _get_long_leave_worksheet()
@@ -3215,10 +3237,11 @@ def append_long_leave_request(
             "", "", "", str(source).strip(), str(updated_by).strip(),
             now.strftime("%d/%m/%Y %H:%M:%S"),
             "", "", "", "", str(email_cc or "").strip(),
+            str(request_type or LONG_LEAVE_REQUEST_TYPE_LONG).strip(),
         ]
         _gs_call_with_backoff(ws.append_row, row, value_input_option="USER_ENTERED")
         _clear_long_leave_cache()
-        return True, "Đã lưu yêu cầu nghỉ dài hạn.", req_id
+        return True, "Đã lưu yêu cầu.", req_id
     except Exception as e:
         return False, f"Lỗi lưu yêu cầu nghỉ dài hạn: {e}", ""
 
@@ -3462,7 +3485,7 @@ def attach_documents_to_long_leave_request(request_id, uploaded_files, uploaded_
 
 def send_long_leave_request_email(
     employee_name, role, start_date, end_date, reason, detail, request_id,
-    attachments=None, cc_emails=None
+    attachments=None, cc_emails=None, request_type=LONG_LEAVE_REQUEST_TYPE_LONG
 ):
     sender_email, sender_password = get_smtp_sender_credentials()
     if not sender_email or not sender_password:
@@ -3475,14 +3498,17 @@ def send_long_leave_request_email(
             e for e in cc_list
             if normalize_login_name(e) != normalize_login_name(LONG_LEAVE_ADMIN_EMAIL)
         ]
+        _mail_request_type_v92682 = str(request_type or LONG_LEAVE_REQUEST_TYPE_LONG).strip()
+        _mail_is_annual_v92682 = normalize_login_name(_mail_request_type_v92682) == normalize_login_name(LONG_LEAVE_REQUEST_TYPE_ANNUAL)
+        _mail_title_v92682 = "Đơn xin nghỉ Phép năm" if _mail_is_annual_v92682 else "Đơn xin nghỉ dài hạn"
         subject = (
-            f"[VERA SPA] Đơn xin nghỉ dài hạn - {employee_name} - "
+            f"[VERA SPA] {_mail_title_v92682} - {employee_name} - "
             f"{start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}"
         )
         safe_detail = html.escape(str(detail or "")).replace("\n", "<br>")
         body = f"""
         <html><body style='font-family:Arial,sans-serif'>
-        <h3>Đơn xin nghỉ dài hạn</h3>
+        <h3>{_mail_title_v92682}</h3>
         <p><b>Mã yêu cầu:</b> {html.escape(str(request_id))}</p>
         <p><b>Nhân viên:</b> {html.escape(str(employee_name))}</p>
         <p><b>Vai trò:</b> {html.escape(str(role))}</p>
@@ -3545,7 +3571,7 @@ def send_long_leave_document_reminder(employee_name, request_id, end_date):
             <p>VERA SPA nhắc bạn tải tài liệu liên quan cho đơn nghỉ dài hạn
             <b>{html.escape(str(request_id))}</b>.</p>
             <p>Ngày kết thúc nghỉ: <b>{html.escape(str(end_date))}</b>.</p>
-            <p>Bạn có thể tải tài liệu tại trang <b>Lịch nghỉ dài hạn</b>,
+            <p>Bạn có thể tải tài liệu tại trang <b>Phép năm - Làm đẹp</b>,
             kể cả sau khi thời gian nghỉ đã kết thúc.</p>
             </body></html>
             """,
@@ -3561,11 +3587,317 @@ def send_long_leave_document_reminder(employee_name, request_id, end_date):
         return False, f"Lỗi gửi nhắc nhở: {e}"
 
 
+def _long_leave_request_type(row_or_value):
+    """V92.6.82: bản ghi cũ không có Loại đơn được hiểu là Nghỉ dài hạn."""
+    if isinstance(row_or_value, dict):
+        value = row_or_value.get("Loại đơn", "")
+    elif isinstance(row_or_value, pd.Series):
+        value = row_or_value.get("Loại đơn", "")
+    else:
+        value = row_or_value
+    value = str(value or "").strip()
+    return value or LONG_LEAVE_REQUEST_TYPE_LONG
+
+
+def _is_formal_long_leave_request(row_or_value):
+    return normalize_login_name(_long_leave_request_type(row_or_value)) == normalize_login_name(
+        LONG_LEAVE_REQUEST_TYPE_LONG
+    )
+
+
+def _is_annual_leave_request(row_or_value):
+    return normalize_login_name(_long_leave_request_type(row_or_value)) == normalize_login_name(
+        LONG_LEAVE_REQUEST_TYPE_ANNUAL
+    )
+
+
+def _filter_formal_long_leave_rows(df):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    if "Loại đơn" not in df.columns:
+        return df.copy()
+    return df[df.apply(_is_formal_long_leave_request, axis=1)].copy()
+
+
+def _validate_and_write_annual_leave_request_to_main_data_v92682(
+    employee_name, start_date, end_date, detail, approver, request_id=""
+):
+    """
+    Duyệt đơn Phép năm -> ghi MainData theo lô, tối đa 7 ngày liên tiếp.
+    Idempotent: nếu toàn bộ ngày đã có đúng `Nghỉ Phép năm` thì coi như đã ghi xong,
+    giúp Admin có thể bấm lại nếu lần trước MainData thành công nhưng cập nhật trạng thái đơn bị gián đoạn.
+    """
+    try:
+        if not isinstance(start_date, date) or not isinstance(end_date, date) or end_date < start_date:
+            return False, "Khoảng ngày Phép năm không hợp lệ.", []
+        count = (end_date - start_date).days + 1
+        if count > 7:
+            return False, "Đơn Phép năm chỉ được duyệt tối đa 7 ngày liên tiếp.", []
+
+        client = get_gspread_client()
+        if not client:
+            return False, "Không kết nối được Google Sheets để đối chiếu MainData.", []
+        sheet = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        live = _live_sheet_to_leave_df(sheet)
+        live = combine_leave_sources_for_daily_stats(live)
+        reason = "Nghỉ Phép năm"
+        selected_dates = [start_date + timedelta(days=i) for i in range(count)]
+
+        exact_existing = [
+            d for d in selected_dates
+            if _leave_exists_in_sources(live, d, employee_name, reason)
+        ]
+        if len(exact_existing) == len(selected_dates):
+            return True, f"MainData đã có đủ {count} ngày Nghỉ Phép năm của đơn {request_id or ''}.".strip(), []
+        if exact_existing:
+            return False, (
+                "MainData đang có một phần ngày của đơn Phép năm nhưng chưa đủ toàn bộ khoảng; "
+                "hệ thống dừng để tránh ghi trùng/ghi một phần."
+            ), []
+
+        # Không cho tạo một dòng ngày nghỉ >0 thứ hai trong cùng ngày cho cùng nhân viên.
+        # Đồng thời Phép năm phải tuân quota Có phép của từng ngày để tránh quá nhiều người nghỉ cùng lúc.
+        for d in selected_dates:
+            ok_day, msg_day = _validate_daily_employee_registration_rule(
+                live, d, employee_name, reason, 1.0
+            )
+            if not ok_day:
+                return False, f"{d.strftime('%d/%m/%Y')}: {msg_day}", []
+            ok_quota, msg_quota = _validate_daily_group_quota(live, d, reason)
+            if not ok_quota:
+                return False, msg_quota, []
+
+        # Kiểm tra quỹ Phép năm của chính nhân viên theo từng năm.
+        try:
+            creds = load_credentials_fresh()
+        except Exception:
+            creds = globals().get("df_credentials", pd.DataFrame())
+        limit_pn = 0.0
+        if isinstance(creds, pd.DataFrame) and not creds.empty and "Tên nhân viên" in creds.columns:
+            hit = creds[
+                creds["Tên nhân viên"].astype(str).apply(normalize_login_name)
+                .eq(normalize_login_name(employee_name))
+            ]
+            if not hit.empty and "Phép năm" in hit.columns:
+                v = pd.to_numeric(hit.iloc[-1].get("Phép năm", 0), errors="coerce")
+                limit_pn = 0.0 if pd.isna(v) else float(v)
+
+        hist = live.copy() if isinstance(live, pd.DataFrame) else pd.DataFrame()
+        if not hist.empty and "Tên nhân viên" in hist.columns:
+            hist = hist[
+                hist["Tên nhân viên"].astype(str).apply(normalize_login_name)
+                .eq(normalize_login_name(employee_name))
+            ].copy()
+            hist = _leave_rows_counting_toward_quota(hist)
+        if not hist.empty:
+            hist["__dt_ann_v92682"] = pd.to_datetime(hist.get("Ngày"), dayfirst=True, errors="coerce")
+            hist["__days_ann_v92682"] = pd.to_numeric(hist.get("Số ngày tính", 0), errors="coerce").fillna(0.0)
+        for yy in sorted({d.year for d in selected_dates}):
+            required = float(sum(1 for d in selected_dates if d.year == yy))
+            used = 0.0
+            if not hist.empty and "Lý do nghỉ" in hist.columns:
+                annual_mask = hist["Lý do nghỉ"].astype(str).apply(is_annual_leave_range_reason)
+                year_mask = hist["__dt_ann_v92682"].dt.year.eq(yy)
+                used = float(hist.loc[annual_mask & year_mask, "__days_ann_v92682"].sum())
+            if limit_pn > 0 and used + required > limit_pn:
+                return False, (
+                    f"Vượt quỹ Phép năm {yy}: cần {required:g} ngày, đã dùng {used:g}, "
+                    f"quỹ được cấp {limit_pn:g}."
+                ), []
+
+        detail_text = str(detail or "").strip()
+        if request_id:
+            prefix = f"Đơn Phép năm {request_id} đã duyệt"
+            detail_text = f"{prefix} | {detail_text}" if detail_text else prefix
+        return save_lich_nghi_range_to_backup_sheet(
+            start_date, end_date, employee_name, reason, detail_text,
+            1.0, 0.0, approver,
+        )
+    except Exception as e:
+        return False, f"Lỗi ghi đơn Phép năm vào MainData: {e}", []
+
+
 def long_leave_active_records(df=None):
     d = df.copy() if isinstance(df, pd.DataFrame) else load_long_leave_requests()
     if d.empty:
         return d
+    d = _filter_formal_long_leave_rows(d)
     return d[d["Trạng thái"].astype(str).str.strip().eq(LONG_LEAVE_APPROVED)].copy()
+
+
+def _annual_leave_request_periods_v92683(df=None):
+    """Các khoảng đơn Phép năm dùng cho dashboard theo dõi của người duyệt."""
+    d = df.copy() if isinstance(df, pd.DataFrame) else load_long_leave_requests()
+    cols = ["Tên nhân viên", "Từ ngày", "Đến ngày", "Trạng thái", "ID", "Nguồn"]
+    if not isinstance(d, pd.DataFrame) or d.empty:
+        return pd.DataFrame(columns=cols)
+    annual = d[d.apply(_is_annual_leave_request, axis=1)].copy()
+    if annual.empty:
+        return pd.DataFrame(columns=cols)
+    annual["__start_v92683"] = annual["Từ ngày"].apply(_parse_vn_date)
+    annual["__end_v92683"] = annual["Đến ngày"].apply(_parse_vn_date)
+    annual = annual[annual["__start_v92683"].notna() & annual["__end_v92683"].notna()].copy()
+    out = pd.DataFrame({
+        "Tên nhân viên": annual["Tên nhân viên"].astype(str),
+        "Từ ngày": annual["__start_v92683"].apply(lambda x: x.strftime("%d/%m/%Y")),
+        "Đến ngày": annual["__end_v92683"].apply(lambda x: x.strftime("%d/%m/%Y")),
+        "Trạng thái": annual["Trạng thái"].astype(str),
+        "ID": (annual["ID"].astype(str) if "ID" in annual.columns else pd.Series("", index=annual.index, dtype=str)),
+        "Nguồn": (annual["Nguồn"].astype(str) if "Nguồn" in annual.columns else pd.Series("", index=annual.index, dtype=str)),
+    })
+    out["__start_v92683"] = annual["__start_v92683"].values
+    out["__end_v92683"] = annual["__end_v92683"].values
+    return out.reset_index(drop=True)
+
+
+def build_annual_leave_main_data_periods_v92683(start_date=None, end_date=None):
+    """Gom các ngày Nghỉ Phép năm trong MainData thành khoảng liên tiếp theo nhân viên."""
+    main = load_backup_sheet_data()
+    if not isinstance(main, pd.DataFrame) or main.empty:
+        return pd.DataFrame(columns=["Tên nhân viên", "Từ ngày", "Đến ngày", "Số ngày"])
+    if not {"Ngày", "Tên nhân viên", "Lý do nghỉ"}.issubset(main.columns):
+        return pd.DataFrame(columns=["Tên nhân viên", "Từ ngày", "Đến ngày", "Số ngày"])
+    d = main[main["Lý do nghỉ"].astype(str).apply(is_annual_leave_range_reason)].copy()
+    if d.empty:
+        return pd.DataFrame(columns=["Tên nhân viên", "Từ ngày", "Đến ngày", "Số ngày"])
+    d["__date_v92683"] = d["Ngày"].apply(_parse_vn_date)
+    d = d[d["__date_v92683"].notna()].copy()
+    if isinstance(start_date, date):
+        d = d[d["__date_v92683"].apply(lambda x: x >= start_date)].copy()
+    if isinstance(end_date, date):
+        d = d[d["__date_v92683"].apply(lambda x: x <= end_date)].copy()
+    if d.empty:
+        return pd.DataFrame(columns=["Tên nhân viên", "Từ ngày", "Đến ngày", "Số ngày"])
+    d["__emp_v92683"] = d["Tên nhân viên"].astype(str).apply(normalize_login_name)
+    rows = []
+    for _, g in d.groupby("__emp_v92683", sort=False):
+        employee = str(g.iloc[0].get("Tên nhân viên", "") or "").strip()
+        dates = sorted(set(g["__date_v92683"].tolist()))
+        if not dates:
+            continue
+        seg_start = seg_prev = dates[0]
+        for dd in dates[1:]:
+            if dd == seg_prev + timedelta(days=1):
+                seg_prev = dd
+                continue
+            rows.append({
+                "Tên nhân viên": employee,
+                "Từ ngày": seg_start.strftime("%d/%m/%Y"),
+                "Đến ngày": seg_prev.strftime("%d/%m/%Y"),
+                "Số ngày": (seg_prev - seg_start).days + 1,
+                "__start_v92683": seg_start,
+                "__end_v92683": seg_prev,
+            })
+            seg_start = seg_prev = dd
+        rows.append({
+            "Tên nhân viên": employee,
+            "Từ ngày": seg_start.strftime("%d/%m/%Y"),
+            "Đến ngày": seg_prev.strftime("%d/%m/%Y"),
+            "Số ngày": (seg_prev - seg_start).days + 1,
+            "__start_v92683": seg_start,
+            "__end_v92683": seg_prev,
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=["Tên nhân viên", "Từ ngày", "Đến ngày", "Số ngày"])
+    return out.sort_values(["__start_v92683", "Tên nhân viên"], kind="stable").reset_index(drop=True)
+
+
+def build_annual_leave_daily_capacity_v92683(start_date, end_date):
+    """
+    Bảng năng lực nghỉ theo từng ngày để Admin/Quản lý/Leader/Lễ tân nhìn trước khi duyệt Phép năm.
+    Hạn mức dùng đúng quota Có phép hiện tại; đơn Chờ duyệt chỉ hiển thị tham khảo, chưa chiếm quota.
+    """
+    if not isinstance(start_date, date) or not isinstance(end_date, date):
+        return pd.DataFrame()
+    if end_date < start_date:
+        start_date, end_date = end_date, start_date
+    # Giới hạn hiển thị 366 ngày để tránh dashboard vô tình tạo bảng quá lớn.
+    if (end_date - start_date).days > 365:
+        end_date = start_date + timedelta(days=365)
+
+    main = load_backup_sheet_data()
+    main = combine_leave_sources_for_daily_stats(main)
+    quota_main = _leave_rows_counting_toward_quota(main)
+    if isinstance(quota_main, pd.DataFrame) and not quota_main.empty:
+        quota_main = quota_main.copy()
+        quota_main["__date_v92683"] = quota_main["Ngày"].apply(_parse_vn_date)
+        quota_main["__days_v92683"] = pd.to_numeric(
+            quota_main.get("Số ngày tính", 0), errors="coerce"
+        ).fillna(0.0)
+        reason_map = _leave_reason_type_map(globals().get("df_loai_nghi", pd.DataFrame()))
+        quota_main["__group_v92683"] = quota_main["Lý do nghỉ"].apply(
+            lambda x: _daily_leave_group(x, reason_map)
+        )
+    else:
+        quota_main = pd.DataFrame()
+
+    periods = _annual_leave_request_periods_v92683()
+    pending = periods[
+        periods["Trạng thái"].astype(str).str.strip().eq(LONG_LEAVE_PENDING)
+    ].copy() if not periods.empty else pd.DataFrame()
+
+    rows = []
+    curr = start_date
+    while curr <= end_date:
+        limits = _daily_leave_quota_limits(curr)
+        co_names = []
+        annual_names = []
+        if isinstance(quota_main, pd.DataFrame) and not quota_main.empty:
+            dd = quota_main[
+                quota_main["__date_v92683"].eq(curr)
+                & quota_main["__group_v92683"].eq("co_phep")
+                & quota_main["__days_v92683"].gt(0)
+            ].copy()
+            co_names = sort_employee_names(
+                dd.get("Tên nhân viên", pd.Series(dtype=str)).dropna().astype(str).tolist(),
+                include_inactive=True,
+            )
+            ann = dd[dd["Lý do nghỉ"].astype(str).apply(is_annual_leave_range_reason)]
+            annual_names = sort_employee_names(
+                ann.get("Tên nhân viên", pd.Series(dtype=str)).dropna().astype(str).tolist(),
+                include_inactive=True,
+            )
+
+        pending_names = []
+        if isinstance(pending, pd.DataFrame) and not pending.empty:
+            pmask = pending.apply(
+                lambda r: r.get("__start_v92683") <= curr <= r.get("__end_v92683"), axis=1
+            )
+            pending_names = sort_employee_names(
+                pending.loc[pmask, "Tên nhân viên"].dropna().astype(str).tolist(),
+                include_inactive=True,
+            )
+
+        used = len({normalize_login_name(x) for x in co_names if str(x).strip()})
+        limit = int(limits.get("co_phep", 0) or 0)
+        rows.append({
+            "Ngày": curr.strftime("%d/%m/%Y"),
+            "Thứ": _vn_weekday_label(curr),
+            "Có phép hiện có": used,
+            "Hạn mức Có phép": limit,
+            "Còn chỗ": max(0, limit - used),
+            "Đang ghi Phép năm": ", ".join(annual_names),
+            "Tất cả Có phép": ", ".join(co_names),
+            "Phép năm chờ duyệt": ", ".join(pending_names),
+            "Số đơn chờ": len(pending_names),
+        })
+        curr += timedelta(days=1)
+    return pd.DataFrame(rows)
+
+
+def annual_leave_overlap_summary_v92683(start_date, end_date):
+    daily = build_annual_leave_daily_capacity_v92683(start_date, end_date)
+    if not isinstance(daily, pd.DataFrame) or daily.empty:
+        return {"daily": pd.DataFrame(), "max_used": 0, "min_remaining": 0, "full_days": 0}
+    used = pd.to_numeric(daily["Có phép hiện có"], errors="coerce").fillna(0)
+    remaining = pd.to_numeric(daily["Còn chỗ"], errors="coerce").fillna(0)
+    return {
+        "daily": daily,
+        "max_used": int(used.max()) if len(used) else 0,
+        "min_remaining": int(remaining.min()) if len(remaining) else 0,
+        "full_days": int((remaining <= 0).sum()),
+    }
 
 
 def pending_long_leave_count():
@@ -3658,6 +3990,7 @@ def count_employee_long_leave_requests_in_month(employee_name, ref_date=None):
     work = d[
         d["Tên nhân viên"].astype(str).apply(normalize_login_name).eq(emp_key)
     ].copy()
+    work = _filter_formal_long_leave_rows(work)
     if "Nguồn" in work.columns:
         work = work[
             work["Nguồn"].astype(str).str.contains("Nhân viên gửi yêu cầu", case=False, na=False)
@@ -3693,7 +4026,30 @@ def reconcile_long_leave_employment_statuses():
         if not isinstance(d, pd.DataFrame) or d.empty:
             return
         today = get_vn_today()
-        approved = d[d["Trạng thái"].astype(str).str.strip().eq(LONG_LEAVE_APPROVED)].copy()
+
+        # Đơn Phép năm dùng cùng vòng đời duyệt nhưng tuyệt đối không đổi trạng thái làm việc.
+        # Sau khi qua ngày kết thúc chỉ chuyển trạng thái đơn sang Đã kết thúc.
+        approved_all_v92682 = d[
+            d["Trạng thái"].astype(str).str.strip().eq(LONG_LEAVE_APPROVED)
+        ].copy()
+        if not approved_all_v92682.empty:
+            annual_approved_v92682 = approved_all_v92682[
+                approved_all_v92682.apply(_is_annual_leave_request, axis=1)
+            ].copy()
+            for _, _ann_row_v92682 in annual_approved_v92682.iterrows():
+                _ann_end_v92682 = _parse_vn_date(_ann_row_v92682.get("Đến ngày", ""))
+                if _ann_end_v92682 is not None and today > _ann_end_v92682:
+                    try:
+                        update_long_leave_row(
+                            int(_ann_row_v92682.get("__row", 0)),
+                            {"Trạng thái": LONG_LEAVE_ENDED},
+                            "SYSTEM",
+                        )
+                    except Exception:
+                        pass
+
+        approved = _filter_formal_long_leave_rows(d)
+        approved = approved[approved["Trạng thái"].astype(str).str.strip().eq(LONG_LEAVE_APPROVED)].copy()
         if approved.empty:
             return
 
@@ -3733,6 +4089,385 @@ def reconcile_long_leave_employment_statuses():
                     pass
     except Exception:
         pass
+
+
+def _staff_plan_last_col():
+    return re.sub(r"\d", "", gspread.utils.rowcol_to_a1(1, len(STAFF_PLAN_HEADERS)))
+
+
+def _get_staff_plan_worksheet():
+    client = get_gspread_client()
+    if not client:
+        return None
+    ss = client.open_by_key(SHEET_MAT_KHAU_ID)
+    ws = _get_or_create_worksheet(
+        ss, STAFF_PLAN_WORKSHEET, rows=3000, cols=len(STAFF_PLAN_HEADERS)
+    )
+    if int(getattr(ws, "col_count", 0) or 0) < len(STAFF_PLAN_HEADERS):
+        _gs_call_with_backoff(ws.resize, cols=len(STAFF_PLAN_HEADERS))
+    header = _gs_call_with_backoff(ws.row_values, 1)
+    if header[:len(STAFF_PLAN_HEADERS)] != STAFF_PLAN_HEADERS:
+        gspread_update_range(
+            ws, f"A1:{_staff_plan_last_col()}1", [STAFF_PLAN_HEADERS]
+        )
+    return ws
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_staff_schedule_plans():
+    try:
+        ws = _get_staff_plan_worksheet()
+        if ws is None:
+            return pd.DataFrame(columns=STAFF_PLAN_HEADERS + ["__row"])
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        rows = []
+        for ridx, row in enumerate(vals[1:], start=2):
+            rr = list(row[:len(STAFF_PLAN_HEADERS)]) + [""] * max(
+                0, len(STAFF_PLAN_HEADERS) - len(row)
+            )
+            if any(str(v).strip() for v in rr):
+                rec = dict(zip(STAFF_PLAN_HEADERS, rr[:len(STAFF_PLAN_HEADERS)]))
+                rec["__row"] = ridx
+                rows.append(rec)
+        return pd.DataFrame(rows) if rows else pd.DataFrame(
+            columns=STAFF_PLAN_HEADERS + ["__row"]
+        )
+    except Exception:
+        return pd.DataFrame(columns=STAFF_PLAN_HEADERS + ["__row"])
+
+
+def _clear_staff_plan_cache():
+    try:
+        load_staff_schedule_plans.clear()
+    except Exception:
+        pass
+
+
+def _staff_plan_id(employee_name, plan_type):
+    now = datetime.now(VN_TZ)
+    base = (
+        f"{normalize_login_name(employee_name)}|{normalize_login_name(plan_type)}|"
+        f"{now.isoformat()}|{secrets.token_hex(3)}"
+    )
+    return "PLAN-" + hashlib.sha1(base.encode("utf-8")).hexdigest()[:14].upper()
+
+
+def append_staff_schedule_plan(
+    employee_name, plan_type, start_date, end_date=None, shift_name="",
+    cycle="", note="", created_by="",
+):
+    """Lưu một kế hoạch nhân sự. Ngày quay lại làm = `Đến ngày` của Nghỉ dài hạn."""
+    try:
+        employee_name = str(employee_name or "").strip()
+        plan_type = str(plan_type or "").strip()
+        if not employee_name:
+            return False, "Vui lòng chọn nhân viên.", ""
+        if plan_type not in {STAFF_PLAN_SHIFT, STAFF_PLAN_LONG_LEAVE}:
+            return False, "Loại kế hoạch không hợp lệ.", ""
+        if not isinstance(start_date, date):
+            return False, "Ngày bắt đầu không hợp lệ.", ""
+        if plan_type == STAFF_PLAN_SHIFT and not str(shift_name or "").strip():
+            return False, "Vui lòng chọn ca sẽ áp dụng.", ""
+        if plan_type == STAFF_PLAN_LONG_LEAVE:
+            if not isinstance(end_date, date):
+                return False, "Vui lòng chọn ngày bắt đầu quay lại làm việc.", ""
+            if end_date <= start_date:
+                return False, "Ngày quay lại làm việc phải sau ngày bắt đầu nghỉ dài hạn.", ""
+
+        # Chống trùng kế hoạch đang còn hiệu lực.
+        existing = load_staff_schedule_plans()
+        if isinstance(existing, pd.DataFrame) and not existing.empty:
+            d = existing.copy()
+            d = d[
+                d["Tên nhân viên"].astype(str).apply(normalize_login_name)
+                .eq(normalize_login_name(employee_name))
+            ]
+            d = d[~d["Trạng thái"].astype(str).str.strip().eq(STAFF_PLAN_CANCELLED)]
+            d = d[d["Loại kế hoạch"].astype(str).str.strip().eq(plan_type)]
+            if plan_type == STAFF_PLAN_SHIFT:
+                for _, r in d.iterrows():
+                    if _parse_vn_date(r.get("Từ ngày", "")) == start_date:
+                        return False, (
+                            f"{employee_name} đã có kế hoạch đổi ca vào "
+                            f"{start_date.strftime('%d/%m/%Y')}. Hãy hủy kế hoạch cũ trước."
+                        ), ""
+            else:
+                for _, r in d.iterrows():
+                    rs = _parse_vn_date(r.get("Từ ngày", ""))
+                    retd = _parse_vn_date(r.get("Đến ngày", ""))
+                    if rs is None or retd is None:
+                        continue
+                    # Khoảng nghỉ được hiểu [Từ ngày, Ngày quay lại).
+                    if start_date < retd and end_date > rs:
+                        return False, (
+                            f"{employee_name} đã có kế hoạch nghỉ dài hạn chồng lấn "
+                            f"{rs.strftime('%d/%m/%Y')} → {retd.strftime('%d/%m/%Y')}."
+                        ), ""
+
+        ws = _get_staff_plan_worksheet()
+        if ws is None:
+            return False, "Không kết nối được Google Sheets để lưu kế hoạch.", ""
+        now = datetime.now(VN_TZ)
+        plan_id = _staff_plan_id(employee_name, plan_type)
+        row = [
+            plan_id, employee_name, plan_type, start_date.strftime("%d/%m/%Y"),
+            end_date.strftime("%d/%m/%Y") if isinstance(end_date, date) else "",
+            str(shift_name or "").strip(), str(cycle or "").strip(),
+            str(note or "").strip(), STAFF_PLAN_PENDING,
+            now.strftime("%d/%m/%Y"), now.strftime("%H:%M:%S"),
+            str(created_by or "").strip(), "", "", "",
+        ]
+        _gs_call_with_backoff(ws.append_row, row, value_input_option="USER_ENTERED")
+        _clear_staff_plan_cache()
+        return True, "Đã lưu kế hoạch/hẹn ngày nhân sự.", plan_id
+    except Exception as e:
+        return False, f"Lỗi lưu kế hoạch nhân sự: {e}", ""
+
+
+def update_staff_schedule_plan_row(row_idx, updates):
+    try:
+        row_idx = int(row_idx)
+        ws = _get_staff_plan_worksheet()
+        if ws is None:
+            return False, "Không kết nối được Google Sheets."
+        raw = _gs_call_with_backoff(
+            ws.get, f"A{row_idx}:{_staff_plan_last_col()}{row_idx}"
+        )
+        current = list(raw[0]) if raw and raw[0] else []
+        current += [""] * max(0, len(STAFF_PLAN_HEADERS) - len(current))
+        rec = dict(zip(STAFF_PLAN_HEADERS, current[:len(STAFF_PLAN_HEADERS)]))
+        for k, v in dict(updates or {}).items():
+            if k in rec:
+                rec[k] = v
+        out = [rec.get(h, "") for h in STAFF_PLAN_HEADERS]
+        gspread_update_range(
+            ws, f"A{row_idx}:{_staff_plan_last_col()}{row_idx}", [out],
+            value_input_option="USER_ENTERED",
+        )
+        _clear_staff_plan_cache()
+        return True, "Đã cập nhật kế hoạch."
+    except Exception as e:
+        return False, f"Lỗi cập nhật kế hoạch: {e}"
+
+
+def cancel_staff_schedule_plan(row_idx, actor):
+    now = datetime.now(VN_TZ)
+    return update_staff_schedule_plan_row(
+        row_idx,
+        {
+            "Trạng thái": STAFF_PLAN_CANCELLED,
+            "Ngày áp dụng": now.strftime("%d/%m/%Y"),
+            "Giờ áp dụng": now.strftime("%H:%M:%S"),
+            "Kết quả": f"Đã hủy bởi {actor}",
+        },
+    )
+
+
+def _apply_employee_shift_plan(employee_name, shift_name, effective_date, cycle=""):
+    """Áp dụng đúng O:P:Q cho một nhân viên khi kế hoạch tới hạn."""
+    try:
+        employee_name = str(employee_name or "").strip()
+        shift_name = str(shift_name or "").strip()
+        if not employee_name or not shift_name:
+            return False, "Thiếu nhân viên hoặc ca áp dụng."
+
+        creds = load_credentials_recent()
+        role = ""
+        if isinstance(creds, pd.DataFrame) and not creds.empty:
+            hit = creds[
+                creds["Tên nhân viên"].astype(str).apply(normalize_login_name)
+                .eq(normalize_login_name(employee_name))
+            ]
+            if not hit.empty:
+                role = str(hit.iloc[-1].get("Phân quyền", "") or "").strip().lower()
+        if not role:
+            return False, f"Không tìm thấy hồ sơ của {employee_name}."
+        dep = _shift_department_label(role)
+        valid_shifts = list(get_shift_options(dep))
+        if shift_name not in valid_shifts:
+            return False, f"Ca '{shift_name}' không thuộc danh mục hiện tại của bộ phận {dep}."
+        if cycle and cycle not in SHIFT_CYCLE_OPTIONS:
+            return False, f"Chu kỳ '{cycle}' không hợp lệ."
+
+        client = get_gspread_client()
+        if not client:
+            return False, "Không kết nối được Google Sheets."
+        sheet = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
+        vals = _gs_call_with_backoff(sheet.get_all_values)
+        target_row = None
+        for ridx, row in enumerate(vals[1:], start=2):
+            if len(row) > 1 and normalize_login_name(row[1]) == normalize_login_name(employee_name):
+                target_row = ridx
+                break
+        if target_row is None:
+            return False, f"Không tìm thấy dòng tài khoản của {employee_name}."
+        gspread_update_range(
+            sheet, f"O{target_row}:Q{target_row}",
+            [[shift_name, effective_date.strftime("%d/%m/%Y"), str(cycle or "").strip()]],
+            value_input_option="USER_ENTERED",
+        )
+        _clear_dynamic_data_caches()
+        try:
+            load_credentials.clear()
+            load_credentials_recent.clear()
+        except Exception:
+            pass
+        return True, (
+            f"Đã chuyển {employee_name} sang {shift_name} từ "
+            f"{effective_date.strftime('%d/%m/%Y')}."
+        )
+    except Exception as e:
+        return False, f"Lỗi áp dụng ca: {e}"
+
+
+def _finish_formal_long_leave_on_planned_return(employee_name, return_date):
+    """Nếu có đơn nghỉ dài hạn đã duyệt chồng tới ngày quay lại, kết thúc đơn để tránh trạng thái bị bật lại."""
+    try:
+        d = load_long_leave_requests()
+        if not isinstance(d, pd.DataFrame) or d.empty:
+            return 0
+        d = _filter_formal_long_leave_rows(d)
+        matched = d[
+            d["Tên nhân viên"].astype(str).apply(normalize_login_name)
+            .eq(normalize_login_name(employee_name))
+            & d["Trạng thái"].astype(str).str.strip().eq(LONG_LEAVE_APPROVED)
+        ]
+        changed = 0
+        for _, row in matched.iterrows():
+            sd = _parse_vn_date(row.get("Từ ngày", ""))
+            ed = _parse_vn_date(row.get("Đến ngày", ""))
+            if sd is None or ed is None:
+                continue
+            if sd <= return_date <= ed:
+                ok, _ = update_long_leave_row(
+                    int(row.get("__row", 0)),
+                    {"Trạng thái": LONG_LEAVE_ENDED, "Đến ngày": return_date.strftime("%d/%m/%Y")},
+                    "SYSTEM - LỊCH HẸN NHÂN SỰ",
+                )
+                if ok:
+                    changed += 1
+        return changed
+    except Exception:
+        return 0
+
+
+def reconcile_staff_schedule_plans():
+    """
+    V92.6.81 - Tự áp dụng kế hoạch theo NGÀY khi app/Scheduler có lượt chạy.
+
+    - Đổi ca: đến ngày hiệu lực -> cập nhật Ca làm việc + Ngày bắt đầu ca + Chu kỳ.
+    - Nghỉ dài hạn: từ ngày bắt đầu đến trước ngày quay lại -> Tạm thời nghỉ việc.
+      Từ ngày quay lại -> Đang làm việc và kế hoạch hoàn tất.
+    """
+    try:
+        plans = load_staff_schedule_plans()
+        if not isinstance(plans, pd.DataFrame) or plans.empty:
+            return {"applied": 0, "errors": 0}
+        today = get_vn_today()
+        now = datetime.now(VN_TZ)
+        result = {"applied": 0, "errors": 0}
+        status_map = load_employment_status_map()
+
+        # Theo ngày rồi theo dòng để nhiều kế hoạch đổi ca tới hạn được áp dụng đúng thứ tự.
+        work = plans.copy()
+        work["__start"] = work["Từ ngày"].apply(_parse_vn_date)
+        work = work.sort_values(["__start", "__row"], kind="stable", na_position="last")
+
+        for _, row in work.iterrows():
+            state = str(row.get("Trạng thái", "") or "").strip()
+            if state == STAFF_PLAN_CANCELLED:
+                continue
+            plan_type = str(row.get("Loại kế hoạch", "") or "").strip()
+            employee = str(row.get("Tên nhân viên", "") or "").strip()
+            start_d = _parse_vn_date(row.get("Từ ngày", ""))
+            end_d = _parse_vn_date(row.get("Đến ngày", ""))
+            row_idx = int(row.get("__row", 0) or 0)
+            if not employee or start_d is None or row_idx <= 1:
+                continue
+
+            if plan_type == STAFF_PLAN_SHIFT:
+                if today < start_d or state == STAFF_PLAN_DONE:
+                    continue
+                ok, msg = _apply_employee_shift_plan(
+                    employee, row.get("Ca áp dụng", ""), start_d, row.get("Chu kỳ", "")
+                )
+                update_staff_schedule_plan_row(
+                    row_idx,
+                    {
+                        "Trạng thái": STAFF_PLAN_DONE if ok else STAFF_PLAN_ERROR,
+                        "Ngày áp dụng": now.strftime("%d/%m/%Y"),
+                        "Giờ áp dụng": now.strftime("%H:%M:%S"),
+                        "Kết quả": msg,
+                    },
+                )
+                result["applied" if ok else "errors"] += 1
+                continue
+
+            if plan_type != STAFF_PLAN_LONG_LEAVE or end_d is None:
+                continue
+            if state == STAFF_PLAN_DONE:
+                continue
+
+            emp_key = normalize_login_name(employee)
+            current_status = status_map.get(emp_key, EMPLOYMENT_STATUS_ACTIVE)
+            if today < start_d:
+                if state not in {STAFF_PLAN_PENDING, STAFF_PLAN_ERROR}:
+                    update_staff_schedule_plan_row(row_idx, {"Trạng thái": STAFF_PLAN_PENDING})
+                continue
+
+            if start_d <= today < end_d:
+                # Đã đúng trạng thái và kế hoạch đã Active thì không ghi Sheets lặp lại mỗi rerun.
+                if current_status == EMPLOYMENT_STATUS_TEMP and state == STAFF_PLAN_ACTIVE:
+                    continue
+                ok = True
+                msg = f"{employee} đang trong thời gian nghỉ dài hạn."
+                changed_status = current_status != EMPLOYMENT_STATUS_TEMP
+                if changed_status:
+                    ok, msg = set_employee_employment_status(
+                        employee, EMPLOYMENT_STATUS_TEMP, "SYSTEM - LỊCH HẸN NHÂN SỰ"
+                    )
+                    if ok:
+                        status_map[emp_key] = EMPLOYMENT_STATUS_TEMP
+                update_staff_schedule_plan_row(
+                    row_idx,
+                    {
+                        "Trạng thái": STAFF_PLAN_ACTIVE if ok else STAFF_PLAN_ERROR,
+                        "Ngày áp dụng": now.strftime("%d/%m/%Y"),
+                        "Giờ áp dụng": now.strftime("%H:%M:%S"),
+                        "Kết quả": msg,
+                    },
+                )
+                if ok and changed_status:
+                    result["applied"] += 1
+                elif not ok:
+                    result["errors"] += 1
+                continue
+
+            # today >= ngày bắt đầu quay lại làm.
+            ok = True
+            msg = f"{employee} đến ngày quay lại làm việc."
+            if current_status != EMPLOYMENT_STATUS_ACTIVE:
+                ok, msg = set_employee_employment_status(
+                    employee, EMPLOYMENT_STATUS_ACTIVE, "SYSTEM - LỊCH HẸN NHÂN SỰ"
+                )
+                if ok:
+                    status_map[emp_key] = EMPLOYMENT_STATUS_ACTIVE
+            if ok:
+                _finish_formal_long_leave_on_planned_return(employee, end_d)
+            update_staff_schedule_plan_row(
+                row_idx,
+                {
+                    "Trạng thái": STAFF_PLAN_DONE if ok else STAFF_PLAN_ERROR,
+                    "Ngày áp dụng": now.strftime("%d/%m/%Y"),
+                    "Giờ áp dụng": now.strftime("%H:%M:%S"),
+                    "Kết quả": msg,
+                },
+            )
+            result["applied" if ok else "errors"] += int(current_status != EMPLOYMENT_STATUS_ACTIVE)
+
+        return result
+    except Exception:
+        return {"applied": 0, "errors": 1}
 
 
 # V92.6.24: thời hạn đăng ký/hủy không còn hard-code; đọc từ LoaiNghi cột I/J.
@@ -4770,6 +5505,66 @@ def write_leave_activity_log(
         return False, f"Không ghi được Nhật ký lịch nghỉ: {e}"
 
 
+def write_leave_activity_logs_batch(
+    action, actor, after_rows, actor_role=None, source=None, status="SUCCESS", note=""
+):
+    """V92.6.81: ghi nhiều Audit Log trong 1 batch để đăng ký khoảng dài không chạm quota."""
+    try:
+        rows_in = list(after_rows or [])
+        if not rows_in:
+            return True, "Không có audit cần ghi."
+        ws = _leave_activity_log_ws()
+        if ws is None:
+            return False, "Không kết nối được worksheet Nhật ký lịch nghỉ."
+        now = datetime.now(VN_TZ)
+        actor_text = str(actor or "Hệ thống").strip() or "Hệ thống"
+        role = _leave_activity_actor_role(actor_text, actor_role)
+        source_text = _leave_activity_source(source, actor_text)
+        batch = []
+        for offset, after_row in enumerate(rows_in):
+            before = {}
+            after = _leave_audit_snapshot(after_row)
+            employee = str(after.get("Tên nhân viên", "") or "").strip()
+            leave_date = str(after.get("Ngày", "") or "").strip()
+            raw_id = "|".join([
+                now.isoformat(), str(offset), str(action), actor_text, employee, leave_date,
+                json.dumps(after, ensure_ascii=False, sort_keys=True, default=str),
+                secrets.token_hex(4),
+            ])
+            event_id = hashlib.sha1(raw_id.encode("utf-8")).hexdigest()[:24]
+            batch.append([
+                event_id,
+                now.strftime("%d/%m/%Y %H:%M:%S"),
+                now.strftime("%d/%m/%Y"),
+                now.strftime("%H:%M:%S"),
+                str(action or "").strip(),
+                str(status or "SUCCESS").strip().upper(),
+                actor_text, role, source_text, employee, leave_date,
+                "", str(after.get("Lý do nghỉ", "") or ""),
+                "", str(after.get("Loại nghỉ", "") or ""),
+                "", after.get("Số ngày tính", ""),
+                "", after.get("Phạt vi phạm", ""),
+                "", _leave_activity_ordinal(after),
+                _leave_activity_changed_fields(before, after),
+                str(note or "").strip(),
+                json.dumps(before, ensure_ascii=False, default=str),
+                json.dumps(after, ensure_ascii=False, default=str),
+            ])
+        vals = _gs_call_with_backoff(ws.get_all_values)
+        start_row = max(2, len(vals) + 1)
+        end_row = start_row + len(batch) - 1
+        gspread_update_range(
+            ws, f"A{start_row}:Y{end_row}", batch, value_input_option="USER_ENTERED"
+        )
+        try:
+            load_leave_activity_log.clear()
+        except Exception:
+            pass
+        return True, f"Đã ghi {len(batch)} dòng Nhật ký lịch nghỉ."
+    except Exception as e:
+        return False, f"Không ghi được Nhật ký lịch nghỉ theo lô: {e}"
+
+
 @st.cache_data(ttl=20, show_spinner=False)
 def load_leave_activity_log():
     """Đọc toàn bộ audit log; newest-first ở UI."""
@@ -5523,7 +6318,7 @@ def set_auto_penalty_paused(paused, updated_by):
             now.strftime('%d/%m/%Y'), now.strftime('%H:%M:%S'), str(updated_by or 'Admin')
         ]], value_input_option='USER_ENTERED')
         state_vi = "TẠM DỪNG" if paused else "HOẠT ĐỘNG"
-        return True, f"Auto Update phạt đã chuyển sang trạng thái {state_vi}. Ngưỡng tự động: từ {AUTO_PENALTY_MINUTES} phút."
+        return True, f"Auto Check đã chuyển sang trạng thái {state_vi}. Ngưỡng tự động: từ {AUTO_PENALTY_MINUTES} phút."
     except Exception as e:
         return False, f"Không cập nhật được trạng thái Auto Update: {e}"
 
@@ -8881,8 +9676,8 @@ def render_staff_statistics_v92678(credentials_df, key_prefix='staff_stats'):
     )
 
 
-def build_staff_list_dataframe(credentials_df):
-    """Danh sách nhân sự chuẩn: tên A→Z, role chuẩn hóa, trạng thái theo 3 mức mới."""
+def build_staff_list_dataframe(credentials_df, include_inactive=False):
+    """Danh sách nhân viên chuẩn; mặc định chỉ Đang làm việc, trang quản trị có thể xem đủ trạng thái."""
     if credentials_df is None or not isinstance(credentials_df, pd.DataFrame) or credentials_df.empty:
         return pd.DataFrame(columns=STAFF_EXPORT_COLUMNS)
     d = credentials_df.copy()
@@ -8895,8 +9690,10 @@ def build_staff_list_dataframe(credentials_df):
     d['Trạng thái làm việc'] = d['Tên nhân viên'].astype(str).apply(
         lambda name: employment_map.get(normalize_login_name(name), EMPLOYMENT_STATUS_ACTIVE)
     )
-    # V92.6.72: Danh sách nhân sự vận hành chỉ liệt kê người đang làm việc.
-    d = d[d['Trạng thái làm việc'].eq(EMPLOYMENT_STATUS_ACTIVE)].copy()
+    # Danh sách vận hành mặc định vẫn chỉ lấy người Đang làm việc. Riêng trang Danh sách nhân viên
+    # truyền include_inactive=True để Admin/Quản lý có thể lọc cả Tạm nghỉ / Đã nghỉ việc.
+    if not include_inactive:
+        d = d[d['Trạng thái làm việc'].eq(EMPLOYMENT_STATUS_ACTIVE)].copy()
     for col in STAFF_EXPORT_COLUMNS:
         if col not in d.columns:
             d[col] = ''
@@ -8910,7 +9707,7 @@ def build_staff_list_dataframe(credentials_df):
 
 
 def staff_list_to_excel(df):
-    """Export Danh sách nhân sự với dropdown Phân quyền/Trạng thái để có thể sửa rồi import lại."""
+    """Export Danh sách nhân viên với dropdown Phân quyền/Trạng thái để có thể sửa rồi import lại."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment
     from openpyxl.worksheet.datavalidation import DataValidation
@@ -8971,7 +9768,7 @@ def staff_list_to_excel(df):
 
 
 def read_staff_list_import(uploaded_file):
-    """Đọc file export Danh sách nhân sự; Tên nhân viên là khóa, không tạo/xóa tài khoản."""
+    """Đọc file export Danh sách nhân viên; Tên nhân viên là khóa, không tạo/xóa tài khoản."""
     try:
         raw = pd.read_excel(uploaded_file, dtype=str, engine='openpyxl').fillna('')
     except Exception as e:
@@ -9684,6 +10481,9 @@ def _daily_leave_quota_counts(all_leave_df, target_date):
     if "Ngày" not in d.columns or "Lý do nghỉ" not in d.columns:
         return {"co_phep": 0, "phat_sinh": 0}
 
+    # V92.6.82: Nghỉ bệnh có giấy khám hoặc được quản lý duyệt vẫn có Số ngày tính=1.0 nhưng không chiếm
+    # suất Có phép của ngày, tương tự Nghỉ phép quay video.
+    d = _leave_rows_counting_toward_quota(d)
     d["__date"] = d["Ngày"].apply(_parse_vn_date)
     d = d[d["__date"].eq(target_date)].copy()
     if d.empty:
@@ -9968,7 +10768,18 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
             _covered_guard_v92675 = _leave_coverage_employee_keys_for_date(
                 _guard_df_v92675, _guard_date_v92675
             ) if _guard_date_v92675 else set()
-            if normalize_employee_match_name(nv) in _covered_guard_v92675:
+            _faceid_exempt_guard_v92682 = (
+                _auto_check_faceid_exempt_employee_keys_v92682(
+                    _guard_df_v92675, _guard_date_v92675
+                ) if _guard_date_v92675 else set()
+            )
+            _nv_guard_key_v92682 = normalize_employee_match_name(nv)
+            if _nv_guard_key_v92682 in _faceid_exempt_guard_v92682:
+                return False, (
+                    f"Nhân viên '{nv}' đã có Nghỉ đám hiếu hoặc Nghỉ phép quay video "
+                    f"trong MainData ngày {normalize_schedule_date(ngay)}; Auto Check miễn phạt FaceID/vắng."
+                )
+            if _nv_guard_key_v92682 in _covered_guard_v92675:
                 return False, (
                     f"Nhân viên '{nv}' đã có loại nghỉ trong MainData ngày {normalize_schedule_date(ngay)} "
                     "với cột G (Số ngày tính) = 0.5 hoặc 1; Auto Update không được ghi Nghỉ không phép."
@@ -10078,6 +10889,115 @@ def save_lich_nghi_to_backup_sheet(ngay, nv, loai_nghi, chi_tiet, so_ngay, so_ng
         return True, base_msg_v92673
     except Exception as e:
         return False, f"Lỗi ghi dữ liệu: {e}"
+
+def save_lich_nghi_range_to_backup_sheet(
+    start_date, end_date, nv, loai_nghi, chi_tiet, so_ngay, phat_vi_pham, updated_by
+):
+    """
+    V92.6.81 - ghi Phép năm / Nghỉ bệnh nhiều ngày theo lô A:M.
+    Dùng 1 batch write cho toàn khoảng thay vì gọi API từng ngày, tránh lỗi quota 429
+    khi khoảng Nghỉ bệnh có giấy khám hoặc được quản lý duyệt có nhiều ngày.
+    """
+    try:
+        if not isinstance(start_date, date) or not isinstance(end_date, date) or end_date < start_date:
+            return False, "Khoảng ngày không hợp lệ.", []
+        count = (end_date - start_date).days + 1
+        if count <= 0:
+            return False, "Khoảng ngày không hợp lệ.", []
+
+        client = get_gspread_client()
+        if not client:
+            return False, "Chưa cấu hình quyền kết nối Google Sheets.", []
+        sheet_dp = client.open_by_key(SHEET_DU_PHONG_ID).get_worksheet(0)
+        sheet_headers = _ensure_leave_sheet_schema(sheet_dp)
+        live_backup = _live_sheet_to_leave_df(sheet_dp)
+        combined_live = combine_leave_sources_for_daily_stats(live_backup)
+
+        # Chống trùng đúng Ngày + Nhân viên + Lý do trên snapshot LIVE vừa đọc.
+        for i in range(count):
+            d = start_date + timedelta(days=i)
+            if _leave_exists_in_sources(combined_live, d, nv, loai_nghi):
+                return False, (
+                    f"{nv} đã có đúng lý do '{clean_leave_reason_display(loai_nghi)}' "
+                    f"ngày {d.strftime('%d/%m/%Y')}. Không ghi một phần khoảng ngày."
+                ), []
+
+        # Tổng cộng dồn theo từng tháng từ dữ liệu LIVE hiện có.
+        month_acc = {}
+        if isinstance(combined_live, pd.DataFrame) and not combined_live.empty:
+            hist = combined_live.copy()
+            if "Tên nhân viên" in hist.columns:
+                hist = hist[
+                    hist["Tên nhân viên"].astype(str).apply(normalize_login_name)
+                    .eq(normalize_login_name(nv))
+                ].copy()
+            hist = _leave_rows_counting_toward_quota(hist)
+            if not hist.empty and {"Ngày", "Số ngày tính"}.issubset(hist.columns):
+                hist["__dt"] = pd.to_datetime(hist["Ngày"], dayfirst=True, errors="coerce")
+                hist["__days"] = pd.to_numeric(hist["Số ngày tính"], errors="coerce").fillna(0.0)
+                hist = hist.dropna(subset=["__dt"])
+                hist["__y"] = hist["__dt"].dt.year
+                hist["__m"] = hist["__dt"].dt.month
+                for (yy, mm), gg in hist.groupby(["__y", "__m"]):
+                    month_acc[(int(yy), int(mm))] = float(gg["__days"].sum())
+
+        try:
+            days_value = float(so_ngay or 0.0)
+        except Exception:
+            days_value = 0.0
+        try:
+            penalty_value = float(phat_vi_pham or 0.0)
+        except Exception:
+            penalty_value = 0.0
+        is_quota_exempt = bool(
+            is_video_leave_reason(loai_nghi)
+            or is_long_sick_leave_range_reason(loai_nghi)
+        )
+        now_vn = datetime.now(VN_TZ)
+        records = []
+        rows_to_write = []
+        for i in range(count):
+            curr = start_date + timedelta(days=i)
+            mk = (curr.year, curr.month)
+            cumulative = float(month_acc.get(mk, 0.0) or 0.0)
+            if not is_quota_exempt:
+                cumulative += days_value
+                month_acc[mk] = cumulative
+            record = {
+                "Ngày": curr.strftime("%d/%m/%Y"),
+                "Thứ ngày": _vn_weekday_label(curr),
+                "Tên nhân viên": str(nv),
+                "Lý do nghỉ": clean_leave_reason_display(loai_nghi),
+                "Loại nghỉ": _leave_type_for_reason(loai_nghi),
+                "Chi tiết": str(chi_tiet or "").strip(),
+                "Số ngày tính": days_value,
+                "Số ngày phép cộng dồn": cumulative,
+                "Phạt vi phạm": penalty_value,
+                "Ngày cập nhật": now_vn.strftime("%d/%m/%Y"),
+                "Giờ cập nhật": now_vn.strftime("%H:%M:%S"),
+                "Người cập nhật": str(updated_by),
+            }
+            records.append(record)
+            rows_to_write.append(_leave_record_to_sheet_row(record, sheet_headers=sheet_headers))
+
+        target_row = _next_data_row_a_to_m(sheet_dp)
+        end_row = target_row + len(rows_to_write) - 1
+        gspread_update_range(
+            sheet_dp, f"A{target_row}:M{end_row}", rows_to_write,
+            value_input_option="USER_ENTERED",
+        )
+        write_leave_activity_logs_batch(
+            "ĐĂNG KÝ", updated_by, records,
+            note=(
+                f"Đăng ký khoảng {start_date.strftime('%d/%m/%Y')} → "
+                f"{end_date.strftime('%d/%m/%Y')} ({count} ngày)"
+            ),
+        )
+        _clear_leave_data_caches()
+        return True, f"Đã ghi nhận {count} ngày vào MainData bằng batch update.", records
+    except Exception as e:
+        return False, f"Lỗi ghi khoảng lịch nghỉ: {e}", []
+
 
 def delete_backup_row(row_index_1_based, updated_by=None):
     """Xóa 1 dòng MainData chính và tự xếp lại Người Thứ X/phạt lũy tiến nếu cần."""
@@ -10305,6 +11225,7 @@ def build_leave_reason_catalog(source_df=None):
         item["register_notice"] = item["register_type"]
         item["cancel_notice"] = item["cancel_type"]
         catalog[normalize_leave_reason(name)] = item
+
     return catalog
 
 
@@ -10664,7 +11585,7 @@ def _canonical_system_employee_name(raw_name):
         for name in creds['Tên nhân viên'].dropna().astype(str).tolist():
             if normalize_employee_match_name(name) == target:
                 # V92.6.72: nhân sự tạm nghỉ/đã nghỉ không xuất hiện trong danh sách vận hành
-                # và cũng không nhận Auto Update phạt mới.
+                # và cũng không nhận Auto Check phạt mới.
                 if _status_map_v92672.get(
                     normalize_login_name(name), EMPLOYMENT_STATUS_ACTIVE
                 ) != EMPLOYMENT_STATUS_ACTIVE:
@@ -10904,6 +11825,9 @@ def auto_update_ca1_cleaning_from_leave_data(actor="AUTO UPDATE - CA1", target_d
         return result
 
     _status_map_ca1_v92672 = load_employment_status_map()
+    # V92.6.83: với Auto Check lịch sử, trạng thái nhân sự hiện tại có thể đã quay lại
+    # Đang làm việc. Vẫn phải loại người có đơn nghỉ dài hạn được duyệt bao phủ target_date.
+    _formal_long_leave_ca1_keys_v92683 = _formal_long_leave_employee_keys_for_date_v92683(today)
     catalog = build_leave_reason_catalog(globals().get("df_loai_nghi", pd.DataFrame()))
     reason_item = _auto_penalty_catalog_item(CA1_CLEANING_REASON, catalog)
     if not reason_item:
@@ -10917,6 +11841,12 @@ def auto_update_ca1_cleaning_from_leave_data(actor="AUTO UPDATE - CA1", target_d
         employee = str(cred.get("Tên nhân viên", "") or "").strip()
         ekey = normalize_login_name(employee)
         if _status_map_ca1_v92672.get(ekey, EMPLOYMENT_STATUS_ACTIVE) != EMPLOYMENT_STATUS_ACTIVE:
+            continue
+        if ekey in _formal_long_leave_ca1_keys_v92683:
+            result["skipped"] += 1
+            result["messages"].append(
+                f"{employee}: bỏ qua Auto Check Ca 1 vì đang trong khoảng nghỉ dài hạn đã duyệt."
+            )
             continue
         if ekey not in late_by_emp:
             continue
@@ -11221,6 +12151,50 @@ def _timesoft_checkin_employee_keys_for_date(checkin_df, target_date):
     return keys
 
 
+def _auto_check_faceid_exempt_employee_keys_v92682(leave_df, target_date):
+    """
+    Các lý do được miễn Auto Check vắng/Không check mặt dù không có FaceID:
+    - Nghỉ đám hiếu
+    - Nghỉ phép quay video
+    Chỉ cần có đúng lý do đó trong MainData cùng ngày/NV; Số ngày tính có thể bằng 0.
+    """
+    out = set()
+    if not isinstance(leave_df, pd.DataFrame) or leave_df.empty:
+        return out
+    if not {"Ngày", "Tên nhân viên", "Lý do nghỉ"}.issubset(leave_df.columns):
+        return out
+    d = leave_df.copy()
+    d["__date_exempt_v92682"] = pd.to_datetime(d["Ngày"], dayfirst=True, errors="coerce").dt.date
+    d = d[d["__date_exempt_v92682"].eq(target_date)].copy()
+    for _, row in d.iterrows():
+        reason = row.get("Lý do nghỉ", "")
+        if is_bereavement_leave_reason(reason) or is_video_leave_reason(reason):
+            key = normalize_employee_match_name(row.get("Tên nhân viên", ""))
+            if key:
+                out.add(key)
+    return out
+
+
+def _formal_long_leave_employee_keys_for_date_v92683(target_date):
+    """Nhân viên có đơn Nghỉ dài hạn đã duyệt và target_date nằm trong khoảng nghỉ."""
+    out = set()
+    try:
+        d = long_leave_active_records()
+        if not isinstance(d, pd.DataFrame) or d.empty:
+            return out
+        for _, row in d.iterrows():
+            sd = _parse_vn_date(row.get("Từ ngày", ""))
+            ed = _parse_vn_date(row.get("Đến ngày", ""))
+            if sd is None or ed is None or not (sd <= target_date <= ed):
+                continue
+            key = normalize_employee_match_name(row.get("Tên nhân viên", ""))
+            if key:
+                out.add(key)
+    except Exception:
+        pass
+    return out
+
+
 def _leave_coverage_sets_for_date_v92677(leave_df, target_date):
     """
     Tách lịch MainData cùng ngày theo cột G:
@@ -11300,7 +12274,7 @@ def auto_update_absence_without_checkin_from_timesoft(
     actor="AUTO UPDATE - TIMESOFT NGHỈ KHÔNG PHÉP",
 ):
     """
-    V92.6.77 - đối soát nhân viên không có FaceID theo 3 nhánh độc lập:
+    V92.6.82 - đối soát nhân viên không có FaceID; miễn hoàn toàn nếu MainData có Nghỉ đám hiếu hoặc Nghỉ phép quay video, sau đó mới xét 3 nhánh:
     1) Có MainData cột G = 0.5 -> KHÔNG coi là nghỉ cả ngày; Auto STT 44 ``Không check mặt``.
     2) Không có 0.5 nhưng có G = 1.0 -> đã nghỉ cả ngày, không Auto Nghỉ KHÔNG phép.
     3) Không có 0.5/1.0 -> Auto ``Nghỉ KHÔNG phép`` như nghiệp vụ cũ.
@@ -11350,6 +12324,12 @@ def auto_update_absence_without_checkin_from_timesoft(
         return result
 
     half_day_keys, full_day_keys = _leave_coverage_sets_for_date_v92677(live_leave, target_date)
+    faceid_exempt_keys_v92682 = _auto_check_faceid_exempt_employee_keys_v92682(
+        live_leave, target_date
+    )
+    # V92.6.83: lớp bảo vệ bổ sung. Dù trạng thái nhân sự chưa kịp đồng bộ cache,
+    # đơn Nghỉ dài hạn đã duyệt vẫn miễn toàn bộ Auto Check FaceID trong khoảng nghỉ.
+    long_leave_exempt_keys_v92683 = _formal_long_leave_employee_keys_for_date_v92683(target_date)
 
     try:
         creds = load_credentials_fresh()
@@ -11382,6 +12362,16 @@ def auto_update_absence_without_checkin_from_timesoft(
         employee = profile["employee"]
         ekey = profile["employee_key"]
         if ekey in checkin_keys:
+            continue
+
+        if ekey in long_leave_exempt_keys_v92683:
+            result["skipped"] += 1
+            continue
+
+        # V92.6.82: Đám hiếu / Nghỉ phép quay video miễn Auto Check FaceID hoàn toàn.
+        # Hai lý do này có thể có Số ngày tính = 0 nhưng vẫn là lịch hợp lệ của ngày.
+        if ekey in faceid_exempt_keys_v92682:
+            result["skipped"] += 1
             continue
 
         # Có G=0.5: vẫn phải check FaceID. Nếu hoàn toàn không có -> STT 44.
@@ -11899,7 +12889,13 @@ def _auto_update_unsent_records_v92674(start_date, end_date):
                     _leave_coverage_employee_keys_for_date(_all_main_v92675, _rd_v92675)
                     if _rd_v92675 else set()
                 )
-                if normalize_employee_match_name(r.get("Tên nhân viên", "")) in _covered_v92675:
+                _faceid_exempt_v92682 = (
+                    _auto_check_faceid_exempt_employee_keys_v92682(
+                        _all_main_v92675, _rd_v92675
+                    ) if _rd_v92675 else set()
+                )
+                _rk_v92682 = normalize_employee_match_name(r.get("Tên nhân viên", ""))
+                if _rk_v92682 in _faceid_exempt_v92682 or _rk_v92682 in _covered_v92675:
                     keep.append(False)
                     continue
             k=(normalize_schedule_date(r.get("Ngày","")), normalize_login_name(r.get("Tên nhân viên","")), normalize_leave_reason(r.get("Lý do nghỉ","")))
@@ -11938,16 +12934,22 @@ def _send_unsent_auto_penalty_range_v92674(start_date, end_date, actor):
 
 def run_auto_penalty_range_v92672(start_date, end_date, actor="AUTO UPDATE - ADMIN RANGE"):
     """
-    Chạy Auto Update thủ công theo bộ lọc thời gian.
+    Chạy Auto Check thủ công theo bộ lọc thời gian.
 
     - Chỉ xử lý những ngày có Snapshot TimeSoft trong PostgreSQL; riêng hôm nay có thể
       ưu tiên dữ liệu TimeSoft trực tiếp đang nằm trong session.
-    - Bảng Tour chỉ chạy cho hôm nay vì TourVera là bảng vận hành hiện tại, không phải
+    - BẢNG TOUR chỉ chạy cho hôm nay vì TourVera là bảng vận hành hiện tại, không phải
       kho lịch sử theo ngày.
     - Nghỉ giữa ca lịch sử chỉ chạy khi đã nạp FaceID chi tiết trong phiên; nếu không,
       bỏ qua để tránh suy diễn từ SearchElastic tổng hợp.
     - Cloud Scheduler không dùng hàm này, nên lịch 15:00/20:00/21:00 không đổi.
     """
+    # V92.6.83: đồng bộ trạng thái nghỉ dài hạn / lịch hẹn trước khi đối soát Auto Check.
+    try:
+        reconcile_long_leave_employment_statuses()
+        reconcile_staff_schedule_plans()
+    except Exception:
+        pass
     if start_date > end_date:
         start_date, end_date = end_date, start_date
 
@@ -12054,7 +13056,14 @@ def run_auto_penalty_now(
     - 20:00: giữ nguyên các Auto Update thông thường, bao gồm Auto Nghỉ không phép.
     - 21:00: lượt CHUYÊN nghỉ giữa ca, không chạy lại Tour/Đi trễ/Nghỉ KP/Ca1.
     - Nút Admin `Chạy Auto Update Check Manual` dùng force_midshift_daily=True nên vẫn chạy toàn bộ.
+    - V92.6.81: mọi lượt Scheduler/Manual cũng đối chiếu lịch hẹn nhân sự đến hạn.
     """
+    try:
+        reconcile_long_leave_employment_statuses()
+        reconcile_staff_schedule_plans()
+    except Exception:
+        pass
+
     now_vn_v92669 = datetime.now(VN_TZ)
     midshift_only_v92669 = (
         not bool(force_midshift_daily)
@@ -12386,6 +13395,21 @@ def is_bereavement_leave_reason(value):
     return normalize_login_name(clean_leave_reason_display(value)) == normalize_login_name(BEREAVEMENT_LEAVE_REASON)
 
 
+def is_annual_leave_range_reason(value):
+    """V92.6.81: Phép năm được phép đăng ký một khoảng tối đa 7 ngày liên tiếp."""
+    key = normalize_login_name(clean_leave_reason_display(value))
+    return bool(key and "phep nam" in key)
+
+
+SICK_MULTI_DAY_REASON_V92683 = "Nghỉ bệnh có giấy khám hoặc được quản lý duyệt"
+
+def is_long_sick_leave_range_reason(value):
+    """V92.6.83: tên hàm giữ để tương thích; nay nhận diện đúng STT 35 nghỉ bệnh nhiều ngày."""
+    return normalize_login_name(clean_leave_reason_display(value)) == normalize_login_name(
+        SICK_MULTI_DAY_REASON_V92683
+    )
+
+
 def is_special_day_rule_exempt(role, reason):
     role = str(role or "").strip().lower()
     if role == "leader" and is_leader_policy_leave_reason(reason):
@@ -12393,6 +13417,10 @@ def is_special_day_rule_exempt(role, reason):
     if role in {"admin", "letan", "quanly"} and is_bereavement_leave_reason(reason):
         return True
     if is_video_leave_reason(reason):
+        return True
+    # V92.6.81: Nghỉ bệnh có giấy khám hoặc được quản lý duyệt là ngoại lệ dài hạn, không bị chặn bởi hạn mức
+    # số người nghỉ theo từng ngày; các kiểm tra trùng/ngày hợp lệ vẫn giữ nguyên.
+    if is_long_sick_leave_range_reason(reason):
         return True
     return False
 
@@ -12447,6 +13475,7 @@ def _weekend_registration_count_by_month(all_leave_df, employee_name, year, mont
         d = d[
             ~d["Lý do nghỉ"].astype(str).apply(_reason_is_unlimited_for_weekend_limit)
             & ~d["Lý do nghỉ"].astype(str).apply(is_video_leave_reason)
+            & ~d["Lý do nghỉ"].astype(str).apply(is_long_sick_leave_range_reason)
         ].copy()
 
     if d.empty:
@@ -12503,6 +13532,7 @@ def _validate_monthly_weekend_registration_limit(
         quota_df = quota_df[
             ~quota_df["Lý do nghỉ"].astype(str).apply(_reason_is_unlimited_for_weekend_limit)
             & ~quota_df["Lý do nghỉ"].astype(str).apply(is_video_leave_reason)
+            & ~quota_df["Lý do nghỉ"].astype(str).apply(is_long_sick_leave_range_reason)
         ].copy()
 
     for (year, month), selected_dates in sorted(by_month.items()):
@@ -12542,10 +13572,16 @@ def _validate_monthly_weekend_registration_limit(
 
 
 def _leave_rows_counting_toward_quota(df):
-    """Loại Nghỉ phép quay video khỏi mọi phép đếm hạn mức nhân sự."""
+    """
+    Các lý do vẫn ghi Số ngày tính trên MainData nhưng KHÔNG chiếm hạn mức/quota:
+    - Nghỉ phép quay video
+    - Nghỉ bệnh có giấy khám hoặc được quản lý duyệt (Số ngày tính vẫn = 1.0 mỗi ngày)
+    """
     if not isinstance(df, pd.DataFrame) or df.empty or "Lý do nghỉ" not in df.columns:
         return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
-    return df[~df["Lý do nghỉ"].astype(str).apply(is_video_leave_reason)].copy()
+    reason_s = df["Lý do nghỉ"].astype(str)
+    mask_exempt = reason_s.apply(is_video_leave_reason) | reason_s.apply(is_long_sick_leave_range_reason)
+    return df[~mask_exempt].copy()
 
 
 def is_employee_co_phep_leave_reason(value):
@@ -12588,6 +13624,8 @@ def _validate_leave_registration_request_live(payload, live_df, credentials_df):
     employee = str(payload.get("employee", "") or "").strip()
     reason = clean_leave_reason_display(payload.get("reason", ""))
     detail = str(payload.get("detail", "") or "").strip()
+    is_annual_range_reason = is_annual_leave_range_reason(reason)
+    is_long_sick_range_reason = is_long_sick_leave_range_reason(reason)
 
     start_date = payload.get("start_date")
     end_date = payload.get("end_date")
@@ -12596,6 +13634,13 @@ def _validate_leave_registration_request_live(payload, live_df, credentials_df):
         return result
     if end_date < start_date:
         result["errors"].append("Ngày kết thúc phải lớn hơn hoặc bằng ngày bắt đầu.")
+        return result
+
+    _range_days_v92681 = (end_date - start_date).days + 1
+    if is_annual_range_reason and _range_days_v92681 > 7:
+        result["errors"].append(
+            "Phép năm chỉ được đăng ký tối đa 7 ngày liên tiếp cho mỗi lần."
+        )
         return result
 
     if not employee or employee == "-- Chọn nhân viên --":
@@ -12643,7 +13688,9 @@ def _validate_leave_registration_request_live(payload, live_df, credentials_df):
             result["errors"].append(
                 "Không được đăng ký lịch nghỉ cho ngày trong quá khứ."
             )
-        if start_date > _reg_max_v92644 or end_date > _reg_max_v92644:
+        if (not is_long_sick_range_reason) and (
+            start_date > _reg_max_v92644 or end_date > _reg_max_v92644
+        ):
             result["errors"].append(
                 f"Chỉ được đăng ký lịch nghỉ đến hết {_reg_max_v92644.strftime('%d/%m/%Y')}."
             )
@@ -12668,7 +13715,7 @@ def _validate_leave_registration_request_live(payload, live_df, credentials_df):
                 result["errors"].append(msg)
                 return result
 
-    if role in EMPLOYEE_LIKE_ROLES:
+    if role in EMPLOYEE_LIKE_ROLES and not is_long_sick_range_reason:
         _, emp_max_date = employee_registration_window(today)
         if end_date > emp_max_date:
             result["errors"].append(
@@ -12682,20 +13729,23 @@ def _validate_leave_registration_request_live(payload, live_df, credentials_df):
         else pd.DataFrame(columns=LEAVE_DATA_COLUMNS)
     )
 
-    # KHÔNG phép không chịu giới hạn số lần cuối tuần theo V92.6.29.
-    weekend_ok, weekend_msg = _validate_monthly_weekend_registration_limit(
-        source_df,
-        employee,
-        start_date,
-        end_date,
-        reason=reason,
-        max_weekend_dates=2,
-    )
-    if not weekend_ok:
-        result["errors"].append(weekend_msg)
-        return result
-
     norm_reason = normalize_leave_reason(reason)
+
+    # V92.6.81: Phép năm (tối đa 7 ngày liên tiếp) và Nghỉ bệnh có giấy khám hoặc được quản lý duyệt
+    # không bị giới hạn số ngày cuối tuần trong tháng. Các lý do khác giữ rule cũ.
+    if not (is_annual_range_reason or is_long_sick_range_reason):
+        weekend_ok, weekend_msg = _validate_monthly_weekend_registration_limit(
+            source_df,
+            employee,
+            start_date,
+            end_date,
+            reason=reason,
+            max_weekend_dates=2,
+        )
+        if not weekend_ok:
+            result["errors"].append(weekend_msg)
+            return result
+
     is_video_leave = is_video_leave_reason(reason)
     num_days_selected = len(selected_dates)
 
@@ -12762,27 +13812,33 @@ def _validate_leave_registration_request_live(payload, live_df, credentials_df):
 
     if not is_admin and not is_video_leave:
         if "phép năm" in norm_reason:
-            year_hist = user_hist_quota[user_hist_quota["Y"] == curr_y]
-            used_pn = (
-                float(
-                    pd.to_numeric(
-                        year_hist[
-                            year_hist["Lý do nghỉ"].astype(str)
-                            .str.lower()
-                            .str.contains("phép năm", na=False)
-                        ].get("Số ngày tính", 0),
-                        errors="coerce",
-                    ).fillna(0).sum()
+            # V92.6.81: khoảng Phép năm tối đa 7 ngày có thể băng qua 31/12.
+            # Kiểm quỹ riêng cho từng năm thay vì dồn toàn bộ vào năm của ngày bắt đầu.
+            for _annual_year_v92681 in sorted({d.year for d in selected_dates}):
+                _annual_dates_v92681 = [d for d in selected_dates if d.year == _annual_year_v92681]
+                _annual_required_v92681 = val_songay * len(_annual_dates_v92681)
+                year_hist = user_hist_quota[user_hist_quota["Y"] == _annual_year_v92681]
+                used_pn = (
+                    float(
+                        pd.to_numeric(
+                            year_hist[
+                                year_hist["Lý do nghỉ"].astype(str)
+                                .str.lower()
+                                .str.contains("phép năm", na=False)
+                            ].get("Số ngày tính", 0),
+                            errors="coerce",
+                        ).fillna(0).sum()
+                    )
+                    if not year_hist.empty and "Lý do nghỉ" in year_hist.columns
+                    else 0.0
                 )
-                if not year_hist.empty and "Lý do nghỉ" in year_hist.columns
-                else 0.0
-            )
-            if limit_pn > 0 and used_pn + total_phep_required > limit_pn:
-                result["errors"].append(
-                    f"Vượt quá số ngày Phép năm. Cần {total_phep_required:g} ngày, "
-                    f"quỹ còn {max(0.0, limit_pn - used_pn):g} ngày trong năm {curr_y}."
-                )
-                return result
+                if limit_pn > 0 and used_pn + _annual_required_v92681 > limit_pn:
+                    result["errors"].append(
+                        f"Vượt quá số ngày Phép năm. Cần {_annual_required_v92681:g} ngày "
+                        f"trong năm {_annual_year_v92681}, quỹ còn "
+                        f"{max(0.0, limit_pn - used_pn):g} ngày."
+                    )
+                    return result
 
         elif "phát sinh" in norm_reason:
             month_user = user_hist_quota[
@@ -12808,6 +13864,7 @@ def _validate_leave_registration_request_live(payload, live_df, credentials_df):
 
         elif (
             not is_nghi_ly_do_khac
+            and not is_long_sick_range_reason
             and "không phép" not in norm_reason
             and val_songay > 0
         ):
@@ -12936,11 +13993,45 @@ def validate_employee_leave_change_permission(
     old_dt = pd.to_datetime(original_row.get("Ngày"), errors="coerce", dayfirst=True)
     old_date = old_dt.date() if pd.notna(old_dt) else None
 
-    cancel_ok, cancel_msg = validate_leave_cancel_notice(
-        old_reason, old_date, role=role_now, today=today
-    )
-    if not cancel_ok:
-        return False, cancel_msg
+    # V92.6.83 - Ngoại lệ sửa lịch NGÀY MAI: nếu nhân viên đã có một ngày nghỉ Có phép
+    # (Số ngày tính=1.0), được đổi ngay trên bảng và vẫn giữ nguyên ngày thành:
+    #   - một lý do KHÔNG phép; hoặc
+    #   - một lý do CÓ phép 0.5 ngày.
+    # Ngoại lệ này chỉ bỏ qua mốc Trước N ngày của bản ghi cũ/mới; role + thứ/ngày
+    # vẫn được validate_schedule_edit_permission kiểm tra theo LoaiNghi cột G/H.
+    _next_day_conversion_v92683 = False
+    if edited_row is not None and old_date == (today + timedelta(days=1)):
+        _tmp_new_dt_v92683 = pd.to_datetime(edited_row.get("Ngày"), errors="coerce", dayfirst=True)
+        _tmp_new_date_v92683 = _tmp_new_dt_v92683.date() if pd.notna(_tmp_new_dt_v92683) else None
+        _tmp_new_reason_v92683 = edited_row.get("Lý do nghỉ", edited_row.get("Loại nghỉ", old_reason))
+        _tmp_item_v92683 = _leave_notice_policy_item(_tmp_new_reason_v92683) or {}
+        try:
+            _tmp_new_days_v92683 = float(_tmp_item_v92683.get("days", 0) or 0)
+        except Exception:
+            _tmp_new_days_v92683 = 0.0
+        try:
+            _tmp_old_days_v92683 = float(pd.to_numeric(original_row.get("Số ngày tính", 0), errors="coerce"))
+        except Exception:
+            _tmp_old_days_v92683 = 0.0
+        _next_day_conversion_v92683 = bool(
+            _tmp_new_date_v92683 == old_date
+            and is_employee_co_phep_leave_reason(old_reason)
+            and abs(_tmp_old_days_v92683 - 1.0) < 1e-9
+            and (
+                is_employee_khong_phep_leave_reason(_tmp_new_reason_v92683)
+                or (
+                    is_employee_co_phep_leave_reason(_tmp_new_reason_v92683)
+                    and abs(_tmp_new_days_v92683 - 0.5) < 1e-9
+                )
+            )
+        )
+
+    if not _next_day_conversion_v92683:
+        cancel_ok, cancel_msg = validate_leave_cancel_notice(
+            old_reason, old_date, role=role_now, today=today
+        )
+        if not cancel_ok:
+            return False, cancel_msg
 
     old_is_video = is_video_leave_reason(old_reason)
     old_is_khong_phep = is_employee_khong_phep_leave_reason(old_reason)
@@ -13007,16 +14098,20 @@ def validate_employee_leave_change_permission(
     elif not old_is_video:
         return False, "Lý do hiện tại không thuộc nhóm Nhân viên/Leader được phép sửa."
 
-    register_ok, register_msg = validate_leave_registration_notice(
-        new_reason,
-        new_date,
-        role=role_now,
-        now_vn=datetime.now(VN_TZ),
-    )
-    if not register_ok:
-        return False, register_msg
+    if not _next_day_conversion_v92683:
+        register_ok, register_msg = validate_leave_registration_notice(
+            new_reason,
+            new_date,
+            role=role_now,
+            now_vn=datetime.now(VN_TZ),
+        )
+        if not register_ok:
+            return False, register_msg
 
-    return True, ""
+    return True, (
+        "Được phép đổi lịch ngày mai trong cùng ngày đã đăng ký."
+        if _next_day_conversion_v92683 else ""
+    )
 
 def validate_schedule_delete_permission(original_row, role, current_user=None, today=None):
     """Quyền xóa = quyền chức năng + rule LoaiNghi!L/M/N + rule sở hữu/nghiệp vụ."""
@@ -13303,15 +14398,19 @@ def recalculate_schedule_fields(original_row, edited_row, updated_by, all_leave_
     others = _exclude_original_from_leave_df(all_leave_data, original_row)
 
     # Tính số ngày phép cộng dồn trong cùng tháng/năm của đúng nhân viên.
+    # Nghỉ bệnh có giấy khám hoặc được quản lý duyệt vẫn ghi Số ngày tính=1.0 nhưng không cộng vào hạn mức/cộng dồn.
     dt = pd.to_datetime(ngay, errors='coerce', dayfirst=True)
-    accumulated = float(so_ngay)
+    new_quota_exempt = bool(is_video_leave_reason(reason) or is_long_sick_leave_range_reason(reason))
+    accumulated = 0.0 if new_quota_exempt else float(so_ngay)
     if pd.notna(dt) and others is not None and not others.empty:
-        d = others.copy()
+        d = _leave_rows_counting_toward_quota(others.copy())
         d['_dt_calc'] = pd.to_datetime(d['Ngày'], errors='coerce', dayfirst=True)
         d['_days_calc'] = pd.to_numeric(d['Số ngày tính'], errors='coerce').fillna(0)
         same_emp = d['Tên nhân viên'].astype(str).apply(normalize_login_name).eq(normalize_login_name(nv))
         same_month = d['_dt_calc'].dt.month.eq(dt.month) & d['_dt_calc'].dt.year.eq(dt.year)
-        accumulated = float(d.loc[same_emp & same_month, '_days_calc'].sum()) + float(so_ngay)
+        accumulated = float(d.loc[same_emp & same_month, '_days_calc'].sum())
+        if not new_quota_exempt:
+            accumulated += float(so_ngay)
 
     # Phạt lũy tiến cho Nghỉ không phép / Đi trễ không phép / Về sớm không phép.
     final_penalty = float(base_penalty)
@@ -14564,7 +15663,7 @@ def _vera_fragment_every(seconds):
 
 @_vera_fragment_every(30)
 def render_bang_tour_fast_v920():
-    st.subheader("🧭 Bảng tour")
+    st.subheader("🧭 BẢNG TOUR")
 
     c_refresh, _ = st.columns([2, 8])
     with c_refresh:
@@ -16976,14 +18075,14 @@ def render_admin_theme_config_panel():
 # V37: thứ tự + độ rộng + độ cao dòng + font + kiểu chữ + căn lề + wrap text
 # ==========================================================
 TABLE_LAYOUT_LABELS = {
-    "tour_main": "Bảng tour",
-    "staff_list": "Danh sách nhân sự",
+    "tour_main": "BẢNG TOUR",
+    "staff_list": "Danh sách nhân viên",
     "payroll_current": "Bảng lương",
     "payroll_history": "Bảng lương đã lưu / chỉnh sửa",
     "leave_detail": "Chi tiết danh sách nghỉ",
     "leave_manage": "Quản lý lịch nghỉ",
-    "long_leave_summary": "Nghỉ dài hạn · Tổng hợp",
-    "long_leave_daily": "Nghỉ dài hạn · Chi tiết từng ngày",
+    "long_leave_summary": "Phép năm - Làm đẹp · Tổng hợp",
+    "long_leave_daily": "Phép năm - Làm đẹp · Chi tiết từng ngày",
 }
 TABLE_LAYOUT_STATIC_COLUMNS = {
     "staff_list": [
@@ -22771,6 +23870,13 @@ try:
 except Exception:
     pass
 
+# V92.6.81: áp dụng lịch hẹn đổi ca / nghỉ dài hạn / quay lại làm việc
+# trên mọi lượt chạy app. Cloud Scheduler cũng gọi lại luồng này qua Auto Update.
+try:
+    reconcile_staff_schedule_plans()
+except Exception:
+    pass
+
 
 # V90.4: kiểm tra lại trên MỌI lượt chạy để tài khoản đang dùng app cũng bị chặn
 # sau khi Admin bật bảo trì.
@@ -22791,25 +23897,25 @@ if str(st.session_state.get("current_role", "")).strip().lower() != "admin":
 is_admin_letan = st.session_state.current_role in ["admin", "letan", "quanly"]
 
 PAGE_SLUGS = {
-    "🧭 Bảng tour": "bang-tour",
+    "🧭 BẢNG TOUR": "bang-tour",
     "💰 Bảng lương": "bang-luong",
     "📅 Đăng ký nghỉ phép": "dang-ky-thong-ke-nghi-phep",
     "🧾 Nhật ký lịch nghỉ": "nhat-ky-lich-nghi",
     "✏️ Quản lý lịch nghỉ": "quan-ly-lich-nghi",
-    "🏖️ Lịch nghỉ dài hạn": "nghi-dai-han",
-    "⏰ Thiết lập ca làm việc": "thiet-lap-ca",
-    "👥 Danh sách nhân sự": "danh-sach-nhan-su",
+    "🏖️ Phép năm - Làm đẹp": "nghi-dai-han",
+    "⏰ Quản lý ca làm việc": "thiet-lap-ca",
+    "👥 Danh sách nhân viên": "danh-sach-nhan-su",
     "➕ Thêm nhân viên": "them-nhan-vien",
-    "✏️ Sửa / Xóa nhân viên": "sua-xoa-nhan-vien",
+    "🏷️ Cập nhật trạng thái nhân viên": "sua-xoa-nhan-vien",
     "🔒 Khóa đăng nhập": "khoa-dang-nhap",
-    "🔐 Khóa quyền đăng ký": "khoa-quyen-dang-ky",
-    "⏸️ Auto Update phạt": "auto-update-phat",
+    "🔐 Khóa đăng ký LNP": "khoa-quyen-dang-ky",
+    "🤖 Auto Check": "auto-update-phat",
     "📦 Snapshot": "snapshot-nen-hom-nay",
     "📘 Hướng dẫn sử dụng": "huong-dan-su-dung",
     "🔄 Đồng bộ dữ liệu": "dong-bo-du-lieu",
     "⚙️ Giao diện tùy chỉnh": "cau-hinh-cot",
     "🔐 Phân quyền chức năng": "phan-quyen-chuc-nang",
-    "🎂 Sinh nhật nhân sự": "sinh-nhat-nhan-su",
+    "🎂 Sinh nhật": "sinh-nhat-nhan-su",
     "👤 Hồ sơ cá nhân": "ho-so-ca-nhan",
 }
 SLUG_TO_PAGE = {v: k for k, v in PAGE_SLUGS.items()}
@@ -22817,31 +23923,31 @@ SLUG_TO_PAGE = {v: k for k, v in PAGE_SLUGS.items()}
 payroll_letan_enabled = get_payroll_letan_enabled()
 
 PAGE_FEATURE_KEYS = {
-    "🧭 Bảng tour": "tour",
+    "🧭 BẢNG TOUR": "tour",
     "💰 Bảng lương": "payroll",
     "📅 Đăng ký nghỉ phép": "leave",
     "✏️ Quản lý lịch nghỉ": "leave_manage",
-    "🏖️ Lịch nghỉ dài hạn": "long_leave",
-    "⏰ Thiết lập ca làm việc": "shift",
-    "👥 Danh sách nhân sự": "staff_list",
+    "🏖️ Phép năm - Làm đẹp": "long_leave",
+    "⏰ Quản lý ca làm việc": "shift",
+    "👥 Danh sách nhân viên": "staff_list",
     "➕ Thêm nhân viên": "employee_add",
-    "✏️ Sửa / Xóa nhân viên": "employee_edit",
+    "🏷️ Cập nhật trạng thái nhân viên": "employee_edit",
     "🔒 Khóa đăng nhập": "account_lock",
-    "🔐 Khóa quyền đăng ký": "registration_lock",
-    "⏸️ Auto Update phạt": "auto_penalty",
+    "🔐 Khóa đăng ký LNP": "registration_lock",
+    "🤖 Auto Check": "auto_penalty",
     "📦 Snapshot": "snapshot_today",
     "📘 Hướng dẫn sử dụng": "guide",
     "🔄 Đồng bộ dữ liệu": "sync",
     "⚙️ Giao diện tùy chỉnh": "column_config",
     "🔐 Phân quyền chức năng": "permission_admin",
-    "🎂 Sinh nhật nhân sự": "birthday",
+    "🎂 Sinh nhật": "birthday",
     "👤 Hồ sơ cá nhân": "profile",
 }
 PAGE_FEATURE_GROUPS = {
     # Một trang có thể chứa nhiều chức năng độc lập. Chỉ cần có ít nhất một quyền
     # trong nhóm thì trang được hiện; từng section bên trong vẫn kiểm tra quyền riêng.
     "💰 Bảng lương": {"payroll", "payroll_history"},
-    "✏️ Sửa / Xóa nhân viên": {"employee_edit", "employment_status", "employee_delete"},
+    "🏷️ Cập nhật trạng thái nhân viên": {"employee_edit", "employment_status", "employee_delete"},
 }
 
 def has_page_access(page_name):
@@ -22854,7 +23960,7 @@ def has_page_access(page_name):
         return str(st.session_state.get("current_role", "") or "").strip().lower() == "admin"
     if page_name == "📘 Hướng dẫn sử dụng":
         return True
-    if page_name == "🏖️ Lịch nghỉ dài hạn":
+    if page_name == "🏖️ Phép năm - Làm đẹp":
         return any(
             has_feature_access(k)
             for k in {"long_leave", "long_leave_form", "long_leave_stats"}
@@ -23420,18 +24526,18 @@ if _ll_notice_role in {"admin", "quanly", "letan", "leader"}:
                 _pending_notice_df = _pending_notice_df.sort_values("__row", ascending=False)
             _pending_latest_id = str(_pending_notice_df.iloc[0].get("ID", "")).strip()
 
-        if _pending_ll_count > 0 and selected_page != "🏖️ Lịch nghỉ dài hạn":
+        if _pending_ll_count > 0 and selected_page != "🏖️ Phép năm - Làm đẹp":
             if _ll_notice_role == "admin":
                 render_clickable_app_notice(
-                    f"🔔 Có {_pending_ll_count} đơn xin nghỉ dài hạn đang chờ duyệt. Bấm để mở ngay.",
-                    "🏖️ Lịch nghỉ dài hạn",
+                    f"🔔 Có {_pending_ll_count} đơn Nghỉ dài hạn / Phép năm đang chờ duyệt. Bấm để mở ngay.",
+                    "🏖️ Phép năm - Làm đẹp",
                     f"long_leave_pending:{_pending_latest_id}",
                     kind="warning",
                 )
             else:
                 render_clickable_app_notice(
-                    f"🔔 Có {_pending_ll_count} đơn xin nghỉ dài hạn đang chờ Admin duyệt. Bấm để xem ngay.",
-                    "🏖️ Lịch nghỉ dài hạn",
+                    f"🔔 Có {_pending_ll_count} đơn Nghỉ dài hạn / Phép năm đang chờ Admin duyệt. Bấm để xem ngay.",
+                    "🏖️ Phép năm - Làm đẹp",
                     f"long_leave_pending_view:{_pending_latest_id}",
                     kind="warning",
                 )
@@ -23446,7 +24552,7 @@ if _ll_notice_role in {"quanly", "letan", "leader"}:
         if (
             isinstance(_ll_rejected_notice_df, pd.DataFrame)
             and not _ll_rejected_notice_df.empty
-            and selected_page != "🏖️ Lịch nghỉ dài hạn"
+            and selected_page != "🏖️ Phép năm - Làm đẹp"
         ):
             for _, _rej in _ll_rejected_notice_df.iterrows():
                 _rej_id = str(_rej.get("ID", "")).strip()
@@ -23456,7 +24562,7 @@ if _ll_notice_role in {"quanly", "letan", "leader"}:
                     f"❌ Đơn nghỉ dài hạn {_rej_id} của {_rej_emp} KHÔNG ĐƯỢC DUYỆT"
                     + (f" · Lý do: {_rej_reason}" if _rej_reason else "")
                     + ". Bấm để xem chi tiết.",
-                    "🏖️ Lịch nghỉ dài hạn",
+                    "🏖️ Phép năm - Làm đẹp",
                     f"long_leave_rejected_view:{_rej_id}",
                     kind="error",
                 )
@@ -23510,7 +24616,7 @@ if _ll_notice_role in EMPLOYEE_LIKE_ROLES:
                 .isin([LONG_LEAVE_APPROVED, LONG_LEAVE_REJECTED])
             ].copy()
 
-            if not _ll_my_decisions.empty and selected_page != "🏖️ Lịch nghỉ dài hạn":
+            if not _ll_my_decisions.empty and selected_page != "🏖️ Phép năm - Làm đẹp":
                 # Hiển thị tối đa 3 quyết định gần nhất theo dòng sheet / thời điểm cập nhật.
                 if "__row" in _ll_my_decisions.columns:
                     _ll_my_decisions = _ll_my_decisions.sort_values(
@@ -23542,7 +24648,7 @@ if _ll_notice_role in EMPLOYEE_LIKE_ROLES:
 
                     render_clickable_app_notice(
                         _dec_msg,
-                        "🏖️ Lịch nghỉ dài hạn",
+                        "🏖️ Phép năm - Làm đẹp",
                         f"long_leave_decision:{_dec_id}",
                         kind=_dec_kind,
                     )
@@ -23564,7 +24670,7 @@ if _ll_notice_role in EMPLOYEE_LIKE_ROLES:
             for _, _rr in _mine_warn.iterrows():
                 if not _parse_long_leave_documents(_rr.get("Tài liệu JSON", "")):
                     _need_docs.append(str(_rr.get("ID", "")).strip())
-            if _need_docs and selected_page != "🏖️ Lịch nghỉ dài hạn":
+            if _need_docs and selected_page != "🏖️ Phép năm - Làm đẹp":
                 _first_need_doc = _need_docs[0]
                 _suffix = (
                     f" và {len(_need_docs)-1} đơn khác"
@@ -23572,7 +24678,7 @@ if _ll_notice_role in EMPLOYEE_LIKE_ROLES:
                 )
                 render_clickable_app_notice(
                     f"🔔 Admin đang nhắc bạn tải tài liệu cho đơn {_first_need_doc}{_suffix}. Bấm để mở ngay.",
-                    "🏖️ Lịch nghỉ dài hạn",
+                    "🏖️ Phép năm - Làm đẹp",
                     f"long_leave_docs:{_first_need_doc}",
                     kind="warning",
                 )
@@ -23947,10 +25053,18 @@ st.sidebar.markdown(
         [data-testid="stSidebar"] div.stButton > button {
             justify-content: flex-start !important;
             text-align: left !important;
+            font-size: 70% !important;
+        }
+        [data-testid="stSidebar"] div[data-testid="stButton"] > button p,
+        [data-testid="stSidebar"] div[data-testid="stButton"] > button span,
+        [data-testid="stSidebar"] div.stButton > button p,
+        [data-testid="stSidebar"] div.stButton > button span {
+            font-size: inherit !important;
+            line-height: 1.15 !important;
         }
     }
     </style>
-    <div style='font-size:18px;font-weight:800;line-height:1.15;margin:2px 0 10px 0;text-align:left;'>📌 MENU CHỨC NĂNG</div>
+    <div style='font-size:18px;font-weight:800;line-height:1.15;margin:2px 0 10px 0;text-align:center;'>📌 MENU CHỨC NĂNG</div>
     """,
     unsafe_allow_html=True
 )
@@ -24238,9 +25352,9 @@ if selected_page == "📘 Hướng dẫn sử dụng":
             st.caption("🔒 Tài liệu chỉ dành để đọc trong hệ thống. Không có nút tải xuống, chia sẻ hoặc in.")
         render_protected_usage_guide(meta_guide, raw_guide)
 
-elif selected_page == "🏖️ Lịch nghỉ dài hạn":
+elif selected_page == "🏖️ Phép năm - Làm đẹp":
     _ll_active_notice = _active_notice_key()
-    st.subheader("🏖️ Lịch nghỉ dài hạn")
+    st.subheader("🏖️ Phép năm - Làm đẹp")
     _ll_all = load_long_leave_requests()
     _ll_role = str(st.session_state.get("current_role", "")).strip().lower()
 
@@ -24265,6 +25379,81 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
         )
     _ll_user = str(st.session_state.get("current_user", "")).strip()
     _ll_today = get_vn_today()
+
+    # V92.6.83 - Dashboard Phép năm cho Admin / Quản lý / Leader / Lễ tân.
+    # Mục tiêu: biết ngay trong từng ngày đang có bao nhiêu người Có phép, ai đang Phép năm
+    # và còn bao nhiêu suất trước khi xử lý đơn mới.
+    if _ll_role in {"admin", "quanly", "leader", "letan"}:
+        with st.expander("📊 Theo dõi Phép năm · hiện trạng nghỉ", expanded=True):
+            _ann_monitor_range_v92683 = st.date_input(
+                "Khoảng theo dõi Phép năm",
+                value=(_ll_today, _ll_today + timedelta(days=30)),
+                format="DD/MM/YYYY",
+                key="annual_leave_monitor_range_v92683",
+            )
+            if isinstance(_ann_monitor_range_v92683, (tuple, list)) and len(_ann_monitor_range_v92683) >= 2:
+                _ann_mstart_v92683, _ann_mend_v92683 = _ann_monitor_range_v92683[0], _ann_monitor_range_v92683[1]
+            elif isinstance(_ann_monitor_range_v92683, (tuple, list)) and len(_ann_monitor_range_v92683) == 1:
+                _ann_mstart_v92683 = _ann_mend_v92683 = _ann_monitor_range_v92683[0]
+            else:
+                _ann_mstart_v92683 = _ann_mend_v92683 = _ann_monitor_range_v92683 or _ll_today
+
+            _ann_periods_v92683 = _annual_leave_request_periods_v92683(_ll_all)
+            _ann_main_periods_v92683 = build_annual_leave_main_data_periods_v92683(
+                _ann_mstart_v92683, _ann_mend_v92683
+            )
+            _ann_approved_active_v92683 = 0
+            _ann_pending_count_v92683 = 0
+            if isinstance(_ann_periods_v92683, pd.DataFrame) and not _ann_periods_v92683.empty:
+                _ann_pending_count_v92683 = int(
+                    _ann_periods_v92683["Trạng thái"].astype(str).str.strip().eq(LONG_LEAVE_PENDING).sum()
+                )
+            # Số người đang nghỉ Phép năm lấy từ MainData - nguồn thực tế sau duyệt/ghi tay.
+            if isinstance(_ann_main_periods_v92683, pd.DataFrame) and not _ann_main_periods_v92683.empty:
+                _ann_active_main_v92683 = _ann_main_periods_v92683[
+                    _ann_main_periods_v92683["__start_v92683"].apply(lambda x: x <= _ll_today)
+                    & _ann_main_periods_v92683["__end_v92683"].apply(lambda x: x >= _ll_today)
+                ].copy()
+                _ann_approved_active_v92683 = int(
+                    _ann_active_main_v92683["Tên nhân viên"].astype(str)
+                    .apply(normalize_login_name).replace("", pd.NA).dropna().nunique()
+                )
+
+            _ann_daily_v92683 = build_annual_leave_daily_capacity_v92683(
+                _ann_mstart_v92683, _ann_mend_v92683
+            )
+            _am1, _am2, _am3 = st.columns(3)
+            _am1.metric("Đang nghỉ Phép năm hôm nay", _ann_approved_active_v92683)
+            _am2.metric("Đơn Phép năm chờ duyệt", _ann_pending_count_v92683)
+            _am3.metric(
+                "Ngày đã đủ quota trong khoảng",
+                int((pd.to_numeric(_ann_daily_v92683.get("Còn chỗ", pd.Series(dtype=float)), errors="coerce").fillna(0) <= 0).sum())
+                if isinstance(_ann_daily_v92683, pd.DataFrame) and not _ann_daily_v92683.empty else 0,
+            )
+            st.caption(
+                "Cột Có phép hiện có dùng đúng quota nghỉ của hệ thống. Đơn Phép năm Chờ duyệt chỉ hiển thị để người duyệt tham khảo, chưa chiếm quota cho tới khi được duyệt và ghi MainData."
+            )
+            if isinstance(_ann_daily_v92683, pd.DataFrame) and not _ann_daily_v92683.empty:
+                st.dataframe(_ann_daily_v92683, hide_index=True, width="stretch", height="content")
+
+            if isinstance(_ann_main_periods_v92683, pd.DataFrame) and not _ann_main_periods_v92683.empty:
+                st.markdown("**Phép năm đang ghi trong MainData · gom theo khoảng liên tiếp:**")
+                st.dataframe(
+                    _ann_main_periods_v92683[["Tên nhân viên", "Từ ngày", "Đến ngày", "Số ngày"]],
+                    hide_index=True, width="stretch", height="content"
+                )
+
+            if isinstance(_ann_periods_v92683, pd.DataFrame) and not _ann_periods_v92683.empty:
+                _ann_period_view_v92683 = _ann_periods_v92683[
+                    _ann_periods_v92683["__start_v92683"].apply(lambda x: x <= _ann_mend_v92683)
+                    & _ann_periods_v92683["__end_v92683"].apply(lambda x: x >= _ann_mstart_v92683)
+                ].copy()
+                if not _ann_period_view_v92683.empty:
+                    st.markdown("**Khoảng Phép năm đã gửi / đã duyệt:**")
+                    st.dataframe(
+                        _ann_period_view_v92683[["Tên nhân viên", "Từ ngày", "Đến ngày", "Trạng thái", "ID"]],
+                        hide_index=True, width="stretch", height="content"
+                    )
 
     # ------------------------------------------------------
     # Admin bật/tắt nhận đơn nghỉ dài hạn
@@ -24385,6 +25574,7 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
                         _rq_reason, _rq_detail,
                         LONG_LEAVE_PENDING, "Nhân viên gửi yêu cầu", _ll_user,
                         email_cc=", ".join(_cc_emails),
+                        request_type=LONG_LEAVE_REQUEST_TYPE_LONG,
                     )
                     if ok:
                         _doc_ok, _doc_msg, _ = attach_documents_to_long_leave_request(
@@ -24395,6 +25585,7 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
                             _rq_reason, _rq_detail, req_id,
                             attachments=_rq_files,
                             cc_emails=_cc_emails,
+                            request_type=LONG_LEAVE_REQUEST_TYPE_LONG,
                         )
                         st.success(f"✅ {msg} Mã yêu cầu: {req_id}")
                         if _rq_files:
@@ -24402,6 +25593,89 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
                         (st.info if _em_ok else st.warning)(
                             ("📧 " if _em_ok else "Yêu cầu đã lưu nhưng email chưa gửi được: ")
                             + str(_em_msg)
+                        )
+                        _clear_long_leave_cache()
+                        rerun_current_view()
+                    else:
+                        st.error(msg)
+
+        # V92.6.82 - Mẫu đơn Phép năm dùng cùng workflow duyệt của Lịch nghỉ dài hạn.
+        with st.expander("📝 Tạo yêu cầu · Đơn xin nghỉ Phép năm", expanded=False):
+            st.caption(
+                "Chọn tối đa 7 ngày liên tiếp. Đơn chỉ ghi vào MainData sau khi Admin duyệt; "
+                "khi duyệt hệ thống kiểm tra lại quỹ Phép năm và dữ liệu trùng của từng ngày."
+            )
+            if bool(_ll_request_pause.get("enabled", False)):
+                st.error(
+                    "⏸️ " + str(_ll_request_pause.get(
+                        "message", "Admin đang tạm dừng nhận đơn nghỉ dài hạn."
+                    ))
+                )
+            with st.form("annual_leave_request_form_v92682", clear_on_submit=False):
+                _ann_c1_v92682, _ann_c2_v92682 = st.columns(2)
+                with _ann_c1_v92682:
+                    _ann_start_v92682 = st.date_input(
+                        "Từ ngày Phép năm", value=_ll_today,
+                        format="DD/MM/YYYY", key="annual_request_start_v92682"
+                    )
+                with _ann_c2_v92682:
+                    _ann_end_v92682 = st.date_input(
+                        "Đến ngày Phép năm", value=_ll_today,
+                        format="DD/MM/YYYY", key="annual_request_end_v92682"
+                    )
+                _ann_detail_v92682 = st.text_area(
+                    "Nội dung / ghi chú xin Phép năm",
+                    key="annual_request_detail_v92682", height=110,
+                    placeholder="Ghi chú cho Admin khi duyệt (không bắt buộc).",
+                )
+                _ann_files_v92682 = st.file_uploader(
+                    "📎 Tài liệu kèm theo (không bắt buộc)",
+                    accept_multiple_files=True,
+                    key="annual_request_files_v92682",
+                )
+                _ann_submit_v92682 = st.form_submit_button(
+                    "💾 Gửi đơn xin nghỉ Phép năm",
+                    use_container_width=True,
+                    disabled=(
+                        bool(_ll_request_pause.get("enabled", False))
+                        or not action_access("long_leave_form")
+                    ),
+                )
+            if _ann_submit_v92682:
+                _ann_count_v92682 = (_ann_end_v92682 - _ann_start_v92682).days + 1
+                if bool(_ll_request_pause.get("enabled", False)):
+                    st.error("❌ Admin đang tạm dừng nhận đơn.")
+                elif _ann_end_v92682 < _ann_start_v92682:
+                    st.error("❌ Ngày kết thúc phải bằng hoặc sau ngày bắt đầu.")
+                elif _ann_count_v92682 > 7:
+                    st.error("❌ Đơn Phép năm chỉ được chọn tối đa 7 ngày liên tiếp.")
+                else:
+                    _cc_emails_ann_v92682 = _long_leave_role_cc_emails()
+                    _ann_reason_v92682 = "Nghỉ Phép năm"
+                    ok, msg, req_id = append_long_leave_request(
+                        _ll_user, _ll_role, _ann_start_v92682, _ann_end_v92682,
+                        _ann_reason_v92682, _ann_detail_v92682,
+                        LONG_LEAVE_PENDING, "Nhân viên gửi yêu cầu Phép năm", _ll_user,
+                        email_cc=", ".join(_cc_emails_ann_v92682),
+                        request_type=LONG_LEAVE_REQUEST_TYPE_ANNUAL,
+                    )
+                    if ok:
+                        _doc_ok_ann_v92682, _doc_msg_ann_v92682, _ = attach_documents_to_long_leave_request(
+                            req_id, _ann_files_v92682, _ll_user
+                        )
+                        _em_ok_ann_v92682, _em_msg_ann_v92682 = send_long_leave_request_email(
+                            _ll_user, _ll_role, _ann_start_v92682, _ann_end_v92682,
+                            _ann_reason_v92682, _ann_detail_v92682, req_id,
+                            attachments=_ann_files_v92682,
+                            cc_emails=_cc_emails_ann_v92682,
+                            request_type=LONG_LEAVE_REQUEST_TYPE_ANNUAL,
+                        )
+                        st.success(f"✅ {msg} Mã yêu cầu: {req_id}")
+                        if _ann_files_v92682:
+                            (st.info if _doc_ok_ann_v92682 else st.warning)("📎 " + str(_doc_msg_ann_v92682))
+                        (st.info if _em_ok_ann_v92682 else st.warning)(
+                            ("📧 " if _em_ok_ann_v92682 else "Yêu cầu đã lưu nhưng email chưa gửi được: ")
+                            + str(_em_msg_ann_v92682)
                         )
                         _clear_long_leave_cache()
                         rerun_current_view()
@@ -24421,11 +25695,11 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
                 if _ll_my_notice_open:
                     render_notice_scroll_marker("ll-my-documents")
                 with st.expander(
-                    "📨 Yêu cầu nghỉ dài hạn của tôi",
+                    "📨 Yêu cầu nghỉ dài hạn / Phép năm của tôi",
                     expanded=_ll_my_notice_open
                 ):
                     _my_cols = [
-                        "ID", "Từ ngày", "Đến ngày", "Lý do nghỉ dài hạn",
+                        "ID", "Loại đơn", "Từ ngày", "Đến ngày", "Lý do nghỉ dài hạn",
                         "Trạng thái", "Lý do không duyệt", "Ngày gửi",
                         "Người duyệt", "Nhắc tải tài liệu", "Ngày nhắc"
                     ]
@@ -24643,13 +25917,14 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
             expanded=_ll_pending_admin_open
         ):
             if _pending.empty:
-                st.success("Không có đơn xin nghỉ dài hạn đang chờ.")
+                st.success("Không có đơn Nghỉ dài hạn / Phép năm đang chờ.")
             else:
                 _labels, _lookup = [], {}
                 for _, _r in _pending.iterrows():
                     _label = (
-                        f"{_r.get('Tên nhân viên','')} · {_r.get('Từ ngày','')} → "
-                        f"{_r.get('Đến ngày','')} · {_r.get('Lý do nghỉ dài hạn','')}"
+                        f"{_long_leave_request_type(_r)} · {_r.get('Tên nhân viên','')} · "
+                        f"{_r.get('Từ ngày','')} → {_r.get('Đến ngày','')} · "
+                        f"{_r.get('Lý do nghỉ dài hạn','')}"
                     )
                     _labels.append(_label)
                     _lookup[_label] = _r.to_dict()
@@ -24658,7 +25933,11 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
                     filter_mode="contains", key="ll_admin_pending_pick_v90"
                 )
                 _pr = _lookup.get(_pick, {})
-                st.info(f"Chi tiết: {str(_pr.get('Chi tiết',''))}")
+                _pr_type_v92682 = _long_leave_request_type(_pr)
+                _pr_is_annual_v92682 = _is_annual_leave_request(_pr)
+                st.info(
+                    f"Loại đơn: {_pr_type_v92682} · Chi tiết: {str(_pr.get('Chi tiết',''))}"
+                )
 
                 # V90.5: Admin được điều chỉnh thời gian trước khi duyệt.
                 _orig_start = _parse_vn_date(_pr.get("Từ ngày", "")) or _ll_today
@@ -24685,6 +25964,24 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
                         f"thành {_admin_start.strftime('%d/%m/%Y')}–{_admin_end.strftime('%d/%m/%Y')}."
                     )
 
+                if _pr_is_annual_v92682:
+                    st.markdown("#### 📊 Hiện trạng nghỉ trong đúng khoảng đơn đang xét")
+                    _review_ann_v92683 = annual_leave_overlap_summary_v92683(_admin_start, _admin_end)
+                    _rv1, _rv2, _rv3 = st.columns(3)
+                    _rv1.metric("Cao nhất đang Có phép", _review_ann_v92683.get("max_used", 0))
+                    _rv2.metric("Ít chỗ trống nhất", _review_ann_v92683.get("min_remaining", 0))
+                    _rv3.metric("Ngày đã đủ quota", _review_ann_v92683.get("full_days", 0))
+                    _review_daily_v92683 = _review_ann_v92683.get("daily", pd.DataFrame())
+                    if isinstance(_review_daily_v92683, pd.DataFrame) and not _review_daily_v92683.empty:
+                        st.dataframe(
+                            _review_daily_v92683, hide_index=True, width="stretch", height="content"
+                        )
+                    if int(_review_ann_v92683.get("full_days", 0) or 0) > 0:
+                        st.warning(
+                            "⚠️ Trong khoảng đơn đang xét có ngày đã đủ hạn mức Có phép. "
+                            "Nút Duyệt sẽ đối soát lại MainData LIVE và không ghi nếu vượt quota."
+                        )
+
                 _pr_docs = _parse_long_leave_documents(_pr.get("Tài liệu JSON", ""))
                 if _pr_docs:
                     st.caption(f"📎 Đơn này đã có {len(_pr_docs)} tài liệu.")
@@ -24696,54 +25993,78 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
                 _c1, _c2 = st.columns(2)
                 with _c1:
                     if st.button(
-                        "✅ Duyệt nghỉ dài hạn",
+                        "✅ Duyệt Phép năm" if _pr_is_annual_v92682 else "✅ Duyệt nghỉ dài hạn",
                         use_container_width=True,
                         key="ll_admin_approve_v90",
                         disabled=not action_access("long_leave_approve")
                     ):
                         if _admin_end < _admin_start:
                             st.error("❌ Ngày kết thúc phải bằng hoặc sau ngày bắt đầu.")
+                        elif _pr_is_annual_v92682 and ((_admin_end - _admin_start).days + 1) > 7:
+                            st.error("❌ Đơn Phép năm chỉ được duyệt tối đa 7 ngày liên tiếp.")
                         else:
                             _now = datetime.now(VN_TZ)
                             _today = get_vn_today()
-                            _updates = {
-                                "Từ ngày": _admin_start.strftime("%d/%m/%Y"),
-                                "Đến ngày": _admin_end.strftime("%d/%m/%Y"),
-                                "Trạng thái": LONG_LEAVE_APPROVED,
-                                "Người duyệt": st.session_state.current_user,
-                                "Ngày duyệt": _now.strftime("%d/%m/%Y"),
-                                "Giờ duyệt": _now.strftime("%H:%M:%S"),
-                                "Lý do không duyệt": "",
-                            }
-                            _ok_up, _msg_up = update_long_leave_row(
-                                int(_pr.get("__row", 0)),
-                                _updates,
-                                st.session_state.current_user
-                            )
-                            if _ok_up:
-                                # Chỉ chuyển Tạm thời nghỉ việc khi ĐÃ tới ngày bắt đầu.
-                                if _admin_start <= _today <= _admin_end:
-                                    _ok_st, _msg_st = set_employee_employment_status(
+
+                            # Đơn Phép năm phải ghi MainData thành công TRƯỚC khi đánh dấu Đã duyệt.
+                            # Đơn Nghỉ dài hạn không ghi MainData, mà điều khiển trạng thái nhân sự như trước.
+                            _main_ok_v92682 = True
+                            _main_msg_v92682 = ""
+                            if _pr_is_annual_v92682:
+                                _main_ok_v92682, _main_msg_v92682, _ = (
+                                    _validate_and_write_annual_leave_request_to_main_data_v92682(
                                         _pr.get("Tên nhân viên", ""),
-                                        EMPLOYMENT_STATUS_TEMP,
-                                        st.session_state.current_user
+                                        _admin_start, _admin_end,
+                                        _pr.get("Chi tiết", ""),
+                                        st.session_state.current_user,
+                                        request_id=_pr.get("ID", ""),
                                     )
-                                    if _ok_st:
-                                        st.success(_msg_up + " " + _msg_st)
-                                    else:
-                                        st.warning(_msg_up + " Nhưng chưa cập nhật được trạng thái nhân sự: " + _msg_st)
-                                elif _today < _admin_start:
-                                    st.success(
-                                        _msg_up
-                                        + f" Trạng thái nhân viên sẽ tự chuyển sang Tạm thời nghỉ việc từ ngày "
-                                        f"{_admin_start.strftime('%d/%m/%Y')}."
-                                    )
-                                else:
-                                    st.warning("Khoảng nghỉ đã kết thúc trước ngày hiện tại.")
-                                _clear_long_leave_cache()
-                                rerun_current_view()
+                                )
+
+                            if not _main_ok_v92682:
+                                st.error("❌ Chưa thể duyệt Phép năm: " + str(_main_msg_v92682))
                             else:
-                                st.error(_msg_up)
+                                _updates = {
+                                    "Từ ngày": _admin_start.strftime("%d/%m/%Y"),
+                                    "Đến ngày": _admin_end.strftime("%d/%m/%Y"),
+                                    "Trạng thái": LONG_LEAVE_APPROVED,
+                                    "Người duyệt": st.session_state.current_user,
+                                    "Ngày duyệt": _now.strftime("%d/%m/%Y"),
+                                    "Giờ duyệt": _now.strftime("%H:%M:%S"),
+                                    "Lý do không duyệt": "",
+                                    "Loại đơn": _pr_type_v92682,
+                                }
+                                _ok_up, _msg_up = update_long_leave_row(
+                                    int(_pr.get("__row", 0)),
+                                    _updates,
+                                    st.session_state.current_user
+                                )
+                                if _ok_up:
+                                    if _pr_is_annual_v92682:
+                                        st.success(_msg_up + " " + str(_main_msg_v92682))
+                                    # Chỉ Nghỉ dài hạn mới chuyển trạng thái Tạm thời nghỉ việc.
+                                    elif _admin_start <= _today <= _admin_end:
+                                        _ok_st, _msg_st = set_employee_employment_status(
+                                            _pr.get("Tên nhân viên", ""),
+                                            EMPLOYMENT_STATUS_TEMP,
+                                            st.session_state.current_user
+                                        )
+                                        if _ok_st:
+                                            st.success(_msg_up + " " + _msg_st)
+                                        else:
+                                            st.warning(_msg_up + " Nhưng chưa cập nhật được trạng thái nhân sự: " + _msg_st)
+                                    elif _today < _admin_start:
+                                        st.success(
+                                            _msg_up
+                                            + f" Trạng thái nhân viên sẽ tự chuyển sang Tạm thời nghỉ việc từ ngày "
+                                            f"{_admin_start.strftime('%d/%m/%Y')}."
+                                        )
+                                    else:
+                                        st.warning("Khoảng nghỉ đã kết thúc trước ngày hiện tại.")
+                                    _clear_long_leave_cache()
+                                    rerun_current_view()
+                                else:
+                                    st.error(_msg_up)
                 with _c2:
                     if st.button(
                         "❌ Không duyệt nghỉ",
@@ -24917,7 +26238,8 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
                     _ok_add, _msg_add, _ = append_long_leave_request(
                         _emp, _role, _mstart, _mend, _reason, _detail,
                         LONG_LEAVE_APPROVED, "Admin thủ công",
-                        st.session_state.current_user
+                        st.session_state.current_user,
+                        request_type=LONG_LEAVE_REQUEST_TYPE_LONG
                     )
                     if _ok_add:
                         if _mstart <= _ll_today <= _mend:
@@ -25059,10 +26381,12 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
 
         # Lịch sử đã duyệt + đã kết thúc đều tiếp tục hiển thị.
         _visible = (
-            _ll_all[
-                _ll_all["Trạng thái"].astype(str).str.strip()
-                .isin([LONG_LEAVE_APPROVED, LONG_LEAVE_ENDED])
-            ].copy()
+            _filter_formal_long_leave_rows(
+                _ll_all[
+                    _ll_all["Trạng thái"].astype(str).str.strip()
+                    .isin([LONG_LEAVE_APPROVED, LONG_LEAVE_ENDED])
+                ].copy()
+            )
             if isinstance(_ll_all, pd.DataFrame) and not _ll_all.empty
             else pd.DataFrame()
         )
@@ -25232,8 +26556,8 @@ elif selected_page == "🏖️ Lịch nghỉ dài hạn":
             "nhưng chưa được cấp quyền xem danh sách / thống kê nghỉ dài hạn."
         )
 
-elif selected_page == "🎂 Sinh nhật nhân sự" and has_feature_access("birthday"):
-    st.subheader("🎂 Sinh nhật nhân sự trong tháng")
+elif selected_page == "🎂 Sinh nhật" and has_feature_access("birthday"):
+    st.subheader("🎂 Sinh nhật trong tháng")
     st.caption("Danh sách được lấy từ hồ sơ mới nhất và sắp theo ngày sinh trong tháng.")
     render_manual_birthday_check(
         load_credentials_recent(),
@@ -25241,8 +26565,8 @@ elif selected_page == "🎂 Sinh nhật nhân sự" and has_feature_access("birt
     )
 elif selected_page == "👤 Hồ sơ cá nhân":
     pass  # Nội dung hồ sơ đã hiển thị ở phía trên.
-elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access("shift"):
-    st.subheader("⏰ Thiết lập ca làm việc")
+elif selected_page == "⏰ Quản lý ca làm việc" and has_feature_access("shift"):
+    st.subheader("⏰ Quản lý ca làm việc")
     render_staff_statistics_v92678(df_credentials, "shift_staff_stats")
     st.markdown("---")
     _can_shift_def = action_access("shift_definition_edit")
@@ -25344,6 +26668,191 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
             width="stretch",
             height="content",
         )
+
+    # ======================================================
+    # V92.6.81 - KẾ HOẠCH / HẸN NGÀY NHÂN SỰ
+    # ======================================================
+    with st.expander("🗓️ Kế hoạch / hẹn ngày đổi ca và nghỉ dài hạn", expanded=False):
+        st.caption(
+            "Lập kế hoạch trước theo ngày. Khi đến ngày hiệu lực, hệ thống tự đổi ca hoặc "
+            "chuyển trạng thái nhân sự. Kế hoạch Nghỉ dài hạn dùng 'Ngày bắt đầu quay lại' "
+            "làm mốc tự chuyển từ Tạm thời nghỉ việc về Đang làm việc."
+        )
+        _plan_today_v92681 = get_vn_today()
+        _plan_active_names_v92681 = (
+            shift_base["Tên nhân viên"].dropna().astype(str).tolist()
+            if isinstance(shift_base, pd.DataFrame) and not shift_base.empty
+            else []
+        )
+        _plan_active_names_v92681 = sort_employee_names(
+            [x for x in _plan_active_names_v92681 if str(x).strip()]
+        )
+
+        _plan_c1_v92681, _plan_c2_v92681 = st.columns([1, 2])
+        with _plan_c1_v92681:
+            _plan_type_v92681 = st.selectbox(
+                "Loại kế hoạch",
+                [STAFF_PLAN_SHIFT, STAFF_PLAN_LONG_LEAVE],
+                key="staff_plan_type_v92681",
+            )
+        with _plan_c2_v92681:
+            _plan_employee_v92681 = st.selectbox(
+                "Nhân viên",
+                _plan_active_names_v92681,
+                index=None,
+                placeholder="Chọn nhân viên đang làm việc",
+                filter_mode="contains",
+                key="staff_plan_employee_v92681",
+            )
+
+        _plan_start_v92681 = _plan_today_v92681
+        _plan_end_v92681 = None
+        _plan_shift_v92681 = ""
+        _plan_cycle_v92681 = ""
+
+        if _plan_type_v92681 == STAFF_PLAN_SHIFT:
+            _ps1_v92681, _ps2_v92681, _ps3_v92681 = st.columns([1, 2, 1])
+            with _ps1_v92681:
+                _plan_start_v92681 = st.date_input(
+                    "Ngày bắt đầu đi ca mới",
+                    value=_plan_today_v92681,
+                    min_value=_plan_today_v92681,
+                    format="DD/MM/YYYY",
+                    key="staff_plan_shift_date_v92681",
+                )
+            _plan_dep_v92681 = ""
+            if _plan_employee_v92681:
+                _hit_plan_v92681 = df_credentials[
+                    df_credentials["Tên nhân viên"].astype(str).apply(normalize_login_name)
+                    .eq(normalize_login_name(_plan_employee_v92681))
+                ] if isinstance(df_credentials, pd.DataFrame) and not df_credentials.empty else pd.DataFrame()
+                if not _hit_plan_v92681.empty:
+                    _plan_dep_v92681 = _shift_department_label(
+                        str(_hit_plan_v92681.iloc[-1].get("Phân quyền", "") or "").strip().lower()
+                    )
+            _plan_shift_options_v92681 = list(get_shift_options(_plan_dep_v92681)) if _plan_dep_v92681 else []
+            with _ps2_v92681:
+                _plan_shift_v92681 = st.selectbox(
+                    "Ca sẽ áp dụng",
+                    _plan_shift_options_v92681,
+                    index=None,
+                    placeholder=(
+                        f"Chọn ca của {_plan_dep_v92681}" if _plan_dep_v92681
+                        else "Chọn nhân viên trước"
+                    ),
+                    key="staff_plan_shift_target_v92681",
+                )
+            with _ps3_v92681:
+                _plan_cycle_v92681 = st.selectbox(
+                    "Chu kỳ",
+                    [""] + list(SHIFT_CYCLE_OPTIONS),
+                    key="staff_plan_shift_cycle_v92681",
+                )
+        else:
+            _pl1_v92681, _pl2_v92681 = st.columns(2)
+            with _pl1_v92681:
+                _plan_start_v92681 = st.date_input(
+                    "Ngày bắt đầu nghỉ dài hạn",
+                    value=_plan_today_v92681,
+                    min_value=_plan_today_v92681,
+                    format="DD/MM/YYYY",
+                    key="staff_plan_long_start_v92681",
+                )
+            with _pl2_v92681:
+                _plan_end_v92681 = st.date_input(
+                    "Ngày bắt đầu quay lại làm việc",
+                    value=max(_plan_today_v92681 + timedelta(days=1), _plan_start_v92681 + timedelta(days=1)),
+                    min_value=_plan_start_v92681 + timedelta(days=1),
+                    format="DD/MM/YYYY",
+                    key="staff_plan_long_return_v92681",
+                )
+            st.caption(
+                f"Trạng thái sẽ là **Tạm thời nghỉ việc** từ {_plan_start_v92681.strftime('%d/%m/%Y')} "
+                f"đến hết {(_plan_end_v92681 - timedelta(days=1)).strftime('%d/%m/%Y')}; "
+                f"từ {_plan_end_v92681.strftime('%d/%m/%Y')} tự chuyển về **Đang làm việc**."
+            )
+
+        _plan_note_v92681 = st.text_input(
+            "Ghi chú kế hoạch",
+            key="staff_plan_note_v92681",
+            placeholder="Ví dụ: đổi ca theo kế hoạch tháng / nghỉ dài hạn đã thống nhất...",
+        )
+        if st.button(
+            "💾 Lưu kế hoạch hẹn ngày",
+            use_container_width=True,
+            key="save_staff_plan_v92681",
+            disabled=(not _can_shift_assign),
+        ):
+            _ok_plan_v92681, _msg_plan_v92681, _pid_v92681 = append_staff_schedule_plan(
+                _plan_employee_v92681,
+                _plan_type_v92681,
+                _plan_start_v92681,
+                end_date=_plan_end_v92681,
+                shift_name=_plan_shift_v92681,
+                cycle=_plan_cycle_v92681,
+                note=_plan_note_v92681,
+                created_by=st.session_state.current_user,
+            )
+            (st.success if _ok_plan_v92681 else st.error)(_msg_plan_v92681)
+            if _ok_plan_v92681:
+                st.caption(f"Mã kế hoạch: {_pid_v92681}")
+                rerun_current_view()
+
+        _plans_view_v92681 = load_staff_schedule_plans()
+        if isinstance(_plans_view_v92681, pd.DataFrame) and not _plans_view_v92681.empty:
+            _plans_show_v92681 = _plans_view_v92681.copy()
+            if "__row" in _plans_show_v92681.columns:
+                _plans_show_v92681 = _plans_show_v92681.sort_values("__row", ascending=False)
+            _show_cols_v92681 = [
+                "ID", "Tên nhân viên", "Loại kế hoạch", "Từ ngày", "Đến ngày",
+                "Ca áp dụng", "Chu kỳ", "Trạng thái", "Ghi chú", "Kết quả",
+            ]
+            st.markdown("#### Danh sách kế hoạch")
+            st.dataframe(
+                _plans_show_v92681[[c for c in _show_cols_v92681 if c in _plans_show_v92681.columns]],
+                hide_index=True, width="stretch", height="content",
+            )
+
+            _cancelable_v92681 = _plans_view_v92681[
+                ~_plans_view_v92681["Trạng thái"].astype(str).str.strip()
+                .isin([STAFF_PLAN_DONE, STAFF_PLAN_CANCELLED])
+            ].copy()
+            if not _cancelable_v92681.empty:
+                _cancel_map_v92681 = {
+                    str(r.get("ID", "")): (
+                        f"{r.get('Tên nhân viên','')} · {r.get('Loại kế hoạch','')} · "
+                        f"{r.get('Từ ngày','')}"
+                    )
+                    for _, r in _cancelable_v92681.iterrows()
+                    if str(r.get("ID", "")).strip()
+                }
+                _cancel_id_v92681 = st.selectbox(
+                    "Chọn kế hoạch cần hủy",
+                    list(_cancel_map_v92681.keys()),
+                    index=None,
+                    format_func=lambda x: _cancel_map_v92681.get(x, x),
+                    placeholder="Chọn kế hoạch",
+                    key="cancel_staff_plan_select_v92681",
+                )
+                if st.button(
+                    "🗑️ Hủy kế hoạch đã chọn",
+                    use_container_width=True,
+                    key="cancel_staff_plan_button_v92681",
+                    disabled=(not _cancel_id_v92681 or not _can_shift_assign),
+                ):
+                    _cr_v92681 = _cancelable_v92681[
+                        _cancelable_v92681["ID"].astype(str).eq(str(_cancel_id_v92681))
+                    ]
+                    if not _cr_v92681.empty:
+                        _ok_cancel_v92681, _msg_cancel_v92681 = cancel_staff_schedule_plan(
+                            int(_cr_v92681.iloc[0].get("__row", 0)),
+                            st.session_state.current_user,
+                        )
+                        (st.success if _ok_cancel_v92681 else st.error)(_msg_cancel_v92681)
+                        if _ok_cancel_v92681:
+                            rerun_current_view()
+        else:
+            st.info("Chưa có kế hoạch/hẹn ngày nhân sự.")
 
     # ======================================================
     # 2. GIỚI HẠN GIỜ QUAY LẠI NGHỈ GIỮA CA - TOÀN HỆ THỐNG
@@ -26252,13 +27761,13 @@ elif selected_page == "⏰ Thiết lập ca làm việc" and has_feature_access(
                     "Phần cấu hình nghỉ giữa ca vẫn được lưu và sẽ áp dụng khi có dữ liệu."
                 )
 
-elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff_list"):
+elif selected_page == "👥 Danh sách nhân viên" and has_feature_access("staff_list"):
     _can_staff_export = action_access("staff_export")
     _can_staff_import = action_access("staff_import")
-    st.subheader("👥 Danh sách nhân sự")
+    st.subheader("👥 Danh sách nhân viên")
     render_staff_statistics_v92678(df_credentials, "staff_list_stats")
     st.markdown("---")
-    staff_source_df = build_staff_list_dataframe(df_credentials)
+    staff_source_df = build_staff_list_dataframe(df_credentials, include_inactive=True)
 
     # V88.2: tài khoản có Phân quyền = quanly chỉ Admin được nhìn thấy.
     if str(st.session_state.get("current_role", "")).strip().lower() != "admin":
@@ -26266,6 +27775,50 @@ elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff
             staff_source_df = staff_source_df[
                 ~staff_source_df["Phân quyền"].astype(str).str.strip().str.lower().eq("quanly")
             ].copy()
+
+    # V92.6.83 - Bộ lọc Danh sách nhân viên: tên / bộ phận-phân quyền / trạng thái.
+    _sf1_v92683, _sf2_v92683, _sf3_v92683 = st.columns([4, 3, 3])
+    with _sf1_v92683:
+        _staff_name_filter_v92683 = st.text_input(
+            "🔎 Tìm theo tên", key="staff_list_name_filter_v92683",
+            placeholder="Nhập tên nhân viên..."
+        ).strip()
+    with _sf2_v92683:
+        _role_values_v92683 = [
+            r for r in ["nhanvien", "leader", "quanly", "letan", "locker", "tapvu"]
+            if isinstance(staff_source_df, pd.DataFrame)
+            and "Phân quyền" in staff_source_df.columns
+            and staff_source_df["Phân quyền"].astype(str).str.strip().str.lower().eq(r).any()
+        ]
+        _staff_role_filter_v92683 = st.selectbox(
+            "Bộ phận (phân quyền)",
+            ["Tất cả"] + _role_values_v92683,
+            key="staff_list_role_filter_v92683",
+            format_func=lambda x: "Tất cả bộ phận" if x == "Tất cả" else f"{_shift_department_label(x)} · {x}",
+        )
+    with _sf3_v92683:
+        _staff_status_filter_v92683 = st.selectbox(
+            "Trạng thái đang làm việc",
+            ["Tất cả", EMPLOYMENT_STATUS_ACTIVE, EMPLOYMENT_STATUS_TEMP, EMPLOYMENT_STATUS_LEFT],
+            key="staff_list_status_filter_v92683",
+        )
+
+    if isinstance(staff_source_df, pd.DataFrame) and not staff_source_df.empty:
+        if _staff_name_filter_v92683:
+            _staff_search_key_v92683 = normalize_login_name(_staff_name_filter_v92683)
+            staff_source_df = staff_source_df[
+                staff_source_df["Tên nhân viên"].astype(str).apply(normalize_login_name)
+                .str.contains(_staff_search_key_v92683, regex=False, na=False)
+            ].copy()
+        if _staff_role_filter_v92683 != "Tất cả":
+            staff_source_df = staff_source_df[
+                staff_source_df["Phân quyền"].astype(str).str.strip().str.lower().eq(_staff_role_filter_v92683)
+            ].copy()
+        if _staff_status_filter_v92683 != "Tất cả":
+            staff_source_df = staff_source_df[
+                staff_source_df["Trạng thái làm việc"].astype(str).str.strip().eq(_staff_status_filter_v92683)
+            ].copy()
+    st.caption(f"Đang hiển thị {len(staff_source_df)} nhân viên theo bộ lọc.")
 
     c_staff_export, c_staff_import = st.columns([1, 1])
     with c_staff_export:
@@ -26302,7 +27855,7 @@ elif selected_page == "👥 Danh sách nhân sự" and has_feature_access("staff
             preview_cols = [c for c in STAFF_EXPORT_COLUMNS if c in imported_staff_df.columns]
             st.caption(f"Xem trước file import: {len(imported_staff_df)} nhân viên. Chỉ cập nhật các tài khoản đã tồn tại.")
             st.dataframe(imported_staff_df[preview_cols], width='stretch', height=min(480, 70 + len(imported_staff_df) * 35), hide_index=True)
-            if st.button("⬆️ Xác nhận Import danh sách nhân sự", use_container_width=True, type="primary", key="confirm_import_staff_list", disabled=not _can_staff_import):
+            if st.button("⬆️ Xác nhận Import danh sách nhân viên", use_container_width=True, type="primary", key="confirm_import_staff_list", disabled=not _can_staff_import):
                 ok, msg = batch_import_staff_list(
                     imported_staff_df, st.session_state.current_user, st.session_state.current_role
                 )
@@ -26825,8 +28378,8 @@ elif selected_page == "➕ Thêm nhân viên" and has_feature_access("employee_a
             st.error("Vui lòng nhập Tên đăng nhập.")
 
 
-elif selected_page == "✏️ Sửa / Xóa nhân viên" and has_page_access("✏️ Sửa / Xóa nhân viên"):
-    st.subheader("✏️ Sửa / Xóa nhân viên")
+elif selected_page == "🏷️ Cập nhật trạng thái nhân viên" and has_page_access("🏷️ Cập nhật trạng thái nhân viên"):
+    st.subheader("🏷️ Cập nhật trạng thái nhân viên")
 
     _current_role = str(st.session_state.current_role).strip().lower()
     _all_staff = df_credentials.copy()
@@ -26984,9 +28537,9 @@ elif selected_page == "🔒 Khóa đăng nhập" and has_feature_access("account
     st.caption(f"Đang khóa: {len(locked_now)} / {len(lockable_df)} tài khoản. Tài khoản Admin đang sử dụng được loại khỏi danh sách để tránh tự khóa chính mình.")
     if not locked_now.empty:
         st.dataframe(locked_now[['Tên nhân viên', 'Phân quyền', 'Khóa đăng nhập']], width='stretch', height='content', hide_index=True)
-elif selected_page == "🔐 Khóa quyền đăng ký" and has_feature_access("registration_lock"):
+elif selected_page == "🔐 Khóa đăng ký LNP" and has_feature_access("registration_lock"):
     _can_registration_lock_edit = action_access("registration_lock_edit")
-    st.subheader("🔐 Khóa quyền đăng ký theo từng vai trò")
+    st.subheader("🔐 Khóa đăng ký LNP theo từng vai trò")
     st.caption(
         "Khóa độc lập từng vai trò và CHỈ khóa form Đăng ký lịch nghỉ. "
         "Người dùng vẫn được xem Thống kê chi tiết theo từng ngày và Chi tiết danh sách. "
@@ -27036,20 +28589,20 @@ elif selected_page == "🔐 Khóa quyền đăng ký" and has_feature_access("re
         "Quyền xem thống kê/chi tiết và quyền Sửa/Xóa lịch nghỉ được xử lý độc lập."
     )
 
-elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_penalty"):
+elif selected_page == "🤖 Auto Check" and has_feature_access("auto_penalty"):
     _can_auto_control = action_access("auto_penalty_control")
     _can_auto_run = action_access("auto_penalty_run")
-    st.subheader("⏸️ Điều khiển Auto Update phạt")
+    st.subheader("🤖 Auto Check")
     cfg = load_auto_penalty_config()
     paused = bool(cfg.get('paused'))
     if paused:
         st.warning(
-            f"🔴 Auto Update phạt đang TẠM DỪNG. Không tự ghi Đi trễ TimeSoft hoặc Ra ngoài vào muộn từ Bảng tour. "
+            f"🔴 Auto Check đang TẠM DỪNG. Không tự ghi Đi trễ TimeSoft hoặc Ra ngoài vào muộn từ Bảng tour. "
             f"Ngưỡng khi hoạt động: từ {AUTO_PENALTY_MINUTES} phút."
         )
     else:
         st.success(
-            f"🟢 Auto Update phạt đang HOẠT ĐỘNG. Lịch chuẩn: 15:00, 20:00 và 21:00 hằng ngày; lượt 21:00 chuyên kiểm tra nghỉ giữa ca và tối đa 1 lần/ngày. Ngưỡng từ {AUTO_PENALTY_MINUTES} phút."
+            f"🟢 Auto Check đang HOẠT ĐỘNG. Lịch chuẩn: 15:00, 20:00 và 21:00 hằng ngày; lượt 21:00 chuyên kiểm tra nghỉ giữa ca và tối đa 1 lần/ngày. Ngưỡng từ {AUTO_PENALTY_MINUTES} phút."
         )
     st.caption(
         f"Cập nhật gần nhất: {cfg.get('updated_date','')} {cfg.get('updated_time','')} · "
@@ -27310,7 +28863,8 @@ elif selected_page == "⏸️ Auto Update phạt" and has_feature_access("auto_p
         "• Ra ngoài vào muộn: chỉ Auto Update khi cột **Vào trễ >= 5 phút**. "
         "Tên như **Cẩm Nhung *** được đối chiếu như **Cẩm Nhung**.  \n"
         "• TimeSoft: check-in được so trực tiếp với giờ bắt đầu ca. **Hỗ trợ Ca 1 2 tiếng = 120 phút; Ca 1 sau 0:0H 3 tiếng = 180 phút; Ca 2 sau 0:0H 1 tiếng = 60 phút**. Chỉ Auto phạt khi vượt mức Hỗ trợ; nếu không có Hỗ trợ thì ngưỡng là **>= 5 phút**.  \n"
-        "• **Không có FaceID từ 20:00**: nếu MainData cùng ngày có **cột G = 0.5** thì vẫn phải có FaceID; không có FaceID sẽ Auto **STT 44 · Không check mặt**. Nếu không có G=0.5 nhưng có **G=1.0** thì coi là nghỉ cả ngày và không Auto Nghỉ KP. Nếu không có cả 0.5/1.0 thì mới Auto **Nghỉ KHÔNG phép**. Snapshot TimeSoft rỗng sẽ không phạt hàng loạt.  \n"
+        "• **Không có FaceID từ 20:00**: nếu MainData cùng ngày có **Nghỉ đám hiếu** hoặc **Nghỉ phép quay video** thì miễn Auto Check, không phạt. Nếu không thuộc 2 ngoại lệ này và có **cột G = 0.5** thì vẫn phải có FaceID; không có FaceID sẽ Auto **STT 44 · Không check mặt**. Nếu không có G=0.5 nhưng có **G=1.0** thì coi là nghỉ cả ngày và không Auto Nghỉ KP. Nếu không có cả 0.5/1.0 thì mới Auto **Nghỉ KHÔNG phép**. Snapshot TimeSoft rỗng sẽ không phạt hàng loạt.  \n"
+        "• **Nghỉ dài hạn**: nhân viên đang trong đơn Nghỉ dài hạn đã duyệt được chuyển sang **Tạm thời nghỉ việc** và bị loại khỏi toàn bộ Auto Check. Hệ thống còn đối chiếu trực tiếp khoảng đơn đã duyệt như lớp bảo vệ thứ hai nếu cache trạng thái chưa kịp cập nhật.  \n"
         "• **KHÔNG dọn vệ sinh ca 1**: chỉ áp dụng cho role `nhanvien` đang làm **Ca 1 trong tuần hiện tại**, "
         "không có **Hỗ trợ Ca 1 đi trễ 2 tiếng / Hỗ trợ Ca 1 đi trễ 3 tiếng / Hỗ trợ Ca 2 đi trễ 1 tiếng**, "
         "và hôm đó có **Đi trễ <=30 / <=60 / >60 đến <=120 phút** theo đúng loại nghỉ đã cấu hình.  \n"
@@ -29218,7 +30772,7 @@ elif selected_page == "💰 Bảng lương" and has_page_access("💰 Bảng lư
                                                             st.error(msg)
                                         else:
                                             st.caption("Chưa chọn Lễ tân nhận bảng lương tổng hợp.")
-elif selected_page == "🧭 Bảng tour":
+elif selected_page == "🧭 BẢNG TOUR":
     render_bang_tour_fast_v920()
 
 elif selected_page == "🧾 Nhật ký lịch nghỉ":
@@ -29437,6 +30991,65 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 penalty_configured_from_sheet = bool(_reason_meta.get("penalty_configured", False))
                 st.caption("⏳ " + leave_notice_policy_text(chosen_loai))
 
+            # V92.6.81 - mặc định mọi lý do vẫn chỉ 1 ngày như trước.
+            # Riêng Phép năm cho chọn tối đa 7 ngày liên tiếp; Nghỉ bệnh có giấy khám hoặc được quản lý duyệt
+            # cho chọn khoảng không giới hạn số ngày.
+            _annual_range_v92681 = is_annual_leave_range_reason(chosen_loai)
+            _long_sick_range_v92681 = is_long_sick_leave_range_reason(chosen_loai)
+            if _annual_range_v92681 or _long_sick_range_v92681:
+                _range_label_v92681 = (
+                    "📅 Khoảng nghỉ Phép năm (tối đa 7 ngày liên tiếp):"
+                    if _annual_range_v92681
+                    else "📅 Khoảng Nghỉ bệnh có giấy khám hoặc được quản lý duyệt (không giới hạn số ngày):"
+                )
+                _range_kwargs_v92681 = {
+                    "label": _range_label_v92681,
+                    "value": (chosen_date, chosen_date),
+                    "min_value": (None if _calendar_role_v92644 == "admin" else _calendar_min_v92644),
+                    "format": "DD/MM/YYYY",
+                    "key": (
+                        "leave_annual_range_v92681"
+                        if _annual_range_v92681
+                        else "leave_long_sick_range_v92681"
+                    ),
+                }
+                # Phép năm vẫn giữ cửa sổ đăng ký thông thường; Nghỉ bệnh có giấy khám hoặc được quản lý duyệt
+                # được phép chọn xa hơn tháng kế tiếp theo yêu cầu.
+                if _annual_range_v92681 and _calendar_role_v92644 != "admin":
+                    _range_kwargs_v92681["max_value"] = _calendar_max_v92644
+                # Streamlit không nhận min_value=None ở một số phiên bản cũ.
+                if _range_kwargs_v92681.get("min_value") is None:
+                    _range_kwargs_v92681.pop("min_value", None)
+                _range_pick_v92681 = st.date_input(**_range_kwargs_v92681)
+                if isinstance(_range_pick_v92681, (tuple, list)):
+                    if len(_range_pick_v92681) >= 2:
+                        start_date, end_date = _range_pick_v92681[0], _range_pick_v92681[1]
+                    elif len(_range_pick_v92681) == 1:
+                        start_date = end_date = _range_pick_v92681[0]
+                    else:
+                        start_date = end_date = chosen_date
+                else:
+                    start_date = end_date = _range_pick_v92681
+
+                _range_count_v92681 = max(1, (end_date - start_date).days + 1)
+                if _annual_range_v92681:
+                    if _range_count_v92681 > 7:
+                        st.error(
+                            f"❌ Phép năm chỉ được chọn tối đa 7 ngày liên tiếp. "
+                            f"Khoảng hiện tại có {_range_count_v92681} ngày."
+                        )
+                    else:
+                        st.caption(
+                            f"Phép năm: {_range_count_v92681}/7 ngày liên tiếp · "
+                            f"{start_date.strftime('%d/%m/%Y')} → {end_date.strftime('%d/%m/%Y')}."
+                        )
+                else:
+                    st.caption(
+                        f"Nghỉ bệnh có giấy khám hoặc được quản lý duyệt: {_range_count_v92681} ngày · "
+                        f"{start_date.strftime('%d/%m/%Y')} → {end_date.strftime('%d/%m/%Y')}. "
+                        "Không áp dụng giới hạn số ngày của khoảng đăng ký."
+                    )
+
             _configured_detail_norm = normalize_login_name(configured_violation_detail)
             requires_manual_penalty = "can nhap so tien" in _configured_detail_norm
             system_calculated_penalty = (
@@ -29461,7 +31074,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
             # Sau khi chọn xong Lý do nghỉ -> đối chiếu dữ liệu LIVE NGAY.
             # Nếu được phép mới mở phần Chi tiết / Mức phạt / Số ngày tính.
             # Sau đó bấm Ghi Lịch Nghỉ -> kiểm tra lần cuối và GHI TRỰC TIẾP.
-            dyn_key_suffix = f"{chosen_loai}_{start_date}_{chosen_nv}"
+            dyn_key_suffix = f"{chosen_loai}_{start_date}_{end_date}_{chosen_nv}"
 
             if is_zero_day_co_phep:
                 st.caption(
@@ -29641,55 +31254,124 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                         _save_default_penalty = float(default_phat or 0.0)
                         _save_requires_manual = bool(requires_manual_penalty)
                         _save_system_penalty = bool(system_calculated_penalty)
-                        _save_is_video = is_video_leave_reason(_save_reason)
+                        _save_quota_exempt = bool(is_video_leave_reason(_save_reason) or is_long_sick_leave_range_reason(_save_reason))
                         _save_count = (_save_end - _save_start).days + 1
-                        _accumulated_month = float(
-                            _final_check_v92636.get("accumulated_month", 0.0) or 0.0
-                        )
+
+                        # V92.6.81: khi đăng ký một khoảng ngày có thể đi qua tháng mới.
+                        # Số ngày phép cộng dồn phải tính riêng từng tháng, không mang tổng
+                        # của tháng trước sang tháng sau.
+                        _month_acc_v92681 = {}
+                        try:
+                            _hist_acc_v92681 = _final_live_df_v92636.copy()
+                            if (
+                                isinstance(_hist_acc_v92681, pd.DataFrame)
+                                and not _hist_acc_v92681.empty
+                                and {"Ngày", "Tên nhân viên", "Số ngày tính"}.issubset(_hist_acc_v92681.columns)
+                            ):
+                                _hist_acc_v92681 = _hist_acc_v92681[
+                                    _hist_acc_v92681["Tên nhân viên"].astype(str).apply(normalize_login_name)
+                                    .eq(normalize_login_name(_save_employee))
+                                ].copy()
+                                if "Lý do nghỉ" in _hist_acc_v92681.columns:
+                                    _hist_acc_v92681 = _leave_rows_counting_toward_quota(_hist_acc_v92681)
+                                _hist_acc_v92681["__dt_v92681"] = pd.to_datetime(
+                                    _hist_acc_v92681["Ngày"], dayfirst=True, errors="coerce"
+                                )
+                                _hist_acc_v92681["__days_v92681"] = pd.to_numeric(
+                                    _hist_acc_v92681["Số ngày tính"], errors="coerce"
+                                ).fillna(0.0)
+                                _hist_acc_v92681 = _hist_acc_v92681.dropna(subset=["__dt_v92681"])
+                                _hist_acc_v92681["__y_v92681"] = _hist_acc_v92681["__dt_v92681"].dt.year
+                                _hist_acc_v92681["__m_v92681"] = _hist_acc_v92681["__dt_v92681"].dt.month
+                                for (_yy_v92681, _mm_v92681), _gg_v92681 in _hist_acc_v92681.groupby(
+                                    ["__y_v92681", "__m_v92681"]
+                                ):
+                                    _month_acc_v92681[(int(_yy_v92681), int(_mm_v92681))] = float(
+                                        _gg_v92681["__days_v92681"].sum()
+                                    )
+                        except Exception:
+                            _month_acc_v92681 = {}
 
                         _all_saved_v92636 = True
                         _save_notes_v92636 = []
 
-                        for _i_v92636 in range(_save_count):
-                            _curr_date_v92636 = _save_start + timedelta(days=_i_v92636)
-
-                            if not _save_is_video:
-                                _accumulated_month += _save_days
-
-                            if _save_requires_manual:
-                                _penalty_to_save_v92636 = max(
-                                    50.0, float(_save_val_penalty or 0.0)
-                                )
-                            elif (
-                                _save_system_penalty
-                                and str(
-                                    st.session_state.get("current_role", "") or ""
-                                ).strip().lower() != "admin"
-                            ):
-                                _penalty_to_save_v92636 = _save_default_penalty
-                            else:
-                                _penalty_to_save_v92636 = float(
-                                    _save_val_penalty or 0.0
-                                )
-
-                            _ok_save_v92636, _msg_save_v92636 = save_lich_nghi_to_backup_sheet(
-                                _curr_date_v92636.strftime("%d/%m/%Y"),
-                                _save_employee,
-                                _save_reason,
-                                _save_detail,
-                                _save_days,
-                                _accumulated_month,
-                                _penalty_to_save_v92636,
-                                st.session_state.current_user,
-                                df_main_source=_final_live_df_v92636,
+                        # V92.6.81: khoảng Phép năm / Nghỉ bệnh nhiều ngày được ghi theo lô.
+                        # Nghỉ bệnh có giấy khám hoặc được quản lý duyệt có thể rất dài nên tuyệt đối không gọi Sheets từng ngày.
+                        _use_range_batch_v92681 = bool(
+                            _save_count > 1
+                            and (
+                                is_annual_leave_range_reason(_save_reason)
+                                or is_long_sick_leave_range_reason(_save_reason)
                             )
+                        )
 
-                            if not _ok_save_v92636:
-                                st.error(f"❌ {_msg_save_v92636}")
-                                _all_saved_v92636 = False
-                                break
-                            if _msg_save_v92636:
-                                _save_notes_v92636.append(_msg_save_v92636)
+                        if _save_requires_manual:
+                            _range_penalty_v92681 = max(50.0, float(_save_val_penalty or 0.0))
+                        elif (
+                            _save_system_penalty
+                            and str(st.session_state.get("current_role", "") or "").strip().lower() != "admin"
+                        ):
+                            _range_penalty_v92681 = _save_default_penalty
+                        else:
+                            _range_penalty_v92681 = float(_save_val_penalty or 0.0)
+
+                        if _use_range_batch_v92681:
+                            _ok_batch_v92681, _msg_batch_v92681, _records_batch_v92681 = (
+                                save_lich_nghi_range_to_backup_sheet(
+                                    _save_start, _save_end, _save_employee, _save_reason,
+                                    _save_detail, _save_days, _range_penalty_v92681,
+                                    st.session_state.current_user,
+                                )
+                            )
+                            _all_saved_v92636 = bool(_ok_batch_v92681)
+                            if _msg_batch_v92681:
+                                _save_notes_v92636.append(_msg_batch_v92681)
+                            if not _ok_batch_v92681:
+                                st.error(f"❌ {_msg_batch_v92681}")
+                        else:
+                            for _i_v92636 in range(_save_count):
+                                _curr_date_v92636 = _save_start + timedelta(days=_i_v92636)
+                                _month_key_v92681 = (_curr_date_v92636.year, _curr_date_v92636.month)
+                                _accumulated_month = float(_month_acc_v92681.get(_month_key_v92681, 0.0) or 0.0)
+
+                                if not _save_quota_exempt:
+                                    _accumulated_month += _save_days
+                                    _month_acc_v92681[_month_key_v92681] = _accumulated_month
+
+                                if _save_requires_manual:
+                                    _penalty_to_save_v92636 = max(
+                                        50.0, float(_save_val_penalty or 0.0)
+                                    )
+                                elif (
+                                    _save_system_penalty
+                                    and str(
+                                        st.session_state.get("current_role", "") or ""
+                                    ).strip().lower() != "admin"
+                                ):
+                                    _penalty_to_save_v92636 = _save_default_penalty
+                                else:
+                                    _penalty_to_save_v92636 = float(
+                                        _save_val_penalty or 0.0
+                                    )
+
+                                _ok_save_v92636, _msg_save_v92636 = save_lich_nghi_to_backup_sheet(
+                                    _curr_date_v92636.strftime("%d/%m/%Y"),
+                                    _save_employee,
+                                    _save_reason,
+                                    _save_detail,
+                                    _save_days,
+                                    _accumulated_month,
+                                    _penalty_to_save_v92636,
+                                    st.session_state.current_user,
+                                    df_main_source=_final_live_df_v92636,
+                                )
+
+                                if not _ok_save_v92636:
+                                    st.error(f"❌ {_msg_save_v92636}")
+                                    _all_saved_v92636 = False
+                                    break
+                                if _msg_save_v92636:
+                                    _save_notes_v92636.append(_msg_save_v92636)
 
                         if _all_saved_v92636:
                             _flash_notes = [
@@ -30807,6 +32489,28 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
     st.subheader("✏️ Quản lý lịch nghỉ")
     st.markdown("### 🗑️ Xóa / Quản lý lịch nghỉ đã đăng ký")
     render_leave_filter_label_css()
+    # V92.6.83 - nền xanh/ chữ đen cho 2 box lọc selectbox trong Quản lý lịch nghỉ.
+    st.markdown(
+        """
+        <style id="vera-leave-manage-blue-filter-v92683">
+        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+            background: linear-gradient(180deg, #EAF6FF 0%, #CFEAFF 55%, #B9DFFF 100%) !important;
+            border: 1px solid #72B7E6 !important;
+            border-radius: 10px !important;
+            box-shadow: 0 2px 7px rgba(36, 122, 181, .20) !important;
+            color: #000000 !important;
+        }
+        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div *,
+        div[data-testid="stSelectbox"] > label,
+        div[data-testid="stSelectbox"] > label * {
+            color: #000000 !important;
+            font-weight: 700 !important;
+        }
+        div[data-testid="stSelectbox"] svg { fill: #000000 !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     manage_today = get_vn_today()
     mf_date, mf_name, mf_refresh = st.columns([5, 4, 2])
     with mf_date:
@@ -31035,7 +32739,9 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
         if not manage_edit_locked:
             st.caption(
                 "✏️ Chỉ sửa cột Lý do nghỉ. Ngày và nhân viên được giữ nguyên; "
-                "Loại nghỉ, Người Thứ, số ngày, phạt vi phạm và thông tin cập nhật sẽ tự tính lại khi bấm Lưu."
+                "Loại nghỉ, Người Thứ, số ngày, phạt vi phạm và thông tin cập nhật sẽ tự tính lại khi bấm Lưu. "
+                "Riêng lịch CÓ phép 1.0 của ngày mai: chính nhân viên được đổi trong cùng ngày sang KHÔNG phép "
+                "hoặc CÓ phép 0.5 ngày mà không bị chặn bởi mốc Trước N ngày."
             )
 
         with st.form('leave_manage_batch_edit_form_v92659', clear_on_submit=False):

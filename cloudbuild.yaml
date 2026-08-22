@@ -74,6 +74,7 @@ steps:
   # ============================================================
   # CLOUD RUN JOB - AUTO UPDATE PHẠT 20:00 + EMAIL
   # Cloud Scheduler riêng sẽ gọi Job này lúc 20:00 Asia/Saigon mỗi ngày.
+  # Wrapper chỉ tăng độ bền đăng nhập TimeSoft; không đổi Google Sheet ID.
   # ============================================================
   - name: "gcr.io/cloud-builders/gcloud"
     args:
@@ -91,7 +92,7 @@ steps:
       - "--tasks=1"
       - "--parallelism=1"
       - "--command=python"
-      - "--args=auto_penalty_daily_job.py"
+      - "--args=auto_penalty_runtime_wrapper.py"
       - "--set-env-vars=SMTP_SENDER_EMAIL=veraspabienhoa@gmail.com,TIMESOFT_BASE_URL=https://vera.timesoft.vn,TIMESOFT_CHECKIN_PAGE_SIZE=100"
       - "--set-secrets=SMTP_APP_PASSWORD=vera-smtp-app-password:latest,TIMESOFT_USERNAME=vera-timesoft-username:latest,TIMESOFT_PASSWORD=vera-timesoft-password:latest"
 

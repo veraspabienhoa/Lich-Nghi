@@ -14,7 +14,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import timesoft_sync_job as ts
 
@@ -270,8 +270,34 @@ def _tour_note_late_minutes(value):
         return None
 
 
+def _tour_event_date(value):
+    """Lấy ngày thật từ Giờ ra/Giờ vào; hỗ trợ datetime, Timestamp và Excel serial."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, datetime):
+            return value.date()
+    except Exception:
+        pass
+    try:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+            if number >= 1:
+                return (datetime(1899, 12, 30) + timedelta(days=number)).date()
+            return None
+    except Exception:
+        pass
+    try:
+        parsed = ts.pd.to_datetime(value, errors="coerce", dayfirst=True)
+        if not ts.pd.isna(parsed):
+            return ts.pd.Timestamp(parsed).date()
+    except Exception:
+        pass
+    return None
+
+
 def _process_tour_current_input(client, cfg: dict, employee_map: dict, catalog: dict):
-    """Auto Tour theo TourVera Input hiện tại: B/S/U/V."""
+    """Auto Tour theo cấu trúc thực tế của TourVera Input: B/S/U/V."""
     result = {"eligible": 0, "added": 0, "skipped": 0, "errors": 0}
     added_rows = []
     try:
@@ -325,6 +351,14 @@ def _process_tour_current_input(client, cfg: dict, employee_map: dict, catalog: 
             minutes = _tour_note_late_minutes(row.get(note_col, ""))
 
         if minutes is None or minutes < threshold:
+            continue
+
+        event_date = None
+        if in_col is not None:
+            event_date = _tour_event_date(row.get(in_col, ""))
+        if event_date is None and out_col is not None:
+            event_date = _tour_event_date(row.get(out_col, ""))
+        if event_date != today:
             continue
 
         result["eligible"] += 1

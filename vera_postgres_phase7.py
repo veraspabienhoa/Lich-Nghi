@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import os
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import pandas as pd
 from sqlalchemy import text
@@ -127,13 +127,30 @@ def _mirror_failed(result: Any) -> bool:
     return False
 
 
-def commit(vpg, new_df: pd.DataFrame, mirror_fn: Callable[[], Any], operation: str = "update"):
-    """Write full TichLuy snapshot to PostgreSQL first, then mirror Sheets.
+def _as_frame(value: Any, fallback: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(value, pd.DataFrame):
+        return value.copy()
+    if value is None:
+        return fallback.copy()
+    try:
+        return pd.DataFrame(value)
+    except Exception:
+        return fallback.copy()
 
-    Legacy mirror functions invalidate dataset caches after changing Sheets. Therefore
-    the same PostgreSQL snapshot is promoted once more after a successful mirror so
-    the durable row finishes current/non-stale. If mirror fails, the previous snapshot
-    is restored.
+
+def commit(
+    vpg,
+    new_df: pd.DataFrame,
+    mirror_fn: Callable[[], Any],
+    operation: str = "update",
+    confirm_fn: Optional[Callable[[], pd.DataFrame]] = None,
+):
+    """Write intended TichLuy snapshot to PostgreSQL first, then mirror Sheets.
+
+    After a successful mirror, ``confirm_fn`` may read back the exact Sheet snapshot.
+    That final confirmation is useful for physical ``__sheet_row`` values and custom
+    columns. If mirror or confirmation fails, the previous PostgreSQL snapshot is
+    restored.
     """
     if not is_active(vpg):
         return mirror_fn()
@@ -162,15 +179,19 @@ def commit(vpg, new_df: pd.DataFrame, mirror_fn: Callable[[], Any], operation: s
             if _mirror_failed(result):
                 raise Phase7MirrorError(f"Google Sheets TichLuy mirror returned failure for {operation}")
 
-            # Mirror may have called vpg.invalidate_dataset('tichluy'). Re-promote the
-            # already-committed intended snapshot so normal reads remain PostgreSQL-primary.
+            confirmed_df = new_df
+            if callable(confirm_fn):
+                confirmed_df = _as_frame(confirm_fn(), new_df)
+
+            # Mirror may invalidate the durable dataset. Promote the exact confirmed
+            # snapshot so normal reads finish current/non-stale.
             vpg.write_primary_dataset(
                 DATASET_KEY,
-                new_df,
+                confirmed_df,
                 source_version="phase7_mirror_confirmed",
                 source_system="postgres_primary",
             )
-            _event(vpg, "phase7_sheet_mirror_ok", f"{operation}; rows={len(new_df)}")
+            _event(vpg, "phase7_sheet_mirror_ok", f"{operation}; rows={len(confirmed_df)}")
             return result
         except Exception as exc:
             restore_error = None
@@ -228,8 +249,9 @@ def install(vpg) -> bool:
 
     vpg.phase7_tichluy_is_enabled = lambda: is_active(vpg)
     vpg.phase7_tichluy_write_backend = lambda: write_backend(vpg)
-    vpg.phase7_tichluy_commit = lambda new_df, mirror_fn, operation="update": commit(
-        vpg, new_df, mirror_fn, operation=operation
+    vpg.phase7_tichluy_commit = (
+        lambda new_df, mirror_fn, operation="update", confirm_fn=None:
+        commit(vpg, new_df, mirror_fn, operation=operation, confirm_fn=confirm_fn)
     )
     vpg.get_phase7_status = lambda: get_status(vpg)
     vpg.ensure_phase7_schema = lambda: _ensure_schema(vpg)

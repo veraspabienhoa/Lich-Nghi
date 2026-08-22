@@ -1,23 +1,27 @@
-# V92.13.0 - PostgreSQL Phase 8 debt/payroll primary writes + Phase 7/6/5/4 (2026-08-23)
-"""VERA SPA V92.13.0.
+# V92.14.0 - PostgreSQL Phase 9 default cutover + Phase 8/7/6/5/4 (2026-08-23)
+"""VERA SPA V92.14.0.
 
-Giữ nguyên V92.6.99, MENU V92.6.101 và PostgreSQL Phase 2/3/4/5/6/7.
+Giữ nguyên V92.6.99, MENU V92.6.101 và PostgreSQL Phase 2/3/4/5/6/7/8.
 Phase 4: CRUD Nhân viên + Lịch nghỉ ghi PostgreSQL trước, Google Sheets mirror.
 Phase 5: credentials + leave_primary đọc PostgreSQL normalized làm nguồn chính.
 Phase 6: TichLuy + NoViPham + PayrollHistory đọc PostgreSQL durable làm nguồn chính.
 Phase 7: TichLuy ghi PostgreSQL trước; Google Sheets chỉ là mirror đồng bộ.
 Phase 8: NoViPham + PayrollHistory ghi PostgreSQL trước, Google Sheets mirror;
 bao gồm tạo/sửa/xóa nghĩa vụ, kết chuyển nợ sau lương, lưu/ghi đè/xóa lịch sử lương.
+Phase 9: khi PostgreSQL đã cấu hình và VERA_DATA_BACKEND chưa được đặt rõ,
+5 dataset nghiệp vụ đã migrate mặc định chạy ở chế độ postgres thay vì dual.
+Các sheet cấu hình/UI/maintenance chưa migrate vẫn giữ nguyên đường Google Sheets
+trực tiếp của core và không bị thay đổi bởi cutover dataset này.
 
 Rollback tức thời:
-- VERA_PHASE4_WRITE_BACKEND=sheets -> write-path Nhân viên/Lịch nghỉ về Sheets.
-- VERA_PHASE5_READ_BACKEND=sheets  -> read-path Nhân viên/Lịch nghỉ về Sheets.
-- VERA_PHASE6_READ_BACKEND=sheets  -> read-path TichLuy/Nợ/Lương về Sheets.
+- VERA_DATA_BACKEND=dual             -> quay 5 dataset về chế độ chuyển tiếp.
+- VERA_DATA_BACKEND=sheets           -> quay lớp dữ liệu dùng chung về Sheets.
+- VERA_PHASE4_WRITE_BACKEND=sheets   -> write-path Nhân viên/Lịch nghỉ về Sheets.
+- VERA_PHASE5_READ_BACKEND=sheets    -> read-path Nhân viên/Lịch nghỉ về Sheets.
+- VERA_PHASE6_READ_BACKEND=sheets    -> read-path TichLuy/Nợ/Lương về Sheets.
 - VERA_PHASE7_TICHLUY_WRITE_BACKEND=sheets -> write-path TichLuy về Sheets.
-- VERA_PHASE8_WRITE_BACKEND=sheets -> write-path NoViPham/PayrollHistory về Sheets.
+- VERA_PHASE8_WRITE_BACKEND=sheets   -> write-path NoViPham/PayrollHistory về Sheets.
 
-VERA_DATA_BACKEND vẫn mặc định dual vì các cấu hình/UI/maintenance và một số vùng
-phụ trợ còn dùng Google Sheets; các phần này sẽ được chuyển trong phase kế tiếp.
 Route, PAGE_FEATURE_KEYS, PAGE_SLUGS, phân quyền, giao diện và nghiệp vụ không đổi.
 Hai Google Sheet cũ và ID của chúng không bị thay đổi.
 """
@@ -29,12 +33,16 @@ try:
     import vera_postgres as _vpg_runtime
     from vera_postgres_phase2 import install as _install_vpg_phase2
 
+    # Phase 9: 5 dataset nghiệp vụ đã hoàn tất read/write cutover qua các Phase 4-8.
+    # Chỉ tự chọn postgres khi deployment không đặt VERA_DATA_BACKEND rõ ràng.
+    # Các vùng core còn gọi Google Sheets trực tiếp (config/UI/maintenance) không
+    # đi qua biến này nên tiếp tục hoạt động bình thường trong các phase tiếp theo.
     if (
         callable(getattr(_vpg_runtime, "is_enabled", None))
         and _vpg_runtime.is_enabled()
         and not str(_os.getenv("VERA_DATA_BACKEND", "") or "").strip()
     ):
-        _os.environ["VERA_DATA_BACKEND"] = "dual"
+        _os.environ["VERA_DATA_BACKEND"] = "postgres"
     _install_vpg_phase2(_vpg_runtime)
 except Exception:
     _vpg_runtime = None
@@ -157,7 +165,7 @@ else:
 _source_v92130 = _source_v92130.replace("MENU CHỨC NĂNG", "MENU")
 _first_line_v92130, _sep_v92130, _rest_v92130 = _source_v92130.partition("\n")
 _source_v92130 = (
-    "# V92.13.0 - PostgreSQL Phase 8 debt/payroll primary writes + Phase 7/6/5/4 (2026-08-23)\n"
+    "# V92.14.0 - PostgreSQL Phase 9 default cutover + Phase 8/7/6/5/4 (2026-08-23)\n"
     + _rest_v92130
 )
 

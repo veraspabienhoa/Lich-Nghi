@@ -1,4 +1,4 @@
-# V92.6.89 - Kiểm tra trùng đơn + điều kiện 3 tháng + thống kê nghỉ + editor nhân sự + pin UI (2026-08-22)
+# V92.6.94 - Bo loc Quan ly lich nghi them Ngay mai/Tuan sau/Thang sau (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -2949,6 +2949,75 @@ FRONTDESK_MANAGEABLE_ROLES = {"nhanvien", "locker", "tapvu"}
 # Phân quyền theo từng chức năng: Admin có thể cấu hình theo vai trò và ghi đè theo từng tài khoản.
 FEATURE_PERMISSION_WORKSHEET = "PhanQuyenChucNang"
 FEATURE_PERMISSION_HEADERS = ["Phạm vi", "Đối tượng", "Chức năng", "Cho phép", "Ngày cập nhật", "Giờ cập nhật", "Người cập nhật"]
+
+# V92.6.90 - Admin có thể chia sẻ RIÊNG từng bảng nhập liệu cho đúng một tài khoản.
+# Quyền chia sẻ là quyền bổ sung (additive): không làm thay đổi cấu hình quyền vai trò/tài khoản hiện hữu.
+SHARED_INPUT_WORKSHEET_V92690 = "ChiaSeBangNhapLieu"
+SHARED_INPUT_HEADERS_V92690 = [
+    "Mã chia sẻ", "Mã bảng", "Bảng nhập liệu", "Tài khoản", "Trạng thái",
+    "Từ ngày", "Đến ngày", "Ghi chú", "Ngày cấp", "Giờ cấp", "Người cấp",
+    "Ngày thu hồi", "Giờ thu hồi", "Người thu hồi",
+]
+SHARED_INPUT_ACTIVE_V92690 = "ACTIVE"
+SHARED_INPUT_REVOKED_V92690 = "REVOKED"
+
+# Chỉ liệt kê những khu vực có thao tác NHẬP + LƯU rõ ràng.
+# Mỗi form tự mang theo đúng quyền vào trang + quyền lưu cần thiết; không tự cấp quyền duyệt/xóa/export.
+SHAREABLE_INPUT_FORMS_V92690 = {
+    "leave_registration": {
+        "label": "Đăng ký lịch nghỉ",
+        "page": "📅 Đăng ký nghỉ phép",
+        "features": ("leave", "leave_create"),
+        "scope_note": "Cho phép nhập và ghi lịch nghỉ theo đúng quy tắc nghiệp vụ hiện hành.",
+    },
+    "long_leave_request": {
+        "label": "Đơn Nghỉ Phép năm / Nghỉ dài hạn",
+        "page": "🏖️ Phép năm - Làm đẹp",
+        "features": ("long_leave", "long_leave_form"),
+        "scope_note": "Chỉ cho phép tạo/gửi đơn; không tự cấp quyền xem thống kê hoặc duyệt đơn.",
+    },
+    "staff_schedule_plan": {
+        "label": "Kế hoạch Đổi ca / Nghỉ dài hạn / Nghỉ việc",
+        "page": "⏰ Quản lý ca làm việc",
+        "features": ("shift", "shift_plan_edit"),
+        "scope_note": "Chỉ cho phép nhập/lưu/hủy kế hoạch hẹn ngày; không tự cấp quyền sửa bảng phân ca, cấu hình ca, clear hay import.",
+    },
+    "employee_add": {
+        "label": "Thêm nhân viên",
+        "page": "➕ Thêm nhân viên",
+        "features": ("employee_add", "employee_add_save"),
+        "scope_note": "Cho phép mở form Thêm nhân viên và lưu hồ sơ mới.",
+    },
+    "employee_profile_update": {
+        "label": "Cập nhật hồ sơ nhân viên",
+        "page": "🏷️ Trạng thái nhân viên",
+        "features": ("employee_edit", "employee_edit_save"),
+        "scope_note": "Cho phép chỉnh và lưu hồ sơ; không tự cấp quyền xóa tài khoản.",
+    },
+    "employment_status_update": {
+        "label": "Cập nhật trạng thái làm việc",
+        "page": "🏷️ Trạng thái nhân viên",
+        "features": ("employee_edit", "employment_status", "employment_status_edit"),
+        "scope_note": "Cho phép thay đổi trạng thái làm việc theo các giới hạn nghiệp vụ hiện hành.",
+    },
+    "account_lock": {
+        "label": "Khóa / Mở khóa đăng nhập",
+        "page": "🔒 Khóa đăng nhập",
+        "features": ("account_lock", "account_lock_edit"),
+        "scope_note": "Cho phép thao tác đúng bảng Khóa đăng nhập.",
+    },
+    "registration_lock": {
+        "label": "Khóa / Mở quyền đăng ký LNP",
+        "page": "🔐 Khóa đăng ký LNP",
+        "features": ("registration_lock", "registration_lock_edit"),
+        "scope_note": "Cho phép thao tác đúng bảng Khóa đăng ký LNP.",
+    },
+}
+
+SHARED_INPUT_FEATURE_TO_FORMS_V92690 = {}
+for _form_key_v92690, _form_cfg_v92690 in SHAREABLE_INPUT_FORMS_V92690.items():
+    for _feature_v92690 in _form_cfg_v92690.get("features", ()):
+        SHARED_INPUT_FEATURE_TO_FORMS_V92690.setdefault(_feature_v92690, set()).add(_form_key_v92690)
 FEATURE_DEFINITIONS = {
     # ===== QUYỀN TRUY CẬP TRANG =====
     "tour": "🧭 Xem Bảng tour",
@@ -2960,7 +3029,7 @@ FEATURE_DEFINITIONS = {
     "shift": "⏰ Xem Quản lý ca làm việc",
     "staff_list": "👥 Xem Danh sách nhân viên",
     "employee_add": "➕ Vào trang Thêm nhân viên",
-    "employee_edit": "✏️ Vào trang Cập nhật trạng thái nhân viên",
+    "employee_edit": "✏️ Vào trang Trạng thái nhân viên",
     "employment_status": "🏷️ Vào chức năng Trạng thái làm việc",
     "employee_delete": "🗑️ Vào chức năng Xóa nhân viên",
     "account_lock": "🔒 Vào trang Khóa đăng nhập",
@@ -3004,6 +3073,7 @@ FEATURE_DEFINITIONS = {
     "shift_definition_edit": "🛠️ Ca làm việc · Tạo/Sửa/Xóa ca",
     "shift_break_config_edit": "⏱️ Ca làm việc · Cấu hình nghỉ giữa ca",
     "shift_assignment_edit": "👥 Ca làm việc · Sửa phân ca",
+    "shift_plan_edit": "🗓️ Ca làm việc · Nhập/Lưu kế hoạch hẹn ngày",
     "shift_assignment_clear": "🧹 Ca làm việc · Clear phân ca",
     "shift_export_pdf": "📄 Ca làm việc · Export PDF thẻ phân ca",
     "shift_import": "📤 Ca làm việc · Import phân ca",
@@ -3060,7 +3130,7 @@ FEATURE_PERMISSION_GROUPS = {
     ],
     "⏰ Quản lý ca làm việc": [
         "shift", "shift_definition_edit", "shift_break_config_edit",
-        "shift_assignment_edit", "shift_assignment_clear",
+        "shift_assignment_edit", "shift_plan_edit", "shift_assignment_clear",
         "shift_export_pdf", "shift_import",
     ],
     "👥 Danh sách nhân viên": [
@@ -6481,6 +6551,228 @@ def _clear_feature_permission_cache():
     except Exception:
         pass
 
+def _get_shared_input_worksheet_v92690():
+    """Worksheet lưu quyền chia sẻ form riêng theo tài khoản."""
+    try:
+        client = get_gspread_client()
+        if not client:
+            return None
+        ss = client.open_by_key(SHEET_DU_PHONG_ID)
+        ws = _get_or_create_worksheet(
+            ss, SHARED_INPUT_WORKSHEET_V92690,
+            rows=3000, cols=len(SHARED_INPUT_HEADERS_V92690),
+        )
+        header = _gs_call_with_backoff(ws.row_values, 1)
+        if header[:len(SHARED_INPUT_HEADERS_V92690)] != SHARED_INPUT_HEADERS_V92690:
+            gspread_update_range(
+                ws,
+                f"A1:N1",
+                [SHARED_INPUT_HEADERS_V92690],
+            )
+        return ws
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_shared_input_grants_v92690():
+    """Đọc các quyền chia sẻ form. Trả DataFrame, không phụ thuộc quyền hiện tại."""
+    cols = list(SHARED_INPUT_HEADERS_V92690)
+    try:
+        ws = _get_shared_input_worksheet_v92690()
+        if ws is None:
+            return pd.DataFrame(columns=cols)
+        values = _gs_call_with_backoff(ws.get_all_values)
+        if not values or len(values) < 2:
+            return pd.DataFrame(columns=cols)
+        header = [str(x).strip() for x in values[0]]
+        rows = []
+        for rr in values[1:]:
+            row = list(rr) + [""] * max(0, len(header) - len(rr))
+            rows.append({header[i]: row[i] for i in range(min(len(header), len(row)))})
+        df = pd.DataFrame(rows)
+        for c in cols:
+            if c not in df.columns:
+                df[c] = ""
+        df["__row"] = range(2, 2 + len(df))
+        return df[cols + ["__row"]].copy()
+    except Exception:
+        return pd.DataFrame(columns=cols + ["__row"])
+
+
+def _clear_shared_input_cache_v92690():
+    try:
+        load_shared_input_grants_v92690.clear()
+    except Exception:
+        pass
+
+
+def _parse_shared_input_date_v92690(value):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except Exception:
+            pass
+    try:
+        parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
+        if pd.notna(parsed):
+            return parsed.date()
+    except Exception:
+        pass
+    return None
+
+
+def _shared_input_row_active_v92690(row, today=None):
+    today = today or get_vn_today()
+    status = str(row.get("Trạng thái", "") or "").strip().upper()
+    if status != SHARED_INPUT_ACTIVE_V92690:
+        return False
+    start_d = _parse_shared_input_date_v92690(row.get("Từ ngày", ""))
+    end_d = _parse_shared_input_date_v92690(row.get("Đến ngày", ""))
+    if start_d is not None and today < start_d:
+        return False
+    if end_d is not None and today > end_d:
+        return False
+    return True
+
+
+def shared_input_grants_for_user_v92690(username=None, active_only=True):
+    username = str(
+        username if username is not None else st.session_state.get("current_user", "")
+    ).strip()
+    user_key = normalize_login_name(username)
+    if not user_key:
+        return pd.DataFrame(columns=SHARED_INPUT_HEADERS_V92690 + ["__row"])
+    df = load_shared_input_grants_v92690()
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(columns=SHARED_INPUT_HEADERS_V92690 + ["__row"])
+    mask = df["Tài khoản"].astype(str).apply(normalize_login_name).eq(user_key)
+    out = df[mask].copy()
+    if active_only and not out.empty:
+        out = out[out.apply(_shared_input_row_active_v92690, axis=1)].copy()
+    return out
+
+
+def has_shared_input_form_access_v92690(form_key, username=None):
+    form_key = str(form_key or "").strip()
+    if form_key not in SHAREABLE_INPUT_FORMS_V92690:
+        return False
+    grants = shared_input_grants_for_user_v92690(username=username, active_only=True)
+    if grants.empty:
+        return False
+    return grants["Mã bảng"].astype(str).str.strip().eq(form_key).any()
+
+
+def has_shared_input_feature_access_v92690(feature, username=None):
+    feature = str(feature or "").strip()
+    form_keys = SHARED_INPUT_FEATURE_TO_FORMS_V92690.get(feature, set())
+    if not form_keys:
+        return False
+    return any(has_shared_input_form_access_v92690(k, username=username) for k in form_keys)
+
+
+def _shared_input_grant_id_v92690(form_key, username):
+    seed = (
+        f"{form_key}|{normalize_login_name(username)}|"
+        f"{datetime.now(VN_TZ).strftime('%Y%m%d%H%M%S%f')}|{secrets.token_hex(3)}"
+    )
+    return "SHR-" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:14].upper()
+
+
+def grant_shared_input_form_v92690(form_key, username, granted_by, start_date=None, end_date=None, note=""):
+    form_key = str(form_key or "").strip()
+    username = str(username or "").strip()
+    if form_key not in SHAREABLE_INPUT_FORMS_V92690:
+        return False, "Bảng nhập liệu không hợp lệ.", ""
+    if not username:
+        return False, "Vui lòng chọn nhân viên/tài khoản được chia sẻ.", ""
+    start_date = start_date or get_vn_today()
+    if end_date is not None and end_date < start_date:
+        return False, "Ngày hết quyền không được nhỏ hơn ngày bắt đầu.", ""
+
+    existing = shared_input_grants_for_user_v92690(username, active_only=True)
+    if not existing.empty and existing["Mã bảng"].astype(str).str.strip().eq(form_key).any():
+        hit = existing[existing["Mã bảng"].astype(str).str.strip().eq(form_key)].iloc[-1]
+        return True, "Tài khoản này đã có quyền chia sẻ đang hiệu lực cho bảng đã chọn.", str(hit.get("Mã chia sẻ", ""))
+
+    ws = _get_shared_input_worksheet_v92690()
+    if ws is None:
+        return False, "Không kết nối được Google Sheets để lưu quyền chia sẻ.", ""
+    now = datetime.now(VN_TZ)
+    grant_id = _shared_input_grant_id_v92690(form_key, username)
+    cfg = SHAREABLE_INPUT_FORMS_V92690[form_key]
+    row = [
+        grant_id,
+        form_key,
+        cfg.get("label", form_key),
+        username,
+        SHARED_INPUT_ACTIVE_V92690,
+        start_date.strftime("%d/%m/%Y") if start_date else "",
+        end_date.strftime("%d/%m/%Y") if end_date else "",
+        str(note or "").strip(),
+        now.strftime("%d/%m/%Y"),
+        now.strftime("%H:%M:%S"),
+        str(granted_by or "").strip(),
+        "", "", "",
+    ]
+    try:
+        _gs_call_with_backoff(ws.append_row, row, value_input_option="USER_ENTERED")
+        _clear_shared_input_cache_v92690()
+        return True, f"Đã chia sẻ bảng '{cfg.get('label', form_key)}' cho {username}.", grant_id
+    except Exception as e:
+        return False, f"Lỗi lưu quyền chia sẻ: {e}", ""
+
+
+def revoke_shared_input_grant_v92690(grant_id, revoked_by):
+    grant_id = str(grant_id or "").strip()
+    if not grant_id:
+        return False, "Chưa chọn quyền cần thu hồi."
+    df = load_shared_input_grants_v92690()
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return False, "Không tìm thấy dữ liệu chia sẻ."
+    hit = df[df["Mã chia sẻ"].astype(str).str.strip().eq(grant_id)]
+    if hit.empty:
+        return False, "Không tìm thấy mã chia sẻ."
+    row_idx = int(hit.iloc[-1].get("__row", 0) or 0)
+    if row_idx < 2:
+        return False, "Dòng dữ liệu chia sẻ không hợp lệ."
+    ws = _get_shared_input_worksheet_v92690()
+    if ws is None:
+        return False, "Không kết nối được Google Sheets."
+    now = datetime.now(VN_TZ)
+    try:
+        # E = Trạng thái; L:M:N = Ngày/Giờ/Người thu hồi.
+        gspread_update_range(ws, f"E{row_idx}:E{row_idx}", [[SHARED_INPUT_REVOKED_V92690]])
+        gspread_update_range(
+            ws, f"L{row_idx}:N{row_idx}",
+            [[now.strftime("%d/%m/%Y"), now.strftime("%H:%M:%S"), str(revoked_by or "").strip()]],
+        )
+        _clear_shared_input_cache_v92690()
+        return True, "Đã thu hồi quyền chia sẻ."
+    except Exception as e:
+        return False, f"Lỗi thu hồi quyền chia sẻ: {e}"
+
+
+def shared_input_labels_for_current_page_v92690(page_name, username=None):
+    grants = shared_input_grants_for_user_v92690(username=username, active_only=True)
+    if grants.empty:
+        return []
+    labels = []
+    for _, rr in grants.iterrows():
+        form_key = str(rr.get("Mã bảng", "") or "").strip()
+        cfg = SHAREABLE_INPUT_FORMS_V92690.get(form_key, {})
+        if cfg.get("page") == page_name:
+            labels.append(str(cfg.get("label", form_key)))
+    return list(dict.fromkeys([x for x in labels if x]))
+
+
 def has_feature_access(feature, role=None, username=None):
     """Kiểm tra quyền theo thứ tự: Admin -> tài khoản -> vai trò -> mặc định hệ thống."""
     feature = str(feature or '').strip()
@@ -6489,6 +6781,10 @@ def has_feature_access(feature, role=None, username=None):
     role = str(role if role is not None else st.session_state.get('current_role', '')).strip().lower()
     username = str(username if username is not None else st.session_state.get('current_user', '')).strip()
     if role == 'admin':
+        return True
+    # V92.6.90: quyền chia sẻ form là quyền bổ sung độc lập, có thể mở đúng bảng nhập/lưu
+    # ngay cả khi vai trò hoặc quyền riêng thông thường không có feature đó.
+    if has_shared_input_feature_access_v92690(feature, username=username):
         return True
     role_cfg, account_cfg = load_feature_permissions()
     account_key = (normalize_login_name(username), feature)
@@ -11763,7 +12059,65 @@ def build_leave_reason_catalog(source_df=None):
     return catalog
 
 
-def _leave_notice_policy_item(reason, source_df=None):
+def _legacy_leave_policy_alias_candidates_v92691(reason, target_date=None):
+    """
+    Tên lịch sử trong MainData có thể khác tên chuẩn hiện tại của LoaiNghi.
+    Trả danh sách tên chuẩn để rule engine vẫn kiểm đúng bản ghi cũ.
+
+    Ví dụ đang tồn tại trong MainData:
+      - Nghỉ phép -> Nghỉ CÓ phép / Nghỉ CUỐI TUẦN CÓ phép
+      - Về sớm CP -> Về sớm CÓ phép / Về sớm CUỐI TUẦN CÓ phép
+      - Đi trễ CP -> Đi trễ CÓ phép / Đi trễ CUỐI TUẦN CÓ phép
+    """
+    key = normalize_login_name(clean_leave_reason_display(reason))
+    if not key:
+        return []
+
+    parsed_date = _parse_vn_date(target_date) if target_date is not None else None
+    is_weekend = bool(parsed_date is not None and parsed_date.weekday() >= 5)
+    candidates = []
+
+    def add(value):
+        if value and value not in candidates:
+            candidates.append(value)
+
+    # Nghỉ nguyên ngày. Không ánh xạ sang "Nghỉ Phép năm" vì đó là nghiệp vụ khác.
+    if key in {"nghi phep", "nghi co phep", "nghi cp"}:
+        add("Nghỉ CUỐI TUẦN CÓ phép" if is_weekend else "Nghỉ CÓ phép")
+        add("Nghỉ CÓ phép")
+        add("Nghỉ CUỐI TUẦN CÓ phép")
+    elif "nghi" in key and "co phep" in key and "cuoi tuan" in key:
+        add("Nghỉ CUỐI TUẦN CÓ phép")
+    elif "nghi" in key and "khong phep" in key:
+        if "cuoi tuan" in key or is_weekend:
+            add("Nghỉ CUỐI TUẦN KHÔNG phép")
+        add("Nghỉ KHÔNG phép")
+        add("Nghỉ CUỐI TUẦN KHÔNG phép")
+
+    # Về sớm.
+    if ("ve som" in key) and ("co phep" in key or key.endswith(" cp") or key == "ve som cp"):
+        add("Về sớm CUỐI TUẦN CÓ phép" if is_weekend else "Về sớm CÓ phép")
+        add("Về sớm CÓ phép")
+        add("Về sớm CUỐI TUẦN CÓ phép")
+    elif "ve som" in key and "khong phep" in key:
+        add("Về sớm CUỐI TUẦN KHÔNG phép" if (is_weekend or "cuoi tuan" in key) else "Về sớm KHÔNG phép")
+        add("Về sớm KHÔNG phép")
+        add("Về sớm CUỐI TUẦN KHÔNG phép")
+
+    # Đi trễ.
+    if ("di tre" in key) and ("co phep" in key or key.endswith(" cp") or key == "di tre cp"):
+        add("Đi trễ CUỐI TUẦN CÓ phép" if is_weekend else "Đi trễ CÓ phép")
+        add("Đi trễ CÓ phép")
+        add("Đi trễ CUỐI TUẦN CÓ phép")
+    elif "di tre" in key and "khong phep" in key:
+        add("Đi trễ CUỐI TUẦN KHÔNG phép" if (is_weekend or "cuoi tuan" in key) else "Đi trễ KHÔNG phép")
+        add("Đi trễ KHÔNG phép")
+        add("Đi trễ CUỐI TUẦN KHÔNG phép")
+
+    return candidates
+
+
+def _leave_notice_policy_item(reason, source_df=None, target_date=None):
     catalog = build_leave_reason_catalog(
         source_df if isinstance(source_df, pd.DataFrame)
         else globals().get("df_loai_nghi", pd.DataFrame())
@@ -11775,6 +12129,16 @@ def _leave_notice_policy_item(reason, source_df=None):
     for candidate in catalog.values():
         if normalize_login_name(candidate.get("name", "")) == wanted:
             return candidate
+
+    # V92.6.91: compatibility cho tên lịch sử MainData không còn khớp LoaiNghi.
+    for alias_name in _legacy_leave_policy_alias_candidates_v92691(reason, target_date=target_date):
+        alias_item = catalog.get(normalize_leave_reason(alias_name))
+        if alias_item:
+            return alias_item
+        alias_key = normalize_login_name(alias_name)
+        for candidate in catalog.values():
+            if normalize_login_name(candidate.get("name", "")) == alias_key:
+                return candidate
     return None
 
 
@@ -11930,7 +12294,7 @@ def validate_leave_reason_catalog_access(reason, target_date, role=None):
     if role == "admin":
         return True, ""
 
-    item = _leave_notice_policy_item(reason)
+    item = _leave_notice_policy_item(reason, target_date=target_date)
     if not item:
         return False, f"Không tìm thấy Lý do nghỉ '{clean_leave_reason_display(reason)}' trong LoaiNghi."
 
@@ -11967,7 +12331,7 @@ def validate_leave_registration_notice(reason, target_date, role=None, now_vn=No
     if target_date < today:
         return False, "Không được đăng ký lịch ở ngày quá khứ."
 
-    item = _leave_notice_policy_item(reason)
+    item = _leave_notice_policy_item(reason, target_date=target_date)
     if not item:
         return False, f"Không tìm thấy cấu hình LoaiNghi cho '{clean_leave_reason_display(reason)}'."
 
@@ -12027,7 +12391,7 @@ def validate_leave_cancel_notice(reason, target_date, role=None, today=None):
     if target_date < today:
         return False, "Không được hủy/thay đổi lịch trong quá khứ."
 
-    item = _leave_notice_policy_item(reason)
+    item = _leave_notice_policy_item(reason, target_date=target_date)
     if not item:
         return False, f"Không tìm thấy cấu hình LoaiNghi cho '{clean_leave_reason_display(reason)}'."
 
@@ -14527,40 +14891,40 @@ def validate_employee_leave_change_permission(
     old_dt = pd.to_datetime(original_row.get("Ngày"), errors="coerce", dayfirst=True)
     old_date = old_dt.date() if pd.notna(old_dt) else None
 
-    # V92.6.83 - Ngoại lệ sửa lịch NGÀY MAI: nếu nhân viên đã có một ngày nghỉ Có phép
-    # (Số ngày tính=1.0), được đổi ngay trên bảng và vẫn giữ nguyên ngày thành:
-    #   - một lý do KHÔNG phép; hoặc
-    #   - một lý do CÓ phép 0.5 ngày.
-    # Ngoại lệ này chỉ bỏ qua mốc Trước N ngày của bản ghi cũ/mới; role + thứ/ngày
-    # vẫn được validate_schedule_edit_permission kiểm tra theo LoaiNghi cột G/H.
-    _next_day_conversion_v92683 = False
-    if edited_row is not None and old_date == (today + timedelta(days=1)):
-        _tmp_new_dt_v92683 = pd.to_datetime(edited_row.get("Ngày"), errors="coerce", dayfirst=True)
-        _tmp_new_date_v92683 = _tmp_new_dt_v92683.date() if pd.notna(_tmp_new_dt_v92683) else None
-        _tmp_new_reason_v92683 = edited_row.get("Lý do nghỉ", edited_row.get("Loại nghỉ", old_reason))
-        _tmp_item_v92683 = _leave_notice_policy_item(_tmp_new_reason_v92683) or {}
+    # V92.6.91 - Ngoại lệ sửa trực tiếp lịch tương lai khi còn ít nhất 1 ngày:
+    # Nếu bản ghi cũ là CÓ phép 1.0 ngày, nhân viên được giữ nguyên NGÀY + NHÂN VIÊN
+    # và đổi sang KHÔNG phép hoặc một lý do CÓ phép 0.5 ngày.
+    # Đây là thay đổi loại nghỉ của ngày đã đăng ký, không tạo thêm ngày nghỉ mới.
+    # Chỉ bỏ qua mốc thời gian I/J/K + L/M/N; cột G/H LoaiNghi vẫn được kiểm ở
+    # validate_schedule_edit_permission().
+    _future_same_day_conversion_v92691 = False
+    if edited_row is not None and old_date is not None and old_date >= (today + timedelta(days=1)):
+        _tmp_new_dt_v92691 = pd.to_datetime(edited_row.get("Ngày"), errors="coerce", dayfirst=True)
+        _tmp_new_date_v92691 = _tmp_new_dt_v92691.date() if pd.notna(_tmp_new_dt_v92691) else None
+        _tmp_new_reason_v92691 = edited_row.get("Lý do nghỉ", edited_row.get("Loại nghỉ", old_reason))
+        _tmp_item_v92691 = _leave_notice_policy_item(_tmp_new_reason_v92691, target_date=old_date) or {}
         try:
-            _tmp_new_days_v92683 = float(_tmp_item_v92683.get("days", 0) or 0)
+            _tmp_new_days_v92691 = float(_tmp_item_v92691.get("days", 0) or 0)
         except Exception:
-            _tmp_new_days_v92683 = 0.0
+            _tmp_new_days_v92691 = 0.0
         try:
-            _tmp_old_days_v92683 = float(pd.to_numeric(original_row.get("Số ngày tính", 0), errors="coerce"))
+            _tmp_old_days_v92691 = float(pd.to_numeric(original_row.get("Số ngày tính", 0), errors="coerce"))
         except Exception:
-            _tmp_old_days_v92683 = 0.0
-        _next_day_conversion_v92683 = bool(
-            _tmp_new_date_v92683 == old_date
+            _tmp_old_days_v92691 = 0.0
+        _future_same_day_conversion_v92691 = bool(
+            _tmp_new_date_v92691 == old_date
             and is_employee_co_phep_leave_reason(old_reason)
-            and abs(_tmp_old_days_v92683 - 1.0) < 1e-9
+            and abs(_tmp_old_days_v92691 - 1.0) < 1e-9
             and (
-                is_employee_khong_phep_leave_reason(_tmp_new_reason_v92683)
+                is_employee_khong_phep_leave_reason(_tmp_new_reason_v92691)
                 or (
-                    is_employee_co_phep_leave_reason(_tmp_new_reason_v92683)
-                    and abs(_tmp_new_days_v92683 - 0.5) < 1e-9
+                    is_employee_co_phep_leave_reason(_tmp_new_reason_v92691)
+                    and abs(_tmp_new_days_v92691 - 0.5) < 1e-9
                 )
             )
         )
 
-    if not _next_day_conversion_v92683:
+    if not _future_same_day_conversion_v92691:
         cancel_ok, cancel_msg = validate_leave_cancel_notice(
             old_reason, old_date, role=role_now, today=today
         )
@@ -14632,7 +14996,7 @@ def validate_employee_leave_change_permission(
     elif not old_is_video:
         return False, "Lý do hiện tại không thuộc nhóm Nhân viên/Leader được phép sửa."
 
-    if not _next_day_conversion_v92683:
+    if not _future_same_day_conversion_v92691:
         register_ok, register_msg = validate_leave_registration_notice(
             new_reason,
             new_date,
@@ -14643,8 +15007,8 @@ def validate_employee_leave_change_permission(
             return False, register_msg
 
     return True, (
-        "Được phép đổi lịch ngày mai trong cùng ngày đã đăng ký."
-        if _next_day_conversion_v92683 else ""
+        "Được phép đổi lịch tương lai trong cùng ngày đã đăng ký (còn ít nhất 1 ngày)."
+        if _future_same_day_conversion_v92691 else ""
     )
 
 def validate_schedule_delete_permission(original_row, role, current_user=None, today=None):
@@ -14716,7 +15080,7 @@ def validate_schedule_edit_permission(original_row, edited_row, role, today=None
     # V92.6.60: cột G/H của LoaiNghi là luật nền cho cả thao tác sửa trực tiếp,
     # kể cả Admin. Admin vẫn giữ quyền bỏ qua thời hạn I/J/K và L/M/N như trước,
     # nhưng không được đổi sang một lý do sai thứ/ngày hoặc sai role.
-    _edit_policy_item_v92660 = _leave_notice_policy_item(new_reason)
+    _edit_policy_item_v92660 = _leave_notice_policy_item(new_reason, target_date=new_date)
     if not _edit_policy_item_v92660:
         return False, f"Không tìm thấy Lý do nghỉ '{clean_leave_reason_display(new_reason)}' trong LoaiNghi."
     _edit_allowed_roles_v92660 = _leave_policy_role_tokens(
@@ -18524,7 +18888,7 @@ SPECIAL_FILTER_BOX_UI_KEY_V92689 = "special_filter_box_ui_v92689"
 
 def _special_filter_box_default_v92689():
     one = {
-        "bg_color": "#FAD18F", "text_color": "#000000", "border_color": "#D88900",
+        "bg_color": "#F5A627", "text_color": "#000000", "border_color": "#D88900",
         "border_width": 2, "radius": 10, "font_weight": 700,
     }
     return {"desktop": dict(one), "mobile": dict(one)}
@@ -24589,7 +24953,7 @@ PAGE_SLUGS = {
     "⏰ Quản lý ca làm việc": "thiet-lap-ca",
     "👥 Danh sách nhân viên": "danh-sach-nhan-su",
     "➕ Thêm nhân viên": "them-nhan-vien",
-    "🏷️ Cập nhật trạng thái nhân viên": "sua-xoa-nhan-vien",
+    "🏷️ Trạng thái nhân viên": "sua-xoa-nhan-vien",
     "🔒 Khóa đăng nhập": "khoa-dang-nhap",
     "🔐 Khóa đăng ký LNP": "khoa-quyen-dang-ky",
     "🤖 Auto Check": "auto-update-phat",
@@ -24614,7 +24978,7 @@ PAGE_FEATURE_KEYS = {
     "⏰ Quản lý ca làm việc": "shift",
     "👥 Danh sách nhân viên": "staff_list",
     "➕ Thêm nhân viên": "employee_add",
-    "🏷️ Cập nhật trạng thái nhân viên": "employee_edit",
+    "🏷️ Trạng thái nhân viên": "employee_edit",
     "🔒 Khóa đăng nhập": "account_lock",
     "🔐 Khóa đăng ký LNP": "registration_lock",
     "🤖 Auto Check": "auto_penalty",
@@ -24630,7 +24994,7 @@ PAGE_FEATURE_GROUPS = {
     # Một trang có thể chứa nhiều chức năng độc lập. Chỉ cần có ít nhất một quyền
     # trong nhóm thì trang được hiện; từng section bên trong vẫn kiểm tra quyền riêng.
     "💰 Bảng lương": {"payroll", "payroll_history"},
-    "🏷️ Cập nhật trạng thái nhân viên": {"employee_edit", "employment_status", "employee_delete"},
+    "🏷️ Trạng thái nhân viên": {"employee_edit", "employment_status", "employee_delete"},
 }
 
 def has_page_access(page_name):
@@ -24682,6 +25046,21 @@ elif st.session_state.get("app_page") not in allowed_pages:
     else:
         st.session_state.app_page = ""
 selected_page = st.session_state.get("app_page", "")
+
+# V92.6.90 - báo rõ khi user đang vào một trang nhờ quyền chia sẻ form riêng.
+if st.session_state.get("current_role") != "admin" and selected_page:
+    try:
+        _shared_labels_current_v92690 = shared_input_labels_for_current_page_v92690(
+            selected_page, st.session_state.get("current_user", "")
+        )
+        if _shared_labels_current_v92690:
+            st.info(
+                "🔗 **Quyền nhập liệu được Admin chia sẻ:** "
+                + ", ".join(_shared_labels_current_v92690)
+                + ". Quyền này chỉ bổ sung đúng các thao tác nhập/lưu đã được chia sẻ; các quyền khác vẫn giữ nguyên."
+            )
+    except Exception:
+        pass
 
 
 # ==========================================================
@@ -25814,7 +26193,9 @@ def collapse_sidebar_after_navigation_once():
     <script>
     (function(){
       try {
-        const doc = window.parent.document;
+        const win = window.parent, doc = win.document;
+        // V92.6.91: Desktop luôn giữ MENU CHỨC NĂNG mở. Auto-hide chỉ áp dụng mobile.
+        if (win.matchMedia && win.matchMedia('(min-width: 769px)').matches) return;
         const clickCollapse = () => {
           const collapsedControl =
             doc.querySelector('[data-testid="collapsedControl"]')
@@ -25835,6 +26216,41 @@ def collapse_sidebar_after_navigation_once():
         };
         [60, 160, 320, 650, 1100].forEach(function(ms){ setTimeout(clickCollapse, ms); });
       } catch (e) {}
+    })();
+    </script>
+    """, height=0, width=0)
+
+
+
+def ensure_sidebar_open_on_desktop_v92691():
+    """Desktop: khi mở/rerun trang phải nhìn thấy MENU CHỨC NĂNG."""
+    components.html(r"""
+    <script>
+    (function(){
+      try {
+        const W=window.parent,D=W.document;
+        if (!W.matchMedia || !W.matchMedia('(min-width: 769px)').matches) return;
+        function isOpen(){
+          const sb=D.querySelector('[data-testid="stSidebar"]');
+          if(!sb) return false;
+          const r=sb.getBoundingClientRect();
+          return sb.offsetParent!==null && r.width>80 && r.right>80;
+        }
+        function openIt(){
+          if(isOpen()) return;
+          const candidates=[
+            D.querySelector('[data-testid="collapsedControl"] button'),
+            D.querySelector('[data-testid="collapsedControl"]'),
+            D.querySelector('[data-testid="stSidebarCollapsedControl"] button'),
+            D.querySelector('[data-testid="stSidebarCollapsedControl"]'),
+            D.querySelector('button[aria-label="Open sidebar"]'),
+            D.querySelector('button[aria-label*="sidebar" i]')
+          ].filter(Boolean);
+          const b=candidates.find(x=>!x.disabled && x.offsetParent!==null);
+          if(b) b.click();
+        }
+        [40,140,320,700].forEach(ms=>setTimeout(openIt,ms));
+      } catch(e) {}
     })();
     </script>
     """, height=0, width=0)
@@ -25939,6 +26355,7 @@ if st.session_state.current_role == "admin":
         st.sidebar.success("🟢 Hệ thống đang mở cho các tài khoản")
 
     st.sidebar.caption("🔐 Quyền nghiệp vụ vẫn được quản lý tại trang Phân quyền chức năng. Hướng dẫn sử dụng luôn hiển thị cho mọi tài khoản.")
+ensure_sidebar_open_on_desktop_v92691()
 collapse_sidebar_after_navigation_once()
 
 # --- GIAO DIỆN HEADER ---
@@ -27532,6 +27949,9 @@ elif selected_page == "⏰ Quản lý ca làm việc" and has_feature_access("sh
     _can_shift_def = action_access("shift_definition_edit")
     _can_shift_break = action_access("shift_break_config_edit")
     _can_shift_assign = action_access("shift_assignment_edit")
+    # V92.6.90: quyền kế hoạch hẹn ngày tách riêng để Admin có thể chia sẻ đúng form này
+    # mà không trao quyền sửa toàn bộ bảng phân ca. Quyền cũ shift_assignment_edit vẫn bao hàm plan.
+    _can_shift_plan = action_access("shift_plan_edit") or _can_shift_assign
     _can_shift_clear = action_access("shift_assignment_clear")
     _can_shift_pdf = action_access("shift_export_pdf")
     _can_shift_import = action_access("shift_import")
@@ -27777,7 +28197,7 @@ elif selected_page == "⏰ Quản lý ca làm việc" and has_feature_access("sh
             "💾 Lưu kế hoạch hẹn ngày",
             use_container_width=True,
             key="save_staff_plan_v92681",
-            disabled=(not _can_shift_assign),
+            disabled=(not _can_shift_plan),
         ):
             _ok_plan_v92681, _msg_plan_v92681, _pid_v92681 = append_staff_schedule_plan(
                 _plan_employee_v92681,
@@ -27834,7 +28254,7 @@ elif selected_page == "⏰ Quản lý ca làm việc" and has_feature_access("sh
                     "🗑️ Hủy kế hoạch đã chọn",
                     use_container_width=True,
                     key="cancel_staff_plan_button_v92681",
-                    disabled=(not _cancel_id_v92681 or not _can_shift_assign),
+                    disabled=(not _cancel_id_v92681 or not _can_shift_plan),
                 ):
                     _cr_v92681 = _cancelable_v92681[
                         _cancelable_v92681["ID"].astype(str).eq(str(_cancel_id_v92681))
@@ -29359,6 +29779,129 @@ elif selected_page == "🔐 Phân quyền chức năng" and st.session_state.cur
                     if ok:
                         rerun_current_view()
 
+    with st.expander("🔗 Chia sẻ riêng từng bảng nhập liệu", expanded=True):
+        st.caption(
+            "Quyền này **không thay đổi Phân quyền chức năng hiện tại**. Admin chọn đúng một bảng/form "
+            "và đúng một tài khoản; người được chia sẻ chỉ được cộng thêm quyền vào/nhập/lưu của form đó. "
+            "Các quyền Duyệt, Xóa, Export hoặc cấu hình khác không được tự động cấp."
+        )
+        _share_form_keys_v92690 = list(SHAREABLE_INPUT_FORMS_V92690.keys())
+        _share_form_v92690 = st.selectbox(
+            "Bảng nhập liệu cần chia sẻ",
+            _share_form_keys_v92690,
+            format_func=lambda k: SHAREABLE_INPUT_FORMS_V92690.get(k, {}).get("label", k),
+            key="shared_input_form_v92690",
+        )
+        _share_cfg_v92690 = SHAREABLE_INPUT_FORMS_V92690.get(_share_form_v92690, {})
+        st.info(
+            f"Trang: **{_share_cfg_v92690.get('page','')}** · "
+            f"{_share_cfg_v92690.get('scope_note','')}"
+        )
+        _share_employee_v92690 = st.selectbox(
+            "Nhân viên / tài khoản được phép nhập liệu",
+            account_options,
+            index=None,
+            placeholder="Chọn đúng một nhân viên",
+            filter_mode="contains",
+            key="shared_input_employee_v92690",
+        ) if account_options else ""
+        _shc1_v92690, _shc2_v92690 = st.columns(2)
+        with _shc1_v92690:
+            _share_start_v92690 = st.date_input(
+                "Có hiệu lực từ ngày",
+                value=get_vn_today(),
+                format="DD/MM/YYYY",
+                key="shared_input_start_v92690",
+            )
+        with _shc2_v92690:
+            _share_has_end_v92690 = st.checkbox(
+                "Có ngày hết quyền",
+                value=False,
+                key="shared_input_has_end_v92690",
+            )
+            _share_end_v92690 = None
+            if _share_has_end_v92690:
+                _share_end_v92690 = st.date_input(
+                    "Hết quyền sau ngày",
+                    value=_share_start_v92690,
+                    min_value=_share_start_v92690,
+                    format="DD/MM/YYYY",
+                    key="shared_input_end_v92690",
+                )
+        _share_note_v92690 = st.text_input(
+            "Ghi chú chia sẻ",
+            placeholder="Ví dụ: hỗ trợ nhập liệu tuần này",
+            key="shared_input_note_v92690",
+        )
+        if st.button(
+            "🔗 Chia sẻ quyền nhập + lưu",
+            use_container_width=True,
+            key="grant_shared_input_v92690",
+            disabled=not bool(_share_employee_v92690),
+        ):
+            _ok_share_v92690, _msg_share_v92690, _gid_v92690 = grant_shared_input_form_v92690(
+                _share_form_v92690,
+                _share_employee_v92690,
+                st.session_state.current_user,
+                start_date=_share_start_v92690,
+                end_date=_share_end_v92690,
+                note=_share_note_v92690,
+            )
+            (st.success if _ok_share_v92690 else st.error)(_msg_share_v92690)
+            if _ok_share_v92690:
+                reset_widget_prefixes_v92689("shared_input_")
+                rerun_current_view()
+
+        _all_shares_v92690 = load_shared_input_grants_v92690()
+        if isinstance(_all_shares_v92690, pd.DataFrame) and not _all_shares_v92690.empty:
+            _active_shares_v92690 = _all_shares_v92690[
+                _all_shares_v92690.apply(_shared_input_row_active_v92690, axis=1)
+            ].copy()
+            if not _active_shares_v92690.empty:
+                st.markdown("##### Quyền chia sẻ đang hiệu lực")
+                _share_show_cols_v92690 = [
+                    "Mã chia sẻ", "Bảng nhập liệu", "Tài khoản", "Từ ngày", "Đến ngày",
+                    "Ghi chú", "Người cấp", "Ngày cấp", "Giờ cấp",
+                ]
+                st.dataframe(
+                    _active_shares_v92690[[c for c in _share_show_cols_v92690 if c in _active_shares_v92690.columns]],
+                    hide_index=True,
+                    width="stretch",
+                    height="content",
+                )
+                _share_revoke_map_v92690 = {
+                    str(r.get("Mã chia sẻ", "")): (
+                        f"{r.get('Tài khoản','')} · {r.get('Bảng nhập liệu','')} · {r.get('Từ ngày','')}"
+                    )
+                    for _, r in _active_shares_v92690.iterrows()
+                    if str(r.get("Mã chia sẻ", "")).strip()
+                }
+                _share_revoke_id_v92690 = st.selectbox(
+                    "Chọn quyền cần thu hồi",
+                    list(_share_revoke_map_v92690.keys()),
+                    index=None,
+                    format_func=lambda x: _share_revoke_map_v92690.get(x, x),
+                    placeholder="Chọn một quyền chia sẻ",
+                    key="shared_input_revoke_select_v92690",
+                )
+                if st.button(
+                    "⛔ Thu hồi quyền chia sẻ",
+                    use_container_width=True,
+                    key="shared_input_revoke_button_v92690",
+                    disabled=not bool(_share_revoke_id_v92690),
+                ):
+                    _ok_revoke_v92690, _msg_revoke_v92690 = revoke_shared_input_grant_v92690(
+                        _share_revoke_id_v92690,
+                        st.session_state.current_user,
+                    )
+                    (st.success if _ok_revoke_v92690 else st.error)(_msg_revoke_v92690)
+                    if _ok_revoke_v92690:
+                        rerun_current_view()
+            else:
+                st.info("Chưa có quyền chia sẻ bảng nhập liệu nào đang hiệu lực.")
+        else:
+            st.info("Chưa có quyền chia sẻ bảng nhập liệu nào.")
+
     with st.expander("📋 Kiểm tra quyền hiệu lực", expanded=False):
         _audit_account = st.selectbox(
             "Tài khoản cần kiểm tra",
@@ -29466,8 +30009,8 @@ elif selected_page == "➕ Thêm nhân viên" and has_feature_access("employee_a
             st.error("Vui lòng nhập Tên đăng nhập.")
 
 
-elif selected_page == "🏷️ Cập nhật trạng thái nhân viên" and has_page_access("🏷️ Cập nhật trạng thái nhân viên"):
-    st.subheader("🏷️ Cập nhật trạng thái nhân viên")
+elif selected_page == "🏷️ Trạng thái nhân viên" and has_page_access("🏷️ Trạng thái nhân viên"):
+    st.subheader("🏷️ Trạng thái nhân viên")
 
     _current_role = str(st.session_state.current_role).strip().lower()
     _all_staff = df_credentials.copy()
@@ -31995,7 +32538,7 @@ elif selected_page == "📅 Đăng ký nghỉ phép":
                 st.caption(
                     f"Chỉ được đăng ký từ {_calendar_min_v92644.strftime('%d/%m/%Y')} đến "
                     f"{_calendar_max_v92644.strftime('%d/%m/%Y')}. "
-                    "Không được đăng ký ngày trong quá khứ."
+                    ""
                 )
 
             # Toàn bộ luồng kiểm tra/lưu phía sau vẫn dùng start_date/end_date,
@@ -33576,15 +34119,18 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
     render_leave_filter_label_css()
     # V92.6.89: màu box lọc/chọn/Calendar lấy từ cấu hình riêng, mặc định #F5A627.
     manage_today = get_vn_today()
+    _manage_filter_options_v92694 = [
+        "Hôm qua", "Hôm nay", "Ngày mai", "Tuần trước", "Tuần này", "Tuần sau",
+        "Tháng trước", "Tháng này", "Tháng sau", "Tùy chỉnh",
+    ]
+    if st.session_state.get("leave_manage_time_filter") not in _manage_filter_options_v92694:
+        st.session_state["leave_manage_time_filter"] = "Tháng này"
     mf_date, mf_name, mf_refresh = st.columns([5, 4, 2])
     with mf_date:
         manage_filter_type = st.selectbox(
             "Lọc thời gian:",
-            [
-                "Hôm qua", "Hôm nay", "Ngày mai", "Tuần trước", "Tuần này", "Tuần sau"
-                "Tháng trước", "Tháng này", "Tháng sau", "Tùy chỉnh",
-            ],
-            index=5,
+            _manage_filter_options_v92694,
+            index=7,
             key="leave_manage_time_filter",
             filter_mode="contains",
         )
@@ -33601,24 +34147,31 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
             manage_start = manage_end = manage_today - timedelta(days=1)
         elif manage_filter_type == "Hôm nay":
             manage_start = manage_end = manage_today
+        elif manage_filter_type == "Ngày mai":
+            manage_start = manage_end = manage_today + timedelta(days=1)
         elif manage_filter_type == "Tuần trước":
             _monday = manage_today - timedelta(days=manage_today.weekday())
             manage_start = _monday - timedelta(days=7)
             manage_end = manage_start + timedelta(days=6)
         elif manage_filter_type == "Tuần này":
             manage_start = manage_today - timedelta(days=manage_today.weekday())
-            manage_end = manage_today
+            manage_end = manage_start + timedelta(days=6)
+        elif manage_filter_type == "Tuần sau":
+            _monday = manage_today - timedelta(days=manage_today.weekday())
+            manage_start = _monday + timedelta(days=7)
+            manage_end = manage_start + timedelta(days=6)
         elif manage_filter_type == "Tháng trước":
             manage_end = manage_today.replace(day=1) - timedelta(days=1)
             manage_start = manage_end.replace(day=1)
         elif manage_filter_type == "Tháng này":
-            manage_start, manage_end = manage_today.replace(day=1), manage_today
-        elif manage_filter_type == "Năm trước":
-            manage_start = date(manage_today.year - 1, 1, 1)
-            manage_end = date(manage_today.year - 1, 12, 31)
-        elif manage_filter_type == "Năm này":
-            manage_start = date(manage_today.year, 1, 1)
-            manage_end = manage_today
+            manage_start = manage_today.replace(day=1)
+            _next_month = (manage_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            manage_end = _next_month - timedelta(days=1)
+        elif manage_filter_type == "Tháng sau":
+            _this_month = manage_today.replace(day=1)
+            manage_start = (_this_month.replace(day=28) + timedelta(days=4)).replace(day=1)
+            _after_next = (manage_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            manage_end = _after_next - timedelta(days=1)
         else:
             if isinstance(_manage_custom_v92689, (tuple, list)) and len(_manage_custom_v92689) >= 2:
                 manage_start, manage_end = _manage_custom_v92689[0], _manage_custom_v92689[1]

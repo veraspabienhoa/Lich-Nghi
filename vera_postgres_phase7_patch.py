@@ -11,34 +11,34 @@ The immutable V92.6.99 core is not edited. This patch:
 def apply(source: str):
     warnings = []
 
-    def patch(old, new, label):
+    def patch_all(old, new, label):
         nonlocal source
         count = source.count(old)
-        if count != 1:
-            warnings.append(f"{label}:{count}")
-            return False
-        source = source.replace(old, new, 1)
-        return True
+        if count < 1:
+            warnings.append(f"{label}:0")
+            return 0
+        source = source.replace(old, new)
+        return count
 
-    patch(
+    patch_all(
         """            if emp_role in TICHLUY_EXCLUDED_ROLES:\n                continue\n            item['__sheet_row'] = sheet_row\n            rows.append(item)""",
         """            if emp_role in TICHLUY_EXCLUDED_ROLES:\n                continue\n            item['__sheet_row'] = sheet_row\n            item['__raw_values'] = list(row)\n            item['__sheet_header'] = list(header)\n            rows.append(item)""",
         "tichluy_raw_metadata",
     )
 
-    # Rename legacy functions BEFORE injecting wrappers, otherwise the wrapper
-    # signatures would also match the rename anchors.
-    patch(
+    # The V92.6.99 core contains duplicated historical TichLuy blocks. Rename ALL
+    # legacy definitions; the last renamed definition remains the effective mirror.
+    patch_all(
         "def sync_tichluy_roles_and_stt(credentials_df=None):",
         "def _phase7_legacy_sync_tichluy_roles_and_stt(credentials_df=None):",
         "rename_tichluy_sync",
     )
-    patch(
+    patch_all(
         "def ensure_employee_in_tichluy(employee_name, start_work_date=None):",
         "def _phase7_legacy_ensure_employee_in_tichluy(employee_name, start_work_date=None):",
         "rename_tichluy_ensure",
     )
-    patch(
+    patch_all(
         "def record_tichluy_contributions(payroll_df, start_date, end_date):",
         "def _phase7_legacy_record_tichluy_contributions(payroll_df, start_date, end_date):",
         "rename_tichluy_contributions",
@@ -370,9 +370,10 @@ def record_tichluy_contributions(payroll_df, start_date, end_date):
 
 '''
 
-    if source.count(helper_anchor) != 1:
-        warnings.append(f"tichluy_wrapper_anchor:{source.count(helper_anchor)}")
+    anchor_pos = source.rfind(helper_anchor)
+    if anchor_pos < 0:
+        warnings.append("tichluy_wrapper_anchor:0")
     else:
-        source = source.replace(helper_anchor, helper_block + "\n" + helper_anchor, 1)
+        source = source[:anchor_pos] + helper_block + "\n" + source[anchor_pos:]
 
     return source, warnings

@@ -1,8 +1,9 @@
 """Vera Spa PostgreSQL Phase 7: PostgreSQL-first TichLuy writes.
 
-TichLuy is stored as a full DataFrame in the Phase-2 durable PostgreSQL dataset
-so custom/user-added columns are preserved. Existing Sheet mutations are kept
-as a synchronous mirror. PostgreSQL is written first and compensated to the
+TichLuy is stored as a full DataFrame in the Phase-2 durable PostgreSQL dataset.
+The core loader keeps canonical business columns plus raw Sheet row/header metadata
+so user-added columns are preserved across the cutover. Existing Sheet mutations
+remain a synchronous mirror. PostgreSQL is written first and compensated to the
 previous snapshot if the mirror fails.
 
 Set VERA_PHASE7_TICHLUY_WRITE_BACKEND=sheets for immediate rollback.
@@ -127,9 +128,12 @@ def _mirror_failed(result: Any) -> bool:
 
 
 def commit(vpg, new_df: pd.DataFrame, mirror_fn: Callable[[], Any], operation: str = "update"):
-    """Write full TichLuy snapshot to PostgreSQL, then mirror Sheets.
+    """Write full TichLuy snapshot to PostgreSQL first, then mirror Sheets.
 
-    On mirror failure, restore the previous durable PostgreSQL snapshot.
+    Legacy mirror functions invalidate dataset caches after changing Sheets. Therefore
+    the same PostgreSQL snapshot is promoted once more after a successful mirror so
+    the durable row finishes current/non-stale. If mirror fails, the previous snapshot
+    is restored.
     """
     if not is_active(vpg):
         return mirror_fn()
@@ -153,9 +157,19 @@ def commit(vpg, new_df: pd.DataFrame, mirror_fn: Callable[[], Any], operation: s
                 source_system="postgres_primary",
             )
             _event(vpg, "phase7_pg_primary_write", f"{operation}; rows={len(new_df)}")
+
             result = mirror_fn()
             if _mirror_failed(result):
                 raise Phase7MirrorError(f"Google Sheets TichLuy mirror returned failure for {operation}")
+
+            # Mirror may have called vpg.invalidate_dataset('tichluy'). Re-promote the
+            # already-committed intended snapshot so normal reads remain PostgreSQL-primary.
+            vpg.write_primary_dataset(
+                DATASET_KEY,
+                new_df,
+                source_version="phase7_mirror_confirmed",
+                source_system="postgres_primary",
+            )
             _event(vpg, "phase7_sheet_mirror_ok", f"{operation}; rows={len(new_df)}")
             return result
         except Exception as exc:

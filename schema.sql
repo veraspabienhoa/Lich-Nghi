@@ -1,6 +1,7 @@
 -- Vera Spa PostgreSQL schema (Cloud SQL for PostgreSQL)
--- V75 safe-migration foundation. The app currently uses vera_dataset_cache as the
--- cross-instance read layer while Google Sheets remains write-through backup.
+-- V92.7.0 Phase 2 safe-migration foundation.
+-- Google Sheets remains write-through/fallback during dual mode while PostgreSQL
+-- stores durable primary snapshots for a controlled cutover.
 
 CREATE TABLE IF NOT EXISTS vera_dataset_cache (
     dataset_key TEXT PRIMARY KEY,
@@ -13,6 +14,26 @@ CREATE TABLE IF NOT EXISTS vera_dataset_cache (
 );
 CREATE INDEX IF NOT EXISTS idx_vera_dataset_cache_expires
     ON vera_dataset_cache(expires_at);
+
+-- Phase 2 durable dataset store. Unlike vera_dataset_cache, rows here do not
+-- expire by TTL. Existing app invalidation calls mark the matching dataset stale;
+-- dual/postgres mode then reconciles it from the current source loader.
+CREATE TABLE IF NOT EXISTS vera_primary_dataset (
+    dataset_key TEXT PRIMARY KEY,
+    payload JSONB NOT NULL DEFAULT '[]'::jsonb,
+    row_count INTEGER NOT NULL DEFAULT 0,
+    checksum TEXT NOT NULL DEFAULT '',
+    source_version TEXT NOT NULL DEFAULT '',
+    source_system TEXT NOT NULL DEFAULT 'google_sheets',
+    revision BIGINT NOT NULL DEFAULT 1,
+    is_stale BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_vera_primary_dataset_updated
+    ON vera_primary_dataset(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_vera_primary_dataset_stale
+    ON vera_primary_dataset(is_stale, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS vera_sync_event (
     id BIGSERIAL PRIMARY KEY,

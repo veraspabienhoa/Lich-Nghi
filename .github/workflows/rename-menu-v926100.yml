@@ -1,17 +1,15 @@
-# Trigger after workflow exists on main
 name: Rename VERA menu labels
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/rename-menu-v926100.yml'
+  issues:
+    types: [opened]
 
 permissions:
   contents: write
 
 jobs:
   rename:
+    if: github.event.issue.title == 'APPLY_VERA_V92_6_100'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,11 +40,8 @@ jobs:
           if old not in s:
               raise SystemExit('ERROR: menu display mapping marker not found')
           s = s.replace(old, new, 1)
-
           first, rest = s.split('\n', 1)
-          first = '# V92.6.100 - Doi ten nhan MENU hien thi Desktop/Mobile (2026-08-23)'
-          s = first + '\n' + rest
-
+          s = '# V92.6.100 - Doi ten nhan MENU hien thi Desktop/Mobile (2026-08-23)\n' + rest
           p.write_text(s, encoding='utf-8', newline='\n')
           PY
 
@@ -68,15 +63,17 @@ jobs:
             '"⏰ Quản lý ca làm việc": "⏰ Quản lý ca"',
             '"🏷️ Trạng thái nhân viên": "🏷️ Trạng thái NV"',
             '"🔐 Khóa đăng ký LNP": "🔐 Khóa đăn ký"',
+            'SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"',
+            'SHEET_DU_PHONG_ID = "1Kz0aw-JatptAN9G7YSwZ6rJO09urOPaD-rS-18eZSY0"',
           ]
           missing = [x for x in required if x not in s]
           if missing:
-              raise SystemExit('Missing menu labels: ' + repr(missing))
-          print('menu label validation OK')
+              raise SystemExit('Missing expected markers: ' + repr(missing))
+          print('V92.6.100 validation OK')
           PY
           git diff --check
 
-      - name: Commit to main and remove workflow
+      - name: Commit directly to main and remove one-time workflow
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'

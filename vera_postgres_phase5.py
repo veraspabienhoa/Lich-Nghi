@@ -320,6 +320,17 @@ def install(vpg) -> bool:
                 wait_seconds=wait_seconds,
             )
 
+        if force_refresh:
+            fresh = original_load_dataset(
+                dataset_key,
+                source_loader,
+                ttl_seconds=ttl_seconds,
+                force_refresh=True,
+                wait_seconds=wait_seconds,
+            )
+            _event(vpg, dataset_key, "phase5_explicit_source_refresh", f"rows={len(fresh) if isinstance(fresh, pd.DataFrame) else 0}")
+            return fresh
+
         try:
             pg_df = _normalized_read(vpg, dataset_key)
             state = _state_row(vpg, dataset_key)

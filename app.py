@@ -33581,8 +33581,8 @@ elif selected_page == "✏️ Quản lý lịch nghỉ":
         manage_filter_type = st.selectbox(
             "Lọc thời gian:",
             [
-                "Hôm qua", "Hôm nay", "Tuần trước", "Tuần này",
-                "Tháng trước", "Tháng này", "Năm trước", "Năm này", "Tùy chỉnh",
+                "Hôm qua", "Hôm nay", "Ngày mai", "Tuần trước", "Tuần này", "Tuần sau"
+                "Tháng trước", "Tháng này", "Tháng sau", "Tùy chỉnh",
             ],
             index=5,
             key="leave_manage_time_filter",

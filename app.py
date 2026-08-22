@@ -18,7 +18,7 @@ _new_menu_map_v926101 = '''_MENU_DISPLAY_LABELS_V92699 = {
     "🏖️ Phép năm - Làm đẹp": "🏖️ Phép năm",
     "⏰ Quản lý ca làm việc": "⏰ Quản lý ca",
     "🏷️ Trạng thái nhân viên": "🏷️ Trạng thái NV",
-    "🔐 Khóa đăng ký LNP": "🔐 Khóa đăn ký",
+    "🔐 Khóa đăng ký LNP": "🔐 Khóa đăng ký",
     "🧾 Log Book": "Log Book",
 }'''
 
@@ -30,6 +30,7 @@ _source_v926101 = _source_v926101.replace(
     _new_menu_map_v926101,
     1,
 )
+_source_v926101 = _source_v926101.replace("MENU CHỨC NĂNG", "MENU")
 _first_line_v926101, _sep_v926101, _rest_v926101 = _source_v926101.partition("\n")
 _source_v926101 = (
     "# V92.6.101 - Sua chinh ta nhan MENU: Dang ky nghi (2026-08-23)\n"

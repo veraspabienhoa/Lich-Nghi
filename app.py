@@ -1,4 +1,4 @@
-# V92.6.95 - Bo loc Quan ly lich nghi them Ngay mai/Tuan sau/Thang sau (2026-08-22)
+# V92.6.97 - Them nhan vien: nhap va luu Ngay bat dau lam cung ho so (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -10516,6 +10516,91 @@ def build_staff_list_dataframe(credentials_df, include_inactive=False):
     d = d.sort_values(['_staff_role_rank', '_staff_name_sort'], kind='stable')
     return d[STAFF_EXPORT_COLUMNS].reset_index(drop=True)
 
+
+
+def delete_employee_accounts_v92696(employee_names, actor_username=""):
+    """Xóa một/nhiều tài khoản nhân viên khỏi Sheet1; giữ nguyên lịch sử lịch nghỉ."""
+    try:
+        raw_names = employee_names if isinstance(employee_names, (list, tuple, set, pd.Series)) else [employee_names]
+        names = []
+        seen = set()
+        for value in raw_names:
+            name = str(value or "").strip()
+            key = normalize_login_name(name)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+        if not names:
+            return False, "Chưa chọn nhân viên cần xóa."
+
+        actor_key = normalize_login_name(actor_username)
+        selected_keys = {normalize_login_name(x) for x in names}
+        if actor_key and actor_key in selected_keys:
+            return False, "Không thể xóa tài khoản đang đăng nhập. Hãy bỏ chọn tài khoản hiện tại."
+        if normalize_login_name("Quan Tri Vien") in selected_keys:
+            return False, "Không thể xóa tài khoản hệ thống Quản Trị Viên."
+
+        client = get_gspread_client()
+        if not client:
+            return False, "Chưa cấu hình quyền kết nối Google Sheets."
+        ss = client.open_by_key(SHEET_MAT_KHAU_ID)
+        sheet_mk = ss.get_worksheet(0)
+        values = _gs_call_with_backoff(sheet_mk.get_all_values)
+        if not values or len(values) < 2:
+            return False, "Sheet1 chưa có dữ liệu nhân viên."
+
+        row_by_key = {}
+        display_by_key = {}
+        for row_idx, row in enumerate(values[1:], start=2):
+            name = str(row[1]).strip() if len(row) > 1 else ""
+            key = normalize_login_name(name)
+            if key:
+                row_by_key[key] = row_idx
+                display_by_key[key] = name
+
+        missing = [x for x in names if normalize_login_name(x) not in row_by_key]
+        target_rows = sorted(
+            {row_by_key[normalize_login_name(x)] for x in names if normalize_login_name(x) in row_by_key},
+            reverse=True,
+        )
+        if not target_rows:
+            return False, "Không tìm thấy nhân viên đã chọn trong Sheet1."
+
+        requests = [
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_mk.id,
+                        "dimension": "ROWS",
+                        "startIndex": row_idx - 1,
+                        "endIndex": row_idx,
+                    }
+                }
+            }
+            for row_idx in target_rows
+        ]
+        _gs_call_with_backoff(ss.batch_update, {"requests": requests})
+        renumber_credential_sheet_stt(sheet_mk)
+
+        try:
+            load_credentials.clear()
+            load_credentials_recent.clear()
+        except Exception:
+            pass
+        _clear_dynamic_data_caches()
+        tl_ok, tl_msg = sync_tichluy_roles_and_stt()
+        _clear_dynamic_data_caches()
+
+        deleted = [display_by_key.get(normalize_login_name(x), x) for x in names if normalize_login_name(x) in row_by_key]
+        msg = f"Đã xóa {len(deleted)} nhân viên: " + ", ".join(deleted)
+        if missing:
+            msg += " | Không tìm thấy: " + ", ".join(missing)
+        if not tl_ok:
+            msg += f" | Cần kiểm tra lại TichLuy: {tl_msg}"
+        return True, msg
+    except Exception as e:
+        return False, f"Lỗi xóa nhân viên: {e}"
 
 def staff_list_to_excel(df):
     """Export Danh sách nhân viên với dropdown Phân quyền/Trạng thái để có thể sửa rồi import lại."""
@@ -29332,41 +29417,111 @@ elif selected_page == "👥 Danh sách nhân viên" and has_feature_access("staf
     cols_staff = [c for c in STAFF_EXPORT_COLUMNS if c in staff_source_df.columns]
     _staff_role_now_v92689 = str(st.session_state.get("current_role", "")).strip().lower()
     if _staff_role_now_v92689 == "admin":
-        _staff_editor_source_v92689 = staff_source_df[cols_staff].copy().reset_index(drop=True)
-        _staff_editor_cfg_v92689 = {
+        # V92.6.96 - cot Chon luon la cot dau tien; chi Admin moi co cot nay va nut xoa.
+        _staff_editor_source_v92696 = staff_source_df[cols_staff].copy().reset_index(drop=True)
+        _staff_editor_source_v92696.insert(0, "Chọn", False)
+        _staff_editor_cfg_v92696 = {
+            "Chọn": st.column_config.CheckboxColumn(
+                "Chọn", help="Đánh dấu nhân viên cần xóa.", default=False, required=True
+            ),
             "Tên nhân viên": st.column_config.TextColumn("Tên nhân viên", disabled=True),
             "Phân quyền": st.column_config.SelectboxColumn("Phân quyền", options=ALL_ACCOUNT_ROLES, required=True),
             "Trạng thái làm việc": st.column_config.SelectboxColumn(
                 "Trạng thái làm việc", options=EMPLOYMENT_STATUS_OPTIONS, required=True
             ),
             "Ngày bắt đầu làm": st.column_config.TextColumn(
-                "Ngày bắt đầu làm", help="DD/MM/YYYY · dùng để kiểm tra điều kiện đủ 3 tháng tạo đơn."
+                "Ngày bắt đầu làm", help="DD/MM/YYYY · lưu ở Danh sach nhan vien_mat khau > Sheet1 > cột U."
             ),
             "Ngày sinh": st.column_config.TextColumn("Ngày sinh", help="DD/MM/YYYY"),
             "Ngày bắt đầu ca": st.column_config.TextColumn("Ngày bắt đầu ca", help="DD/MM/YYYY"),
             "Khóa đăng nhập": st.column_config.SelectboxColumn("Khóa đăng nhập", options=["", "KHÓA"]),
         }
-        _staff_editor_v92689 = st.data_editor(
-            _staff_editor_source_v92689, width="stretch", height="content", hide_index=True,
-            num_rows="fixed", key="staff_list_direct_editor_v92689",
-            row_height=layout_row_height("staff_list"), column_config=_staff_editor_cfg_v92689,
+        _staff_editor_v92696 = st.data_editor(
+            _staff_editor_source_v92696,
+            column_order=["Chọn"] + cols_staff,
+            width="stretch", height="content", hide_index=True,
+            num_rows="fixed", key="staff_list_direct_editor_v92696",
+            row_height=layout_row_height("staff_list"), column_config=_staff_editor_cfg_v92696,
         )
-        if st.button(
-            "💾 Lưu thay đổi trực tiếp vào hồ sơ nhân viên", use_container_width=True,
-            type="primary", key="staff_list_direct_save_v92689"
-        ):
-            _ok_staff_v92689, _msg_staff_v92689 = batch_import_staff_list(
-                _staff_editor_v92689, st.session_state.current_user, "admin"
-            )
-            (st.success if _ok_staff_v92689 else st.error)(_msg_staff_v92689)
-            if _ok_staff_v92689:
-                reset_widget_keys_v92689(
-                    "staff_list_name_filter_v92683", "staff_list_role_filter_v92683",
-                    "staff_list_status_filter_v92683", "staff_list_direct_editor_v92689",
-                    "import_staff_list_file"
+
+        _selected_staff_v92696 = []
+        if isinstance(_staff_editor_v92696, pd.DataFrame) and "Chọn" in _staff_editor_v92696.columns:
+            _selected_staff_v92696 = _staff_editor_v92696.loc[
+                _staff_editor_v92696["Chọn"].fillna(False).astype(bool), "Tên nhân viên"
+            ].astype(str).str.strip().tolist()
+
+        _save_col_v92696, _delete_col_v92696 = st.columns([2, 1])
+        with _save_col_v92696:
+            if st.button(
+                "💾 Lưu thay đổi trực tiếp vào hồ sơ nhân viên", use_container_width=True,
+                type="primary", key="staff_list_direct_save_v92696"
+            ):
+                _ok_staff_v92696, _msg_staff_v92696 = batch_import_staff_list(
+                    _staff_editor_v92696[cols_staff], st.session_state.current_user, "admin"
                 )
-                rerun_current_view()
-        staff_df = _staff_editor_source_v92689
+                (st.success if _ok_staff_v92696 else st.error)(_msg_staff_v92696)
+                if _ok_staff_v92696:
+                    reset_widget_keys_v92689(
+                        "staff_list_name_filter_v92683", "staff_list_role_filter_v92683",
+                        "staff_list_status_filter_v92683", "staff_list_direct_editor_v92696",
+                        "import_staff_list_file"
+                    )
+                    rerun_current_view()
+        with _delete_col_v92696:
+            st.caption(f"Đã chọn: {len(_selected_staff_v92696)}")
+            _can_delete_selected_v92696 = bool(
+                _selected_staff_v92696
+                and has_feature_access("employee_delete")
+                and action_access("employee_delete_confirm")
+            )
+            if st.button(
+                "🗑️ Xóa nhân viên đã chọn",
+                use_container_width=True,
+                key="staff_list_delete_selected_v92696",
+                disabled=not _can_delete_selected_v92696,
+            ):
+                st.session_state["staff_list_delete_pending_v92696"] = list(_selected_staff_v92696)
+
+        _pending_delete_v92696 = st.session_state.get("staff_list_delete_pending_v92696", []) or []
+        if _pending_delete_v92696:
+            st.warning(
+                "Bạn sắp xóa tài khoản: " + ", ".join(map(str, _pending_delete_v92696)) +
+                ". Lịch sử lịch nghỉ đã phát sinh không bị xóa."
+            )
+            _confirm_delete_v92696 = st.checkbox(
+                "Tôi xác nhận xóa các nhân viên đã chọn",
+                key="staff_list_delete_confirm_v92696",
+            )
+            _dc1_v92696, _dc2_v92696 = st.columns(2)
+            with _dc1_v92696:
+                if st.button(
+                    "✅ Xác nhận xóa",
+                    use_container_width=True,
+                    type="primary",
+                    key="staff_list_delete_confirm_button_v92696",
+                    disabled=not bool(_confirm_delete_v92696),
+                ):
+                    _ok_del_v92696, _msg_del_v92696 = delete_employee_accounts_v92696(
+                        _pending_delete_v92696, st.session_state.current_user
+                    )
+                    (st.success if _ok_del_v92696 else st.error)(_msg_del_v92696)
+                    if _ok_del_v92696:
+                        st.session_state.pop("staff_list_delete_pending_v92696", None)
+                        reset_widget_keys_v92689(
+                            "staff_list_delete_confirm_v92696", "staff_list_direct_editor_v92696",
+                            "staff_list_name_filter_v92683", "staff_list_role_filter_v92683",
+                            "staff_list_status_filter_v92683",
+                        )
+                        rerun_current_view()
+            with _dc2_v92696:
+                if st.button(
+                    "Hủy xóa", use_container_width=True,
+                    key="staff_list_delete_cancel_v92696",
+                ):
+                    st.session_state.pop("staff_list_delete_pending_v92696", None)
+                    reset_widget_keys_v92689("staff_list_delete_confirm_v92696")
+                    rerun_current_view()
+        staff_df = _staff_editor_v92696
     else:
         staff_df, staff_widths = apply_table_layout_df(staff_source_df[cols_staff], "staff_list")
         st.dataframe(
@@ -29943,6 +30098,13 @@ elif selected_page == "➕ Thêm nhân viên" and has_feature_access("employee_a
             format="DD/MM/YYYY",
             key="new_emp_dob",
         )
+        new_start_work_date = st.date_input(
+            "Ngày bắt đầu làm",
+            value=get_vn_today(),
+            format="DD/MM/YYYY",
+            key="new_emp_start_work_date",
+            help="Ngày này được lưu cùng hồ sơ nhân viên tại Sheet1 cột U.",
+        )
         new_phone = st.text_input("Số điện thoại", key="new_emp_phone")
         new_email = st.text_input("Email", key="new_emp_email")
     with col2:
@@ -29967,7 +30129,7 @@ elif selected_page == "➕ Thêm nhân viên" and has_feature_access("employee_a
                         if new_dob is not None
                         else ""
                     )
-                    start_work_date = get_vn_today()
+                    start_work_date = new_start_work_date or get_vn_today()
                     ensure_credential_control_columns()
                     row_data = [
                         stt_new, new_usr, str(new_pwd), new_role, new_fn, new_dob_text, new_phone, new_email, new_address,
@@ -29993,9 +30155,9 @@ elif selected_page == "➕ Thêm nhân viên" and has_feature_access("employee_a
                     _clear_dynamic_data_caches()
 
                     if tl_ok and stt_ok and tl_sync_ok:
-                        extra = f" · Ngày bắt đầu làm {start_work_date.strftime('%d/%m/%Y')}" if role_new not in TICHLUY_EXCLUDED_ROLES else ""
+                        start_note = f" · Ngày bắt đầu làm {start_work_date.strftime('%d/%m/%Y')}"
                         dob_note = f" · Ngày sinh {new_dob_text}" if new_dob_text else ""
-                        st.success(f"Đã thêm thành công: {new_usr}{dob_note}{extra} · đã sắp xếp lại STT Sheet1/TichLuy.")
+                        st.success(f"Đã thêm thành công: {new_usr}{dob_note}{start_note} · đã sắp xếp lại STT Sheet1/TichLuy.")
                         reset_widget_prefixes_v92689("new_emp_", "new_employee_")
                         rerun_current_view()
                     else:
@@ -30112,21 +30274,13 @@ elif selected_page == "🏷️ Trạng thái nhân viên" and has_page_access("�
         confirm_del = st.checkbox("Tôi xác nhận xóa tài khoản đã chọn", key="confirm_delete_employee")
         if st.button("Xác nhận xóa", use_container_width=True, disabled=(not action_access("employee_delete_confirm")) or (not bool(del_usr and confirm_del))):
             if del_usr:
-                try:
-                    client = get_gspread_client()
-                    sheet_mk = client.open_by_key(SHEET_MAT_KHAU_ID).get_worksheet(0)
-                    cells = sheet_mk.findall(del_usr, in_column=2)
-                    if cells:
-                        sheet_mk.delete_rows(cells[0].row)
-                        renumber_credential_sheet_stt(sheet_mk)
-                        try: load_credentials.clear()
-                        except Exception: pass
-                        sync_tichluy_roles_and_stt()
-                        _clear_dynamic_data_caches()
-                        st.success(f"Đã xóa nhân viên: {del_usr} · đã sắp xếp lại STT Sheet1/TichLuy.")
-                        rerun_current_view()
-                except Exception as e:
-                    st.error(f"Lỗi xóa: {e}")
+                _ok_del_legacy_v92696, _msg_del_legacy_v92696 = delete_employee_accounts_v92696(
+                    [del_usr], st.session_state.current_user
+                )
+                (st.success if _ok_del_legacy_v92696 else st.error)(_msg_del_legacy_v92696)
+                if _ok_del_legacy_v92696:
+                    reset_widget_keys_v92689("delete_employee_select", "confirm_delete_employee")
+                    rerun_current_view()
 
 elif selected_page == "🔒 Khóa đăng nhập" and has_feature_access("account_lock"):
     st.markdown("### 🔒 Khóa / mở khóa đăng nhập")

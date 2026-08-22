@@ -1,4 +1,4 @@
-# V92.6.94 - Bo loc Quan ly lich nghi them Ngay mai/Tuan sau/Thang sau (2026-08-22)
+# V92.6.95 - Bo loc Quan ly lich nghi them Ngay mai/Tuan sau/Thang sau (2026-08-22)
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -2840,8 +2840,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- KẾT NỐI GSPREAD ---
-SHEET_MAT_KHAU_ID = "1DGXy3kPyMPwtz-3CnG8i6BiQbXFDApasoXVFzSmUe24"
-SHEET_DU_PHONG_ID = "1Kz0aw-JatptAN9G7YSwZ6rJO09urOPaD-rS-18eZSY0"
+SHEET_MAT_KHAU_ID = "1NCMm2RApdukIiqAma7OF1E_8cq9yTjeK3k7JbMfgSoU"
+SHEET_DU_PHONG_ID = "1udft7erC-VxpjAa97TyD6KMVlDYBxEd-hsD7Bd_zLnE"
 
 # V92.6.22 - SHEET1 LỊCH NGHỈ: A:M là phạm vi vật lý, vị trí nghiệp vụ lấy từ HEADER.
 # KHÔNG còn quy ước cột E phải trống.

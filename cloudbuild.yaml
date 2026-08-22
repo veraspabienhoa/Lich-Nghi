@@ -1,15 +1,4 @@
 steps:
-  # ============================================================
-  # VERA SPA - GUARANTEE NEW GOOGLE SHEET IDs BEFORE BUILD
-  # Chạy script đã có trong repo để thay toàn bộ ID cũ trong các file .py
-  # trước khi Docker build. Nhờ đó Web App + Auto Check + Cloud Run Jobs
-  # luôn dùng cùng 2 Google Sheet mới.
-  # ============================================================
-  - name: "python:3.11-slim"
-    entrypoint: "python"
-    args:
-      - "fix_vera_google_sheet_ids.py"
-
   - name: "gcr.io/cloud-builders/docker"
     args:
       - "build"

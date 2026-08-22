@@ -1,7 +1,7 @@
-# V92.14.0 - PostgreSQL Phase 9 default cutover + Phase 8/7/6/5/4 (2026-08-23)
-"""VERA SPA V92.14.0.
+# V92.15.0 - PostgreSQL Phase 10 control settings + Phase 9/8/7/6/5/4 (2026-08-23)
+"""VERA SPA V92.15.0.
 
-Giữ nguyên V92.6.99, MENU V92.6.101 và PostgreSQL Phase 2/3/4/5/6/7/8.
+Giữ nguyên V92.6.99, MENU V92.6.101 và PostgreSQL Phase 2/3/4/5/6/7/8/9.
 Phase 4: CRUD Nhân viên + Lịch nghỉ ghi PostgreSQL trước, Google Sheets mirror.
 Phase 5: credentials + leave_primary đọc PostgreSQL normalized làm nguồn chính.
 Phase 6: TichLuy + NoViPham + PayrollHistory đọc PostgreSQL durable làm nguồn chính.
@@ -12,6 +12,8 @@ Phase 9: khi PostgreSQL đã cấu hình và VERA_DATA_BACKEND chưa được đ
 5 dataset nghiệp vụ đã migrate mặc định chạy ở chế độ postgres thay vì dual.
 Các sheet cấu hình/UI/maintenance chưa migrate vẫn giữ nguyên đường Google Sheets
 trực tiếp của core và không bị thay đổi bởi cutover dataset này.
+Phase 10: khóa đăng ký theo vai trò, Auto Check RUNNING/PAUSED và cấu hình
+giờ/ngưỡng nghỉ giữa ca đọc PostgreSQL-primary, ghi PostgreSQL trước rồi mirror Sheets.
 
 Rollback tức thời:
 - VERA_DATA_BACKEND=dual             -> quay 5 dataset về chế độ chuyển tiếp.
@@ -21,6 +23,7 @@ Rollback tức thời:
 - VERA_PHASE6_READ_BACKEND=sheets    -> read-path TichLuy/Nợ/Lương về Sheets.
 - VERA_PHASE7_TICHLUY_WRITE_BACKEND=sheets -> write-path TichLuy về Sheets.
 - VERA_PHASE8_WRITE_BACKEND=sheets   -> write-path NoViPham/PayrollHistory về Sheets.
+- VERA_PHASE10_SETTINGS_BACKEND=sheets -> 3 cấu hình điều khiển Phase 10 về Sheets.
 
 Route, PAGE_FEATURE_KEYS, PAGE_SLUGS, phân quyền, giao diện và nghiệp vụ không đổi.
 Hai Google Sheet cũ và ID của chúng không bị thay đổi.
@@ -90,6 +93,14 @@ if _vpg_runtime is not None:
         pass
 
 
+if _vpg_runtime is not None:
+    try:
+        from vera_postgres_phase10 import install as _install_vpg_phase10
+        _install_vpg_phase10(_vpg_runtime)
+    except Exception:
+        pass
+
+
 def _phase4_call(method, mirror_fn, *args, **kwargs):
     fn = getattr(_vpg_runtime, method, None) if _vpg_runtime is not None else None
     if callable(fn):
@@ -145,6 +156,13 @@ try:
 except Exception as _phase8_patch_error_v92130:
     _phase8_patch_warnings_v92130 = [f"patch_module:{type(_phase8_patch_error_v92130).__name__}"]
 
+_phase10_patch_warnings_v92130 = []
+try:
+    from vera_postgres_phase10_patch import apply as _apply_phase10_patches
+    _source_v92130, _phase10_patch_warnings_v92130 = _apply_phase10_patches(_source_v92130)
+except Exception as _phase10_patch_error_v92130:
+    _phase10_patch_warnings_v92130 = [f"patch_module:{type(_phase10_patch_error_v92130).__name__}"]
+
 # Existing V92.6.101 display-only MENU patch.
 _old_menu_map_v92130 = '_MENU_DISPLAY_LABELS_V92699 = {"🧾 Log Book": "Log Book"}'
 _new_menu_map_v92130 = """_MENU_DISPLAY_LABELS_V92699 = {
@@ -165,7 +183,7 @@ else:
 _source_v92130 = _source_v92130.replace("MENU CHỨC NĂNG", "MENU")
 _first_line_v92130, _sep_v92130, _rest_v92130 = _source_v92130.partition("\n")
 _source_v92130 = (
-    "# V92.14.0 - PostgreSQL Phase 9 default cutover + Phase 8/7/6/5/4 (2026-08-23)\n"
+    "# V92.15.0 - PostgreSQL Phase 10 control settings + Phase 9/8/7/6/5/4 (2026-08-23)\n"
     + _rest_v92130
 )
 
@@ -195,6 +213,16 @@ if _phase8_patch_warnings_v92130 and _vpg_runtime is not None:
             "phase8",
             "phase8_patch_warning",
             ",".join(_phase8_patch_warnings_v92130)[:1800],
+        )
+    except Exception:
+        pass
+
+if _phase10_patch_warnings_v92130 and _vpg_runtime is not None:
+    try:
+        _vpg_runtime.record_event(
+            "phase10",
+            "phase10_patch_warning",
+            ",".join(_phase10_patch_warnings_v92130)[:1800],
         )
     except Exception:
         pass
